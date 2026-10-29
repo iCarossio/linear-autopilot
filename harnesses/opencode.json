@@ -1,0 +1,43 @@
+{
+  "name": "opencode",
+  "binary": "opencode",
+  "vendor": "by_model",
+  "doc": "opencode: free models (opencode/*-free), OpenCode Go subscription (opencode-go/*), OpenRouter (openrouter/* :free ids only unless the account has credits). --standalone keeps the run in our process group (the background service keeps ghost sessions alive otherwise). Accounts: XDG_DATA_HOME selects the data directory that holds opencode's auth.json (~/.local/share/opencode/auth.json), so a second account lives in ~/.local/share-b (standard <default>-<letter>); config (~/.config/opencode) stays shared.",
+  "run": {
+    "argv": [
+      "run",
+      "--standalone",
+      "-m",
+      "{model}",
+      "--agent",
+      "build",
+      "{prompt}"
+    ],
+    "env": {
+      "OPENCODE_PERMISSION": "{\"*\":\"allow\"}"
+    },
+    "output": "stdout"
+  },
+  "account_env": "XDG_DATA_HOME",
+  "account_default": "~/.local/share",
+  "list_models": {
+    "kind": "command",
+    "argv": [
+      "models"
+    ],
+    "regex": "^\\s*(\\S+/\\S+)\\s*$"
+  },
+  "usage": {
+    "kind": "none",
+    "note": "limits only in the interactive /usage; the reset time in the quota error is parsed by run-model"
+  },
+  "quota_patterns": [
+    "usage limit",
+    "Free usage limit reached",
+    "Go usage limit exceeded"
+  ],
+  "account_detect": "~/.local/share-[a-z]",
+  "account_login": {
+    "file": "opencode/auth.json"
+  }
+}

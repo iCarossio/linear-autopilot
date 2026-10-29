@@ -1,0 +1,14 @@
+{
+  "name": "vibe",
+  "binary": "vibe",
+  "vendor": "mistral",
+  "doc": "Mistral Vibe: account default model, no model flag, no local sandbox (the two flags below are full access). Small free tier: mostly a reviewer from another vendor.",
+  "run": {
+    "argv": ["-p", "{prompt}", "--auto-approve", "--trust"],
+    "env": {},
+    "output": "stdout"
+  },
+  "list_models": {"kind": "none"},
+  "usage": {"kind": "none", "note": "interactive /usage only"},
+  "quota_patterns": ["quota", "rate limit"]
+}

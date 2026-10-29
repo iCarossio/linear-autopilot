@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.autopilot/
+.tmp/
+.DS_Store

@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""linear-autopilot model runner. Keeps the coordinator's context small: it runs another
+model's CLI, stores the full output in a file and prints ONE json line.
+
+  run-model run <implement|review> <brief.md> <out.md> [--cwd DIR] [--issue ID | --standalone] [--exclude-vendor V[,V]] [--allow-mid]
+                [--model KEY | --prefer KEY] [--pool NAME | --escalate] [--no-fallback]
+  run-model smoke <KEY>                 # tiny prompt, checks the model answers
+  run-model discover [--apply]          # find newer models of the same family/tier (see the run skill, "Self-update")
+  run-model health                      # show cooldowns
+  run-model reset <KEY>                 # clear a cooldown
+  run-model wait <POOL> [EXCLUDE,...]   # block until a model of the pool is healthy (sleeps to the earliest cooldown end), print its key
+  run-model usage [--apply]             # exact quota + reset times per harness and account; --apply cools exhausted models until their reset
+  run-model vendor <KEY>                # vendor of a roster key (anthropic, openai, ...), for reviewer diversity
+
+Hard rules enforced here:
+- every implementer dispatched for a ticket is recorded in state.json `implementers[<ISSUE>]` BEFORE it runs (even if it
+  later times out: it may have edited files), with the issue from --issue or the brief name `<ISSUE>-impl-<n>.md`;
+- a review run needs a ticket identity (--issue, or brief `<ISSUE>-review|plan|diag-...`, inside a project) or --standalone
+  (a pre-mortem or a repo-level review with its own exclusions); it never uses a recorded implementer, nor any key running
+  the same underlying model on another account or harness, nor a vendor given by --exclude-vendor, whatever --model /
+  --prefer / fallbacks say (status `excluded`, exit 4);
+- a plan review (--pool plan_review|premortem, or a brief `<ISSUE>-plan-...`) is a review of the planner's work: the planner's
+  vendor and identity are excluded (state.json `coordinator`, or --exclude-vendor), and only `cost: high` models may run it
+  (--allow-mid, or ALLOW_MID=1, adds `mid` as a documented degraded mode).
+
+Roster, accounts and health: $AUTOPILOT_CONFIG_DIR/models.json. CLI invocation: harnesses/<cli>.json adapters.
+"""
+import datetime as dt, glob, json, os, re, shutil, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+QUOTA = re.compile(r'rate.?limit|quota|insufficient|out of credits|credit balance|balance exhausted|spend limit|payment required|\b402\b|usage limit|\b429\b|too many requests|'
+                   r'exceeded|billing|not authenticated|unauthori[sz]ed|login required|please log ?in|overloaded|\b503\b', re.I)
+LIVE_QUOTA = re.compile(r'hit your (?:individual )?(?:spend|usage) limit|usage limit reached|rate limit exceeded|quota exceeded', re.I)
+# A line that merely QUOTES a quota phrase (a model reading this very file, docs, tests, regexes) must not count:
+# only short, plain lines without code or quote characters are taken as the CLI's own error output.
+CODEY = re.compile(r'["`|\\(){}\[\]=;]|re\.compile|def |\.md:|\.py:')
+
+
+def live_quota_lines(tail):
+    return sum(1 for line in tail.splitlines() if len(line) < 200 and LIVE_QUOTA.search(line) and not CODEY.search(line))
+WAITING = re.compile(r'press (enter|any key)|\[y/n\]|\(y/n\)|'
+                     r'do you want to (proceed|continue|allow)|approve this|waiting for (your )?(input|approval|confirmation)|'
+                     r'trust (this|the) (folder|directory)|select an option', re.I)
+now = lib.now
+
+
+def quota_rx(a):
+    pats = [p for p in a.get('quota_patterns', []) if p]
+    return re.compile('|'.join(re.escape(p) for p in pats), re.I) if pats else None
+
+
+def cmd_for(m, a, prompt, out, cwd):
+    """Build the CLI command from the harness adapter. Every model runs with full rights and no sandbox;
+    reviewers are read-only by instruction only (run_one flags a reviewer that changes the tree)."""
+    exe = shutil.which(a.get('binary', m['cli'])) or a.get('binary', m['cli'])
+    sub = {'{model}': m['model'], '{out}': out, '{prompt}': prompt, '{cwd}': cwd}
+    argv = []
+    for x in a['run']['argv']:
+        for k, v in sub.items():
+            x = x.replace(k, v)
+        argv.append(x)
+    return [exe] + argv, lib.effective_env(m, a), a['run'].get('output', 'stdout')
+
+
+def run_one(r, key, role, brief, out, cwd, timeout=None):
+    m = r['models'][key]; a = lib.adapter_of(m)
+    brief, out, cwd = os.path.abspath(brief), os.path.abspath(out), os.path.abspath(cwd)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    prompt = f'Read the file {brief} and follow its instructions exactly. Working directory: {cwd}.'
+    t0 = time.time(); before = lib.tree_fingerprint(cwd) if role == 'review' else None
+    timeout = timeout or r['timeouts_seconds'].get(role, 1800)
+    if os.path.exists(out):
+        os.remove(out)  # a stale file from a previous model would be judged as this run's output
+    cmd, env, output_mode = cmd_for(m, a, prompt, out, cwd)
+    qrx = quota_rx(a)
+    text, code = supervise(cmd, cwd, timeout, r['timeouts_seconds'].get('idle', 900), out + '.log', env, qrx)
+    if output_mode != 'file' or not os.path.exists(out) or os.path.getsize(out) == 0:
+        open(out, 'w').write(text)
+    body = open(out, errors='ignore').read()
+    secs = round(time.time() - t0)
+    is_quota = lambda s: bool(QUOTA.search(s) or (qrx and qrx.search(s)))
+    if code in ('timeout', 'idle', 'waiting_input', 'quota'): status = code
+    elif code == 'missing': status = 'unavailable'
+    elif code != 0 and is_quota(text): status = 'quota'
+    elif len(body.strip()) < 2000 and is_quota(body) and code != 0: status = 'quota'
+    elif code != 0 or not body.strip(): status = 'error'
+    else: status = 'ok'
+    # a run that exits 0 without its required final block is a failure too (model rambled or gave up)
+    tail = body[-4000:]
+    if status == 'ok' and 'AUTOPILOT_OK' not in body and (
+            (role == 'implement' and not re.search(r'STATUS\W{0,6}(done|partial|blocked)', tail, re.I))
+            or (role == 'review' and '"verdict"' not in body)):
+        status = 'bad_output'
+    res = {'model': key, 'cli': m['cli'], 'id': m['model'], 'account': lib.account_of(m, a), 'vendor': lib.vendor_of(m, a), 'role': role,
+           'status': status, 'exit': code, 'seconds': secs, 'out': out, 'chars': len(body)}
+    if role == 'review' and before is not None and lib.tree_fingerprint(cwd) != before:
+        res['reviewer_modified_tree'] = True
+    if status in ('quota', 'unavailable'):
+        reset = reset_from_text(text[-2000:]) if status == 'quota' else None
+        mins = (reset - now()).total_seconds() / 60 + 2 if reset and reset > now() else (60 if status == 'quota' else 1440)
+        lib.cool(key, f'{status}: {text[-200:]}', mins)
+    elif status in ('timeout', 'idle') and not docker_ok():
+        res['status'] = 'docker_hung'  # the environment stalled, not the model: no cooldown, stop the fallback chain
+    elif status in ('timeout', 'idle', 'waiting_input', 'error', 'bad_output'):
+        lib.cool(key, f'{status} exit={code}: {text[-200:]}')
+    return res
+
+
+def docker_ok():
+    """False when a Docker daemon is installed but does not answer within 15 s (hung daemon)."""
+    exe = shutil.which('docker')
+    if not exe: return True
+    try: return subprocess.run([exe, 'version', '--format', '{{.Server.Version}}'], capture_output=True, timeout=15, stdin=subprocess.DEVNULL).returncode == 0
+    except Exception: return False
+
+
+def tree_active(cwd, seconds):
+    try:
+        r = subprocess.run(['find', cwd, '-path', '*/node_modules', '-prune', '-o', '-path', '*/.git', '-prune', '-o',
+                            '-type', 'f', '-mmin', f'-{max(1, int(seconds // 60))}', '-print', '-quit'],
+                           capture_output=True, text=True, timeout=60)
+        return bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+def supervise(cmd, cwd, timeout, idle, logpath, env, qrx=None):
+    """A model CLI must never block the session: stdin is closed, the process runs in its own group, and it is
+    killed as soon as it asks for input, goes silent for `idle` seconds, or exceeds `timeout`."""
+    import signal
+    log = open(logpath, 'w')
+    try:
+        p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                             env={**env, 'CI': '1', 'NO_COLOR': '1', 'TERM': 'dumb', 'PYTHONDONTWRITEBYTECODE': '1'})
+    except FileNotFoundError:
+        log.close()
+        return f'{cmd[0]} not installed', 'missing'
+    t0 = last_change = time.time(); last_size = 0; reason = None
+    while p.poll() is None:
+        time.sleep(3)
+        size = os.path.getsize(logpath)
+        if size != last_size: last_size, last_change = size, time.time()
+        tail = open(logpath, errors='ignore').read()[-2000:] if size else ''
+        if WAITING.search(tail): reason = 'waiting_input'
+        elif live_quota_lines(tail) >= 3: reason = 'quota'  # the CLI itself looping on a quota message (adapter patterns only classify the final exit)
+        elif time.time() - last_change > idle:
+            # silent CLI but files still changing in cwd (long build/capture in a tool call) = progress
+            if tree_active(cwd, idle): last_change = time.time()
+            else: reason = 'idle'
+        elif time.time() - t0 > timeout: reason = 'timeout'
+        if reason:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try: os.killpg(p.pid, sig)
+                except (ProcessLookupError, PermissionError): break  # group gone or reaped (macOS answers EPERM for a dead group)
+                try: p.wait(10); break
+                except subprocess.TimeoutExpired: pass
+            break
+    # Reap what the CLI left behind (`cmd &` jobs from its tool calls): they share its process group.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try: os.killpg(p.pid, sig); time.sleep(2)
+        except (ProcessLookupError, PermissionError): break
+    log.close()
+    return open(logpath, errors='ignore').read(), reason or p.returncode
+
+
+def repo_for(brief, cwd):
+    """The project of a run: $AUTOPILOT_REPO (validated), else the nearest .autopilot/state.json above the brief or cwd."""
+    if os.environ.get('AUTOPILOT_REPO'):
+        if not os.path.exists(lib.state_path(os.environ['AUTOPILOT_REPO'])):
+            sys.exit('run-model: AUTOPILOT_REPO=%s has no .autopilot/state.json' % os.environ['AUTOPILOT_REPO'])
+        return os.path.abspath(os.environ['AUTOPILOT_REPO'])
+    for start in (os.path.dirname(os.path.abspath(brief)), os.path.abspath(cwd)):
+        d = start
+        while d != '/':
+            if os.path.exists(lib.state_path(d)):
+                return d
+            d = os.path.dirname(d)
+    return None
+
+
+def cmd_run(args):
+    role, brief, out = args[0], args[1], args[2]
+    cwd = args[args.index('--cwd') + 1] if '--cwd' in args else os.getcwd()
+    issue = args[args.index('--issue') + 1] if '--issue' in args else lib.issue_from_brief(brief)
+    repo = repo_for(brief, cwd)
+    r = lib.load_reg(); ad = lib.adapters()
+    ex_vendors = [v for v in (args[args.index('--exclude-vendor') + 1] if '--exclude-vendor' in args else '').split(',') if v]
+    if role == 'review' and not (issue and repo) and '--standalone' not in args:
+        print(json.dumps({'status': 'error', 'role': role, 'reason': 'a review run needs --issue <ID> inside a project with .autopilot/state.json (or a brief named <ISSUE>-review-<n>.md), or --standalone for a review that is not about a ticket'})); sys.exit(4)
+    keys_, ids_ = lib.implementers_of(repo, issue) if role == 'review' and issue and repo else ([], [])
+    pool_name = args[args.index('--pool') + 1] if '--pool' in args else None
+    plan_review = role == 'review' and (pool_name in ('plan_review', 'premortem') or bool(re.match(r'.+?-plan-', os.path.basename(brief))))
+    floor = None
+    if plan_review:
+        coord = lib.load_state(repo).get('coordinator') if repo else None
+        if coord in r['models']:
+            keys_ = keys_ + [coord]; ex_vendors.append(lib.vendor_of(r['models'][coord], ad.get(r['models'][coord]['cli'])))
+        if not ex_vendors:
+            print(json.dumps({'status': 'error', 'role': role, 'reason': 'a plan review needs the planner identity: `coordinator` (roster key) in .autopilot/state.json, or --exclude-vendor <vendor>'})); sys.exit(4)
+        floor = {'high', 'mid'} if ('--allow-mid' in args or os.environ.get('ALLOW_MID') == '1') else {'high'}
+    excluded = lib.expand_exclusions(r, keys=keys_, identities=ids_, vendors=ex_vendors, ad=ad) if role == 'review' else set()
+    if floor:
+        excluded |= {k for k, m in r['models'].items() if m.get('cost', 'mid') not in floor}
+    if '--model' in args:
+        keys = [args[args.index('--model') + 1]]
+        if keys[0] in excluded:
+            print(json.dumps({'status': 'excluded', 'role': role, 'issue': issue, 'model': keys[0],
+                              'reason': 'implemented or planned this ticket (same underlying model on any account or harness), an excluded vendor, or below the plan-review cost floor'})); sys.exit(4)
+    else:
+        pool = r['pools']['implement' if role == 'implement' else 'review']
+        if role == 'implement' and '--escalate' in args: pool = r['pools']['implement_escalation']
+        if '--pool' in args: pool = r['pools'][args[args.index('--pool') + 1]]
+        keys = [k for k in pool if lib.healthy(r, k) and k not in excluded]
+        if '--prefer' in args:  # put one model first but keep the rest as fallback (spreads parallel runs)
+            pk = args[args.index('--prefer') + 1]
+            if pk in keys or (pk in r['models'] and lib.healthy(r, pk) and pk not in excluded): keys = [pk] + [k for k in keys if k != pk]
+        if not keys and role == 'review':  # every reviewer down: fall back to the escalation pool (same exclusions)
+            keys = [k for k in r['pools']['implement_escalation'] if lib.healthy(r, k) and k not in excluded]
+    tried = []
+    for k in keys:
+        if k not in r['models'] or not lib.healthy(r, k) or k in excluded:  # roster edited or cooled down while this run was going
+            continue
+        allowed = os.environ.get('ALLOW_IMPLEMENT', '').split(',')  # explicit per-session user exception
+        if role == 'implement' and r['models'][k].get('no_implement') and k not in allowed:  # planners/reviewers only (token cost)
+            tried.append(f"{k}:no_implement"); continue
+        if role == 'implement':
+            if not (issue and repo):
+                print(json.dumps({'status': 'error', 'role': role, 'reason': 'implement runs need a ticket identity: --issue <ID> or a brief named <ISSUE>-impl-<n>.md inside a project with .autopilot/state.json'})); sys.exit(4)
+
+            lib.record_implementer(repo, issue, k, r['models'][k], ad.get(r['models'][k]['cli']) or lib.adapter_of(r['models'][k]))
+        res = run_one(r, k, role, brief, out, cwd); tried.append(f"{k}:{res['status']}")
+        if res['status'] == 'docker_hung':
+            print(json.dumps({'status': 'docker_hung', 'role': role, 'tried': tried})); sys.exit(3)
+        if res['status'] == 'ok' or '--no-fallback' in args:
+            res['tried'] = tried; res['issue'] = issue; print(json.dumps(res)); return
+        r = lib.load_reg()
+    print(json.dumps({'status': 'all_failed', 'role': role, 'issue': issue, 'tried': tried, 'excluded': sorted(excluded)})); sys.exit(2)
+
+
+def cmd_smoke(args):
+    import tempfile
+    r = lib.load_reg(); key = args[0]
+    if key not in r['models']: sys.exit(f'run-model: unknown key {key}')
+    d = tempfile.mkdtemp(); b = os.path.join(d, 'brief.md'); o = os.path.join(d, 'out.md')
+    open(b, 'w').write('Reply with exactly: AUTOPILOT_OK')
+    res = run_one(r, key, 'review', b, o, d, timeout=r['timeouts_seconds'].get('smoke', 120))
+    res['passed'] = res['status'] == 'ok' and 'AUTOPILOT_OK' in open(o, errors='ignore').read()
+    print(json.dumps(res))
+
+
+def sh(c, env=None, timeout=60):
+    """(stdout, diagnostic or None)"""
+    try:
+        p = subprocess.run(c, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env or os.environ)
+        return p.stdout, (None if p.returncode == 0 else f'exit {p.returncode}: {(p.stderr or p.stdout)[-200:].strip()}')
+    except FileNotFoundError:
+        return '', f'{c[0]} not installed'
+    except subprocess.TimeoutExpired:
+        return '', f'timeout after {timeout}s'
+    except Exception as e:
+        return '', str(e)[:200]
+
+
+def list_models(a, env):
+    """Model ids a harness offers (for discover). Kinds: command+regex, json_file, none."""
+    spec = a.get('list_models', {'kind': 'none'}); kind = spec.get('kind', 'none')
+    exe = shutil.which(a.get('binary', a['name'])) or a.get('binary', a['name'])
+    if kind == 'command':
+        return re.findall(spec['regex'], sh([exe] + spec['argv'], env)[0], re.M)
+    if kind == 'json_file':
+        try:
+            data = lib.read_json(lib.expand_path(spec['path'], a, env))
+            for part in spec.get('list', '').split('.'):
+                if part: data = data[part]
+            return [next((m[k] for k in spec.get('id', ['id']) if m.get(k)), None) for m in data]
+        except Exception:
+            return []
+    return []
+
+
+def ver(s): return tuple(int(x) for x in re.findall(r'\d+', s))
+
+
+def cmd_discover(args):
+    r = lib.load_reg(); ad = lib.adapters(); cands = []; avail = {}
+    for key, m in r['models'].items():
+        a = ad.get(m['cli'])
+        if not a: continue
+        ck = (m['cli'], lib.account_of(m, a))
+        if ck not in avail: avail[ck] = list_models(a, lib.effective_env(m, a))
+        if '*' not in m.get('family', ''): continue  # unversioned entry (e.g. an account default model): not upgradable
+        fam = re.escape(m['family']).replace(r'\*', r'(v?[\d.]+)')
+        rx = re.compile('^' + fam + ('([-:]free)$' if m['tier'] == 'free' else '$'))
+        best = m['model']
+        for mid in avail[ck]:
+            mm = rx.match(mid or '')
+            if not mm or (m['tier'] != 'free' and re.search(r'[-:]free$', mid)): continue
+            if ver(mm.group(1)) > ver(rx.match(best).group(1) if rx.match(best) else '0'): best = mid
+        if best != m['model']: cands.append({'key': key, 'from': m['model'], 'to': best})
+    out = {'available_counts': {f'{c}/{acc}': len(v) for (c, acc), v in avail.items()}, 'upgrades': cands}
+    if '--apply' in args:
+        applied = []
+        for c in cands:
+            old = c['from']
+            lib.update_reg(lambda r: r['models'][c['key']].__setitem__('model', c['to']))
+            sm = subprocess.run([sys.executable, __file__, 'smoke', c['key']], capture_output=True, text=True).stdout
+            ok = '"passed": true' in sm
+
+            def fin(r):
+                if not ok: r['models'][c['key']]['model'] = old
+                else: r.setdefault('changelog', []).append({'date': str(now().date()), 'change': f"{c['key']} {old} -> {c['to']} (smoke ok)"})
+                r['health'].pop(c['key'], None)
+            lib.update_reg(fin)
+            if ok: applied.append(c)
+        out['applied'] = applied
+    lib.update_reg(lambda r: r.__setitem__('last_discovery', str(now().date())))
+    print(json.dumps(out))
+
+
+MONTHS = {m: i + 1 for i, m in enumerate(['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'])}
+
+
+def reset_from_text(text):
+    """Reset time announced in a CLI message, as an aware datetime, or None. Understands ISO stamps,
+    'resets Oct 25 at 3:29am (America/New_York)', 'renews on October 26 at 15:45', 'try again at 3:00 PM',
+    'in 2 hours 5 minutes'. Times without a zone are local; a date-less time already past means tomorrow."""
+    from zoneinfo import ZoneInfo
+    t = text.lower()
+    m = re.search(r'(?:reset|renew|available|again)\w*[^\n]{0,40}?(\d{4}-\d\d-\d\dt\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:z|[+-]\d\d:?\d\d))', t)
+    if m: return dt.datetime.fromisoformat(m.group(1).upper().replace('Z', '+00:00'))
+    m = re.search(r'(?:reset|renew|again)\w*(?: on| at)?\s+(?:([a-z]{3})[a-z]*\.? (\d{1,2})(?:st|nd|rd|th)?,?(?: \d{4})?\s+(?:at\s+)?)?(\d{1,2})(?::(\d\d))?\s*([ap]\.?m\.?)?(?:\s*\(([\w/+-]+)\))?', t)
+    if m and (m.group(1) in MONTHS or m.group(1) is None) and (m.group(4) or m.group(5)):
+        try: tz = ZoneInfo(m.group(6).replace('america', 'America').replace('europe', 'Europe').replace('/new_york', '/New_York')) if m.group(6) else None
+        except Exception: tz = None
+        local = dt.datetime.now(tz) if tz else dt.datetime.now().astimezone()
+        h = int(m.group(3)) % 12 + (12 if m.group(5) and m.group(5)[0] == 'p' else 0) if m.group(5) else int(m.group(3))
+        day = local.replace(month=MONTHS[m.group(1)], day=int(m.group(2))) if m.group(1) else local
+        cand = day.replace(hour=h, minute=int(m.group(4) or 0), second=0, microsecond=0)
+        if m.group(1) and cand < local - dt.timedelta(days=1): cand = cand.replace(year=cand.year + 1)
+        elif not m.group(1) and cand <= local: cand += dt.timedelta(days=1)
+        return cand
+    m = re.search(r'in (?:(\d+) ?h(?:ours?|rs?)?)?\s*(?:(\d+) ?m(?:in(?:utes?)?)?)?\b', t)
+    if m and (m.group(1) or m.group(2)) and re.search(r'(reset|again|retry)', t):
+        return now() + dt.timedelta(hours=int(m.group(1) or 0), minutes=int(m.group(2) or 0))
+    return None
+
+
+def unknown(note):
+    return [{'window': 'unknown', 'used': None, 'reset': '', 'note': note}]
+
+
+def usage_probe(a, env):
+    """Quota windows of one harness on one account, read without spending model quota. Each window carries
+    `observed` (when the reading was taken). Kinds: command+regex, codex_sessions, none. A probe that fails or
+    matches nothing returns one `unknown` window with the diagnostic: never an empty list."""
+    spec = a.get('usage', {'kind': 'none'}); kind = spec.get('kind', 'none'); out = []
+    exe = shutil.which(a.get('binary', a['name'])) or a.get('binary', a['name'])
+    if kind == 'command':
+        txt, diag = sh([exe] + spec['argv'], env, timeout=90)
+        for mt in re.finditer(spec['regex'], txt, re.M):
+            g = dict(zip(spec['groups'], mt.groups()))
+            try:
+                used = int(g['used']) if 'used' in g else 100 - int(g['remaining'])
+                if not g.get('window'): raise KeyError('window')
+            except (KeyError, ValueError, TypeError):
+                return unknown('usage regex groups must capture window and an integer used|remaining on every match: %r' % (g,))
+            rt = reset_from_text(g['reset_text']) if g.get('reset_text') else None
+            reset = g.get('reset_iso') or (rt.isoformat() if rt else '')
+            out.append({'window': g['window'].strip(), 'used': used, 'reset': reset, 'observed': now().isoformat()})
+        if not out:
+            return unknown(f"usage command gave no parsable window ({diag or 'regex matched nothing'}): {txt[-120:].strip()!r}" if txt else f'usage command failed: {diag}')
+    elif kind == 'codex_sessions':
+        root = lib.expand_path(spec['path'], a, env)
+        logs = sorted(glob.glob(os.path.join(root, '*/*/*/*.jsonl')), key=os.path.getmtime)
+        best, best_t = None, None  # the newest rate_limits EVENT among the recent sessions, not the newest file
+        for path in logs[-8:]:
+            line = next((l for l in reversed(open(path, errors='ignore').read().splitlines()) if '"rate_limits"' in l), None)
+            if not line: continue
+            try: ev = json.loads(line)
+            except Exception: continue
+            rl = ev
+            while isinstance(rl, dict) and 'rate_limits' not in rl: rl = next((v for v in rl.values() if isinstance(v, dict) and '"rate_limits"' in json.dumps(v)), None)
+            rl = rl and rl['rate_limits']
+            if not rl: continue
+            ts = ev.get('timestamp') or (ev.get('payload') or {}).get('timestamp') if isinstance(ev, dict) else None
+            try: t = lib.parse_time(ts) if isinstance(ts, str) else dt.datetime.fromtimestamp(float(ts) if ts else os.path.getmtime(path), dt.timezone.utc)
+            except Exception: t = dt.datetime.fromtimestamp(os.path.getmtime(path), dt.timezone.utc)
+            if best_t is None or t > best_t: best, best_t = rl, t
+        if best:
+            for w in ('primary', 'secondary'):
+                if best.get(w):
+                    name = f"{best[w]['window_minutes']}min"
+                    out.append({'window': spec.get('windows', {}).get(name, name), 'used': round(best[w]['used_percent']),
+                                'reset': dt.datetime.fromtimestamp(best[w]['resets_at'], dt.timezone.utc).isoformat(), 'observed': best_t.isoformat()})
+        if not out:
+            return unknown(f'no rate_limits record in the last sessions under {root}' if logs else f'no session logs under {root}')
+    else:
+        return unknown(spec.get('note', 'no usage probe for this harness'))
+    return out
+
+
+def usage(r, ad):
+    """Usage per (harness, account) for every account present in the roster."""
+    res = []; seen = set()
+    for key, m in r['models'].items():
+        a = ad.get(m['cli'])
+        if not a: continue
+        acc = lib.account_of(m, a)
+        if (m['cli'], acc) in seen: continue
+        seen.add((m['cli'], acc))
+        res.append({'cli': m['cli'], 'account': acc, 'windows': usage_probe(a, lib.effective_env(m, a))})
+    return res
+
+
+def cmd_usage(args):
+    r = lib.load_reg(); ad = lib.adapters(); u = usage(r, ad); apply = '--apply' in args
+
+    def keys_for(entry, window):
+        a = ad[entry['cli']]; groups = a.get('usage', {}).get('window_groups')
+        for k, m in r['models'].items():
+            if m['cli'] != entry['cli'] or lib.account_of(m, a) != entry['account']: continue
+            if groups and not any(re.search(wr, window, re.I) and re.search(mr, m['model'], re.I) for wr, mr in groups.items()): continue
+            yield k
+    cooled, cleared = [], []
+    for entry in u:
+        known = [w for w in entry['windows'] if w['used'] is not None]
+        if not known: continue
+        # Aggregate per model key, not per window: the longest exhausted reset wins, and a cooldown is cleared only
+        # when EVERY window that applies to the key is under quota with a reading newer than the cooldown.
+        per_key = {}
+        for w in known:
+            for k in keys_for(entry, w['window']):
+                per_key.setdefault(k, []).append(w)
+        declared = set((ad[entry['cli']].get('usage', {}).get('windows') or {}).values())  # windows this probe is known to report
+        for k, ws in per_key.items():
+            full = [w for w in ws if w['used'] >= 100]
+            exhausted = [w for w in full if w['reset'] and lib.parse_time(w['reset']) + dt.timedelta(minutes=2) > now()]
+            if exhausted:
+                until = max(lib.parse_time(w['reset']) for w in exhausted) + dt.timedelta(minutes=2)
+                h = r['health'].get(k)
+                if apply and not (h and lib.parse_time(h['until']) >= until):  # never shorten a longer cooldown
+                    lib.cool(k, "quota: %s %s %s exhausted, resets %s (usage)" % (entry['cli'], entry['account'], '/'.join(w['window'] for w in exhausted), max(w['reset'] for w in exhausted)),
+                             (until - now()).total_seconds() / 60, windows=[w['window'] for w in exhausted])
+                cooled.append(k)
+                continue
+            if full: continue  # exhausted without a usable reset: keep whatever cooldown exists
+            h = r['health'].get(k)
+            if not (h and h['reason'].startswith('quota') and h.get('set_at')): continue
+            fresh = {w['window'] for w in ws if lib.parse_time(w['observed']) > lib.parse_time(h['set_at'])}
+            responsible = set(h.get('windows') or []) or declared  # a cooldown from a quota error names no window: every declared window must be fresh
+            if fresh and responsible <= fresh:
+                cleared.append(k)
+                if apply: lib.update_reg(lambda rr, k=k: rr['health'].pop(k, None))
+    print(json.dumps({'usage': u, 'exhausted_until_reset': sorted(set(cooled)), 'stale_quota_cooldowns_cleared': sorted(set(cleared) - set(cooled)), 'applied': apply}))
+
+
+def cmd_wait(args):
+    """Sleep until a model of the pool is healthy again, then print its key. Put it in front of the run
+    that needs the pool (`k=$(run-model wait review_high) && ...`) so work restarts the minute a model resets."""
+    pool, ex = args[0], (args[1].split(',') if len(args) > 1 else [])
+    while True:
+        r = lib.load_reg(); keys = [k for k in r['pools'][pool] if k not in ex]
+        ok = [k for k in keys if lib.healthy(r, k)]
+        if ok: print(ok[0]); return
+        ends = [lib.parse_time(r['health'][k]['until']) for k in keys if k in r['health']]
+        time.sleep(max(30, min(120, (min(ends) - now()).total_seconds() + 5)) if ends else 60)  # recheck often: cooldowns can be reset by hand
+
+
+if __name__ == '__main__':
+    a = sys.argv[1:]
+    if not a: print(__doc__); sys.exit(1)
+    if a[0] == 'run': cmd_run(a[1:])
+    elif a[0] == 'smoke': cmd_smoke(a[1:])
+    elif a[0] == 'discover': cmd_discover(a[1:])
+    elif a[0] == 'usage': cmd_usage(a[1:])
+    elif a[0] == 'wait': cmd_wait(a[1:])
+    elif a[0] == 'health': print(json.dumps(lib.load_reg()['health'], indent=2))
+    elif a[0] == 'reset': lib.update_reg(lambda r: r['health'].pop(a[1], None)); print('ok')
+    elif a[0] == 'vendor':
+        r = lib.load_reg(); m = r['models'].get(a[1]) or sys.exit(f'unknown key {a[1]}'); print(lib.vendor_of(m))
+    else: print(__doc__); sys.exit(1)

@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""harness: registry of model CLIs ("harnesses"), accounts and the model roster. Used by the autopilot-init skill.
+
+  harness init [--import <models.json>] [--force]      # create $AUTOPILOT_CONFIG_DIR/models.json from templates/models.json (or import an existing roster)
+  harness discover                                     # installed CLIs, adapter present?, accounts detected on disk, models in the roster
+  harness list                                         # roster table: key, cli, model, account, tier, cost, pools, health
+  harness add-model <key> --cli <cli> --model <id> [--tier T] [--cost high|mid|cheap|free] [--family PATTERN] [--vendor V]
+                    [--no-implement] [--pools p1,p2,...] [--env K=V ...] [--note TEXT]
+  harness add-account <cli> <letter> [--label TEXT] [--home PATH --nonstandard]
+                                                       # the account standard: the default home is the CLI's own (~/.codex), the next accounts are
+                                                       # <default>-b, <default>-c, ... and the roster keys are <key>-b, <key>-c. `add-account codex b`
+                                                       # clones every base model of codex as <key>-b with CODEX_HOME=~/.codex-b (same pools, after the
+                                                       # originals). A non-standard home needs --home PATH --nonstandard (discover keeps flagging it).
+  harness remove <key>
+  harness set-home <cli> <old-home> <new-home>         # point every roster entry of <cli> using <old-home> at <new-home> (after you moved the directory)
+  harness new <name> --binary B --vendor V --argv '<json list of strings with {prompt} [{model}] [{out}]>' [--output stdout|file]
+              [--account-env VAR --account-default PATH --account-detect GLOB] [--list-cmd 'args' --list-regex RX]
+              [--usage-cmd 'args' --usage-regex RX --usage-groups window,used|remaining,reset_text|reset_iso] [--env K=V ...] [--doc TEXT]
+                                                       # write a new adapter to $AUTOPILOT_CONFIG_DIR/harnesses/<name>.json
+  harness pools                                        # pools and their members
+  harness pools set <pool> k1,k2,...                   # replace a pool
+  harness adapters                                     # adapters known (repo + user), with the run command of each
+
+Config: $AUTOPILOT_CONFIG_DIR (default ~/.config/linear-autopilot). Nothing personal is ever written into the repo.
+"""
+import datetime as dt, glob, json, os, re, shutil, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+COSTS = ('high', 'mid', 'cheap', 'free')
+KNOWN_CLIS = ['codex', 'claude', 'opencode', 'grok', 'agy', 'vibe', 'gemini', 'aider', 'goose', 'amp', 'cursor-agent', 'copilot', 'kiro', 'qwen', 'droid', 'crush']
+today = lambda: str(dt.date.today())
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def envs(args):
+    return {kv.split('=', 1)[0]: kv.split('=', 1)[1] for i, kv in enumerate(args) if i > 0 and args[i - 1] == '--env' and '=' in kv}
+
+
+def cmd_init(args):
+    if os.path.exists(lib.REG) and '--force' not in args:
+        print(f'roster exists: {lib.REG} (use --force to overwrite)'); return
+    src = os.path.expanduser(opt(args, '--import') or os.path.join(lib.HOME, 'templates', 'models.json'))
+    r = lib.read_json(src)
+    r.setdefault('health', {}); r.setdefault('changelog', []); r.setdefault('pools', {}); r.setdefault('models', {})
+    r['pools'].setdefault('premortem', list(r['pools'].get('plan_review', [])))
+    r['changelog'].append({'date': today(), 'change': f'roster created from {src}'})
+    os.makedirs(lib.CONFIG_DIR, exist_ok=True)
+    with lib.locked(lib.REG):
+        lib.write_json_atomic(lib.REG, r)
+    for d in ('harnesses', 'prompts'):
+        os.makedirs(os.path.join(lib.CONFIG_DIR, d), exist_ok=True)
+    print(f'wrote {lib.REG} ({len(r["models"])} models, pools: {", ".join(r["pools"])})')
+
+
+def version_of(exe):
+    try:
+        p = subprocess.run([exe, '--version'], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        t = (p.stdout or p.stderr).strip()
+        return t.splitlines()[0][:60] if t else ''
+    except Exception:
+        return ''
+
+
+def account_identity(a, home):
+    """(logged_in, label) for one account directory, from the adapter's `account_login` spec: a login file, and
+    optionally claims of a JWT inside it (email, plan). Tokens are never printed."""
+    spec = a.get('account_login')
+    if not spec:
+        return None, ''
+    f = os.path.join(home, spec['file'])
+    if not os.path.exists(f):
+        return False, ''
+    ident = spec.get('identity')
+    if not ident:
+        return True, ''
+    try:
+        import base64
+        data = lib.read_json(f)
+        for part in ident['jwt'].split('.'):
+            data = data[part]
+        payload = data.split('.')[1]; payload += '=' * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        out = []
+        for label, path in ident.get('claims', {}).items():  # nested claims are written `outer|inner` (claim names may contain dots and slashes)
+            cur = claims
+            for part in path.split('|'):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            if cur:
+                out.append('%s=%s' % (label, str(cur)[:12] + '...' if label == 'account' else str(cur)))
+        return True, ' '.join(out)
+    except Exception:
+        return True, '(identity unreadable)'
+
+
+def cmd_discover(args):
+    ad = lib.adapters(); r = lib.read_json(lib.REG) if os.path.exists(lib.REG) else {'models': {}}
+    rows = []
+    for name in sorted(set(list(ad) + KNOWN_CLIS)):
+        a = ad.get(name); binary = a.get('binary', name) if a else name
+        exe = shutil.which(binary)
+        if not exe and not a: continue
+        accounts = []
+        if a and a.get('account_detect'):
+            default = os.path.realpath(os.path.expanduser(a.get('account_default', '')))
+            roster_homes = {os.path.realpath(os.path.expanduser(lib.explicit_account(m, a) or a.get('account_default', ''))) for m in r['models'].values() if m['cli'] == name}
+            for p in sorted(glob.glob(os.path.expanduser(a['account_detect']))):
+                if not os.path.isdir(p): continue
+                logged, who = account_identity(a, p)
+                accounts.append({'home': p, 'default': os.path.realpath(p) == default, 'logged_in': logged, 'identity': who,
+                                 'in_roster': os.path.realpath(p) in roster_homes})
+        in_roster = sorted({(k, lib.account_of(m, a)) for k, m in r['models'].items() if m['cli'] == name}) if a else []
+        rows.append({'cli': name, 'installed': bool(exe), 'path': exe or '', 'version': version_of(exe) if exe else '',
+                     'adapter': os.path.relpath(a['_path'], lib.HOME) if a else None, 'vendor': a.get('vendor') if a else None,
+                     'accounts_on_disk': accounts, 'roster_keys': [k for k, _ in in_roster],
+                     'roster_accounts': sorted({acc for _, acc in in_roster})})
+    for row in rows:
+        flag = 'ok' if row['installed'] and row['adapter'] else ('NO ADAPTER: harness new ' + row['cli'] if row['installed'] else 'not installed')
+        print(f"{row['cli']:<14} {flag:<40} {row['version'][:30]:<30} roster={len(row['roster_keys'])} accounts={row['roster_accounts'] or '-'}")
+        for acc in row['accounts_on_disk']:
+            if acc['logged_in'] is False:
+                state = 'NOT A LOGIN (no %s): ignore or delete' % ad[row['cli']]['account_login']['file']
+            elif acc['in_roster']:
+                state = 'in roster' + (' (default)' if acc['default'] else '')
+            else:
+                letter = os.path.basename(acc['home']).rsplit('-', 1)[-1]
+                state = 'NOT IN ROSTER: bin/harness add-account %s %s' % (row['cli'], letter)
+            print('    %-40s %-28s %s' % (acc['home'].replace(os.path.expanduser('~'), '~'), acc['identity'], state))
+        # Non-standard homes: anything in the roster whose home is not <default>-<letter>
+        a = ad.get(row['cli'])
+        if a and a.get('account_env'):
+            std = re.compile(re.escape(os.path.expanduser(a.get('account_default', '')).rstrip('/')) + r'-[b-z]$')
+            for k, m in r['models'].items():
+                home = lib.explicit_account(m, a) if m['cli'] == row['cli'] else None
+                if home and not std.match(os.path.expanduser(home)):
+                    print('    NON-STANDARD home for %s: %s (standard: %s-<letter>; rename the directory and fix the roster with `harness set-home`)' % (k, home, a.get('account_default', '')))
+    print(json.dumps(rows))
+
+
+def cmd_list(args):
+    r = lib.load_reg(); ad = lib.adapters(); nowt = lib.now()
+    pools_of = lambda k: ','.join(p for p, ks in r['pools'].items() if k in ks)
+    print(f"{'key':<24} {'cli':<9} {'model':<42} {'account':<36} {'vendor':<10} {'cost':<6} {'impl':<5} {'health':<12} pools")
+    for k, m in r['models'].items():
+        a = ad.get(m['cli'])
+        h = r['health'].get(k); cooled = h and lib.parse_time(h['until']) > nowt
+        health = f"cool {lib.parse_time(h['until']).astimezone():%d %H:%M}" if cooled else 'ok'
+        acc = m.get('account_label') or (lib.account_of(m, a) if a else '?')
+        print(f"{k:<24} {m['cli']:<9} {m['model'][:42]:<42} {acc[:36]:<36} {(lib.vendor_of(m, a) if a else '?'):<10} {m.get('cost', '?'):<6} "
+              f"{'no' if m.get('no_implement') else 'yes':<5} {health:<12} {pools_of(k)}")
+
+
+def cmd_add_model(args):
+    key = args[0]; ad = lib.adapters()
+    cli = opt(args, '--cli'); model = opt(args, '--model')
+    if not cli or not model: sys.exit('harness add-model: --cli and --model are required')
+    if cli not in ad: sys.exit(f'harness add-model: no adapter for {cli} (harness new {cli} ...)')
+    cost = opt(args, '--cost', 'mid')
+    if cost not in COSTS: sys.exit(f'--cost must be one of {COSTS}')
+    fam = opt(args, '--family') or re.sub(r'\d+(\.\d+)*', '*', model, count=1)
+    m = {'cli': cli, 'model': model, 'family': fam, 'tier': opt(args, '--tier', cost), 'cost': cost}
+    if opt(args, '--vendor'): m['vendor'] = opt(args, '--vendor')
+    if '--no-implement' in args: m['no_implement'] = True
+    if envs(args): m['env'] = envs(args)
+    if opt(args, '--note'): m['note'] = opt(args, '--note')
+    pools = [p for p in (opt(args, '--pools') or '').split(',') if p]
+
+    def fn(r):
+        r['models'][key] = m
+        for p in pools:
+            r['pools'].setdefault(p, [])
+            if key not in r['pools'][p]: r['pools'][p].append(key)
+        r['changelog'].append({'date': today(), 'change': f'add-model {key} ({cli} {model}, cost {cost})'})
+    lib.update_reg(fn)
+    print(f'added {key}: {json.dumps(m)}; pools: {",".join(pools) or "(none, add with harness pools set)"}')
+
+
+def standard_home(a, letter):
+    return '%s-%s' % (a.get('account_default', '').rstrip('/'), letter)
+
+
+def tilde(path):
+    """Store homes in portable `~/...` form: the roster is per user, not per machine path."""
+    home = os.path.expanduser('~').rstrip('/')
+    full = os.path.abspath(os.path.expanduser(path))
+    return '~' + full[len(home):] if full == home or full.startswith(home + '/') else path
+
+
+def cmd_add_account(args):
+    cli, suffix = args[0], args[1]; label = opt(args, '--label')
+    a = lib.adapters().get(cli)
+    if not a: sys.exit(f'no adapter for {cli}')
+    if not a.get('account_env'): sys.exit(f'harness add-account: the {cli} adapter declares no account_env (this CLI has no multi-home support; add it to the adapter first)')
+    if not re.fullmatch(r'[b-z]', suffix): sys.exit('harness add-account: the account suffix is one letter from b (default account = no suffix, then b, c, ...)')
+    home = tilde(opt(args, '--home') or standard_home(a, suffix))
+    if home != standard_home(a, suffix) and '--nonstandard' not in args:
+        sys.exit('harness add-account: non-standard home %s (standard: %s); rename the directory, or pass --nonstandard to keep it' % (home, standard_home(a, suffix)))
+    env = {a['account_env']: home}
+    legacy = {kv.split('=', 1)[0]: kv.split('=', 1)[1] for kv in args[2:] if '=' in kv and not kv.startswith('--')}
+    if legacy and '--nonstandard' not in args: sys.exit('harness add-account: K=V overrides need --nonstandard; the standard form is `harness add-account %s %s`' % (cli, suffix))
+    env.update(legacy)
+    spec = a.get('account_login')
+    if spec and not os.path.exists(os.path.join(os.path.expanduser(home), spec['file'])):
+        print('note: %s has no %s yet: log in once with `%s=%s %s login` (or the CLI\'s own login command) before using it' % (home, spec['file'], a['account_env'], home, a.get('binary', cli)))
+    added = []
+
+    def fn(r):
+        for k, m in list(r['models'].items()):
+            if m['cli'] != cli or lib.explicit_account(m, a): continue  # base entries = no account override of their own
+            nk = f'{k}-{suffix}'
+            if nk in r['models']: continue
+            nm = dict(m); nm['env'] = {**m.get('env', {}), **env}
+            if label: nm['account_label'] = label
+            r['models'][nk] = nm; added.append(nk)
+            for p, ks in r['pools'].items():
+                if k in ks and nk not in ks: ks.insert(ks.index(k) + 1, nk)
+        r['changelog'].append({'date': today(), 'change': f'add-account {cli} {suffix} {env}: {added}'})
+    lib.update_reg(fn)
+    print(f'added {len(added)} keys: {added} (home {home})')
+
+
+def cmd_set_home(args):
+    cli, old, new = args[0], args[1], args[2]
+    a = lib.adapters().get(cli) or sys.exit(f'no adapter for {cli}')
+    k = a.get('account_env') or sys.exit(f'{cli} has no account_env')
+    norm = lambda p: os.path.realpath(os.path.expanduser(p))
+
+    def fn(r):
+        n = 0
+        for key, m in r['models'].items():
+            if m['cli'] == cli and norm((m.get('env') or {}).get(k, '')) == norm(old):
+                m['env'][k] = tilde(new); n += 1
+        r['changelog'].append({'date': today(), 'change': f'set-home {cli} {old} -> {new} ({n} entries)'})
+        return n
+    print('updated %d entries' % lib.update_reg(fn))
+
+
+def cmd_remove(args):
+    key = args[0]
+
+    def fn(r):
+        r['models'].pop(key, None); r['health'].pop(key, None)
+        for ks in r['pools'].values():
+            if key in ks: ks.remove(key)
+        r['changelog'].append({'date': today(), 'change': f'remove {key}'})
+    lib.update_reg(fn); print(f'removed {key}')
+
+
+def cmd_new(args):
+    name = args[0]
+    binary = opt(args, '--binary', name); vendor = opt(args, '--vendor', 'by_model'); argv = opt(args, '--argv')
+    if not argv: sys.exit("harness new: --argv '<json list>' is required, e.g. '[\"-p\",\"{prompt}\",\"--model\",\"{model}\",\"--yes\"]'")
+    try: argv = json.loads(argv)
+    except Exception as e: sys.exit(f'harness new: --argv is not valid JSON: {e}')
+    if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or not x for x in argv):
+        sys.exit('harness new: --argv must be a non-empty JSON list of non-empty strings')
+    if not any('{prompt}' in x for x in argv): sys.exit('harness new: one argv element must contain {prompt}')
+    output = opt(args, '--output', 'stdout')
+    if output not in ('stdout', 'file'): sys.exit('harness new: --output must be stdout or file')
+    if output == 'file' and not any('{out}' in x for x in argv): sys.exit('harness new: --output file needs an argv element containing {out}')
+    a = {'name': name, 'binary': binary, 'vendor': vendor, 'doc': opt(args, '--doc', ''),
+         'run': {'argv': argv, 'env': envs(args), 'output': output},
+         'list_models': {'kind': 'none'}, 'usage': {'kind': 'none', 'note': 'no usage probe: set cooldowns from the reset time in quota errors'},
+         'quota_patterns': ['quota', 'rate limit', 'usage limit']}
+    if opt(args, '--account-env'):
+        a['account_env'] = opt(args, '--account-env'); a['account_default'] = opt(args, '--account-default', '')
+        a['account_detect'] = opt(args, '--account-detect') or (a['account_default'].rstrip('/') + '-[a-z]')  # the standard: <default>-<letter>
+    if opt(args, '--list-cmd'):
+        a['list_models'] = {'kind': 'command', 'argv': opt(args, '--list-cmd').split(), 'regex': opt(args, '--list-regex', r'^\s*(\S+)\s*$')}
+    if opt(args, '--usage-cmd'):
+        groups = opt(args, '--usage-groups', 'window,used,reset_text').split(',')
+        if 'window' not in groups or not ({'used', 'remaining'} & set(groups)): sys.exit('harness new: --usage-groups needs window and used|remaining')
+        a['usage'] = {'kind': 'command', 'argv': opt(args, '--usage-cmd').split(), 'regex': opt(args, '--usage-regex', ''), 'groups': groups}
+    d = os.path.join(lib.CONFIG_DIR, 'harnesses'); os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, f'{name}.json'); lib.write_json_atomic(p, a)
+    print(f'wrote {p}. Next: harness add-model <key> --cli {name} --model <id> --cost <high|mid|cheap|free> --pools ..., then run-model smoke <key>')
+
+
+def cmd_pools(args):
+    if args[:1] == ['set']:
+        keys = [k for k in args[2].split(',') if k]
+
+        def fn(r):
+            unknown = [k for k in keys if k not in r['models']]
+            if unknown: sys.exit(f'unknown keys: {unknown}')
+            r['pools'][args[1]] = keys
+            r['changelog'].append({'date': today(), 'change': f'pools set {args[1]} = {args[2]}'})
+        lib.update_reg(fn)
+    r = lib.load_reg()
+    for p, ks in r['pools'].items():
+        print(f'{p:<22} {", ".join(ks)}')
+
+
+def cmd_adapters(args):
+    for name, a in lib.adapters().items():
+        print(f"{name:<10} {a.get('vendor', '?'):<10} {os.path.relpath(a['_path'], lib.HOME) if a['_path'].startswith(lib.HOME) else a['_path']}")
+        print(f"           {a.get('binary', name)} {' '.join(a['run']['argv'])}   env={a['run'].get('env', {})} output={a['run'].get('output', 'stdout')}")
+        if a.get('account_env'): print(f"           accounts via {a['account_env']} (default {a.get('account_default', '')}, detect {a.get('account_detect', '-')})")
+        print(f"           models: {a.get('list_models', {}).get('kind', 'none')}, usage: {a.get('usage', {}).get('kind', 'none')}")
+
+
+if __name__ == '__main__':
+    a = sys.argv[1:]
+    cmds = {'init': cmd_init, 'discover': cmd_discover, 'list': cmd_list, 'add-model': cmd_add_model, 'add-account': cmd_add_account,
+            'set-home': cmd_set_home, 'remove': cmd_remove, 'new': cmd_new, 'pools': cmd_pools, 'adapters': cmd_adapters}
+    if not a or a[0] not in cmds: print(__doc__); sys.exit(1)
+    cmds[a[0]](a[1:])

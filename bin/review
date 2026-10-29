@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""review <ISSUE> <round> <brief> [k=2]  -> compact verdicts on stdout.
+
+Runs k reviewers in parallel through run-model (k distinct vendors, healthy, from the review pools), validates each
+verdict, prints one line per reviewer + blocking findings, and writes them to .autopilot/out/<ISSUE>-findings-<round>.md
+(input of the next implementation round).
+
+Exit 0 = MIN_REVIEWS valid approvals and no valid "changes" verdict; 1 = changes required; 2 = not enough valid
+verdicts (reviewers unavailable, invalid output, or a reviewer that modified the tree: retry later); 3 = the tree
+could not be restored after a reviewer modified it (look at the worktree before anything else).
+
+Hard rules, enforced here whatever the caller says (fail closed):
+- a model never reviews a ticket it implemented in any round (state.json `implementers`, written by run-model before
+  each dispatch), nor does any key running the same model id on another account;
+- the k reviewers come from k different vendors; when the vendors are not available, fewer reviewers run (never a
+  second one of the same vendor);
+- for POOL=plan_review or premortem the planner's vendor is excluded: EXCLUDE_VENDOR=<vendor>, or state.json
+  `coordinator` (a roster key) whose vendor is excluded;
+- a verdict counts only if it parses, uses an allowed verdict, and the reviewer did not modify the tree; "approve"
+  with a blocking finding or an unmet criterion counts as changes required.
+
+EXCLUDE=<key>[,<key>]  extra keys (expanded to every account of the same model id).
+EXCLUDE_VENDOR=<v>[,<v>]  extra vendors.
+MIN_REVIEWS=<n>  valid approvals needed, 1..k (default k). 1 is a documented degraded mode for a ticket review when a
+  whole vendor is down for hours: the coordinator says so in the Linear comment. 0 is refused.
+ALLOW_MID=1  plan reviews (POOL=plan_review/premortem) take `cost: high` models only; ALLOW_MID=1 adds `mid` (degraded).
+WT=<worktree>  the reviewers run there (default: the repo).
+POOL=<pool>  review_mid (default), review_high, plan_review or premortem; the other review pools fill in, then `review`.
+"""
+import concurrent.futures as cf, json, os, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+RM = os.path.join(lib.HERE, 'run-model')
+iss, n, brief = sys.argv[1:4]
+k = int(sys.argv[4]) if len(sys.argv) > 4 else 2
+M = lib.find_repo()
+CWD = os.environ.get('WT', M)
+OUT = os.path.join(M, '.autopilot', 'out'); os.makedirs(OUT, exist_ok=True)
+reg = lib.load_reg(); ad = lib.adapters(); state = lib.load_state(M)
+POOL = os.environ.get('POOL', 'review_mid')
+MIN = int(os.environ.get('MIN_REVIEWS', k))
+if not 1 <= MIN <= k:
+    sys.exit('review: MIN_REVIEWS must be between 1 and %d' % k)
+PLAN = POOL in ('plan_review', 'premortem')
+
+impl_keys, impl_ids = lib.implementers_of(M, iss)
+ex_keys = [e for e in os.environ.get('EXCLUDE', '').split(',') if e] + impl_keys
+ex_vendors = [v for v in os.environ.get('EXCLUDE_VENDOR', '').split(',') if v]
+if PLAN:
+    coord = state.get('coordinator')
+    if coord in reg['models']:
+        ex_vendors.append(lib.vendor_of(reg['models'][coord], ad.get(reg['models'][coord]['cli'])))
+    if not ex_vendors:
+        sys.exit('review: a plan review needs the planner identity: set `coordinator` (roster key) in .autopilot/state.json or EXCLUDE_VENDOR=<vendor>')
+EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, identities=impl_ids, ad=ad)
+
+order = [POOL] + [p for p in ('review_high', 'review_mid', 'review') if p != POOL]
+floor = ({'high', 'mid'} if os.environ.get('ALLOW_MID') == '1' else {'high'}) if PLAN else None
+pick, vendors = lib.pick_reviewers(reg, order, k, EX, ad, cost_floor=floor)
+if len(pick) < MIN:
+    print(f'NO_REVIEWER: {len(pick)} eligible reviewer(s) from distinct vendors ({", ".join(vendors) or "none"}), need {MIN}; excluded {sorted(EX)}'); sys.exit(2)
+
+
+def run(x):
+    out = os.path.join(OUT, f'{iss}-rev-{x}-{n}.md')
+    cmd = [RM, 'run', 'review', brief, out, '--cwd', CWD, '--issue', iss, '--model', x]
+    if ex_vendors: cmd += ['--exclude-vendor', ','.join(ex_vendors)]
+    if PLAN and os.environ.get('ALLOW_MID') == '1': cmd.append('--allow-mid')
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        res = json.loads(p.stdout.strip().splitlines()[-1])
+    except Exception:
+        res = {'status': 'error', 'raw': p.stdout[-200:]}
+    return x, res, (lib.parse_json_block(out) if res.get('status') == 'ok' else None)
+
+
+snap = lib.snapshot(CWD)
+results = list(cf.ThreadPoolExecutor(len(pick)).map(run, pick))
+restored = lib.restore(CWD, snap, f'reviewer-junk-{iss}-{n}')
+if restored == 'restored':
+    print('TREE RESTORED: a reviewer modified the worktree; its edits were reverted to the pre-review snapshot')
+elif restored == 'history_changed':
+    print('HISTORY CHANGED: a reviewer committed or moved HEAD in the worktree; nothing was rewritten automatically. Inspect `git log` and `git status` there before anything else; no verdict of this round counts'); sys.exit(3)
+elif restored == 'restore_failed':
+    print('TREE RESTORE FAILED: a reviewer modified the worktree and the snapshot could not be re-applied; inspect it (untracked junk in .tmp/)'); sys.exit(3)
+
+blocking, approvals, changes, invalid = [], 0, 0, 0
+for x, res, v in results:
+    if res.get('reviewer_modified_tree'):
+        print(f'{x}: DISCARDED (modified the tree; verdict not counted)'); invalid += 1; continue
+    if not v:
+        print(f"{x}: {res.get('status')} (no verdict)"); invalid += 1; continue
+    status, lines = lib.validate_verdict(v)
+    if status == 'invalid':
+        print(f'{x}: INVALID verdict: {lines[0]}'); invalid += 1; continue
+    print(f"{x}: {v.get('verdict')} -> {status} | {str(v.get('summary', ''))[:200]}")
+    for s in lines:
+        print(f'- [{x}] {s}'); blocking.append(f'- [{x}] {s}')
+    minors = [f for f in v.get('findings', []) if f.get('severity') == 'minor']
+    if minors:
+        print(f'  ({len(minors)} minor)')
+    if status == 'approve': approvals += 1
+    else: changes += 1
+open(os.path.join(OUT, f'{iss}-findings-{n}.md'), 'w').write('\n'.join(blocking) or '(none)')
+if changes:
+    sys.exit(1)
+if approvals >= MIN:
+    sys.exit(0)
+print(f'INCOMPLETE: {approvals} valid approval(s), need {MIN} ({invalid} without a usable verdict); retry the missing reviewer(s)'); sys.exit(2)

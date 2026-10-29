@@ -1,0 +1,55 @@
+{
+  "name": "codex",
+  "binary": "codex",
+  "vendor": "openai",
+  "doc": "OpenAI Codex CLI on a ChatGPT subscription. Several accounts = several CODEX_HOME directories, each with its own login (auth.json) and quota. A directory without auth.json is not an account.",
+  "run": {
+    "argv": [
+      "exec",
+      "--skip-git-repo-check",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "-m",
+      "{model}",
+      "-o",
+      "{out}",
+      "{prompt}"
+    ],
+    "env": {},
+    "output": "file"
+  },
+  "account_env": "CODEX_HOME",
+  "account_default": "~/.codex",
+  "account_detect": "~/.codex-[a-z]",
+  "list_models": {
+    "kind": "json_file",
+    "path": "$CODEX_HOME/models_cache.json",
+    "list": "models",
+    "id": [
+      "slug",
+      "id"
+    ]
+  },
+  "usage": {
+    "kind": "codex_sessions",
+    "path": "$CODEX_HOME/sessions",
+    "windows": {
+      "300min": "5h",
+      "10080min": "weekly"
+    }
+  },
+  "quota_patterns": [
+    "usage limit",
+    "rate limit"
+  ],
+  "account_login": {
+    "file": "auth.json",
+    "identity": {
+      "jwt": "tokens.id_token",
+      "claims": {
+        "email": "email",
+        "plan": "https://api.openai.com/auth|chatgpt_plan_type",
+        "account": "https://api.openai.com/auth|chatgpt_account_id"
+      }
+    }
+  }
+}

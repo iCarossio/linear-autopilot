@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""state: locked edits of <repo>/.autopilot/state.json, so a coordinator's save never overwrites what run-model wrote
+concurrently (implementers, implementer_ids). Never edit state.json with a plain write while runs are in flight.
+
+  state get [dotted.key]                  # print the state, or one value
+  state set <dotted.key> <json-value>     # e.g. state set inflight.ENG-12 '{"wt": "...", "round": 2}'  |  state set push true
+  state del <dotted.key>
+  state push <dotted.key> <json-value>    # append to a list if absent (e.g. state push done '"ENG-12"')
+  state pull <dotted.key> <json-value>    # remove from a list (e.g. state pull queue '"ENG-12"')
+  state merge <json-object>               # shallow-merge top-level keys
+  state implementer <ISSUE> <roster-key>  # record a model (e.g. the coordinator itself before a hands-on fix) as an implementer
+                                          # of the ticket, with its canonical identity, so no account or harness of it reviews it
+Repo: nearest .autopilot/state.json above the current directory, or $AUTOPILOT_REPO.
+"""
+import json, os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+
+def walk(st, dotted, create=False):
+    parts = dotted.split('.')
+    cur = st
+    for p in parts[:-1]:
+        if p not in cur or not isinstance(cur[p], dict):
+            if not create:
+                return None, None
+            cur[p] = {}
+        cur = cur[p]
+    return cur, parts[-1]
+
+
+def val(s):
+    try:
+        return json.loads(s)
+    except Exception:
+        return s
+
+
+a = sys.argv[1:]
+if not a:
+    print(__doc__); sys.exit(1)
+repo = lib.find_repo()
+cmd = a[0]
+if cmd == 'get':
+    st = lib.load_state(repo)
+    if len(a) > 1:
+        parent, key = walk(st, a[1])
+        print(json.dumps(parent.get(key) if parent else None, indent=2))
+    else:
+        print(json.dumps(st, indent=2))
+elif cmd in ('set', 'del', 'push', 'pull'):
+    def fn(st):
+        parent, key = walk(st, a[1], create=True)
+        if cmd == 'set':
+            parent[key] = val(a[2])
+        elif cmd == 'del':
+            parent.pop(key, None)
+        elif cmd == 'push':
+            lst = parent.setdefault(key, [])
+            v = val(a[2])
+            if v not in lst:
+                lst.append(v)
+        elif cmd == 'pull':
+            lst = parent.setdefault(key, [])
+            v = val(a[2])
+            while v in lst:
+                lst.remove(v)
+    lib.update_state(repo, fn); print('ok')
+elif cmd == 'merge':
+    lib.update_state(repo, lambda st: st.update(json.loads(a[1]))); print('ok')
+elif cmd == 'implementer':
+    reg = lib.load_reg(); m = reg['models'].get(a[2]) or sys.exit('unknown roster key %s' % a[2])
+    lib.record_implementer(repo, a[1], a[2], m, lib.adapter_of(m)); print('ok')
+else:
+    print(__doc__); sys.exit(1)

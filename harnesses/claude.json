@@ -1,0 +1,47 @@
+{
+  "name": "claude",
+  "binary": "claude",
+  "vendor": "anthropic",
+  "doc": "Claude Code on a Claude plan. CLAUDE_CONFIG_DIR selects another login (another account and quota): standard homes ~/.claude, ~/.claude-b, ~/.claude-c. Shares the coordinator's quota when the coordinator is Claude Code on the same account.",
+  "run": {
+    "argv": [
+      "-p",
+      "{prompt}",
+      "--model",
+      "{model}",
+      "--dangerously-skip-permissions",
+      "--settings",
+      "{\"sandbox\":{\"enabled\":false}}"
+    ],
+    "env": {},
+    "output": "stdout"
+  },
+  "account_env": "CLAUDE_CONFIG_DIR",
+  "account_default": "~/.claude",
+  "account_detect": "~/.claude-[a-z]",
+  "list_models": {
+    "kind": "none",
+    "note": "no CLI listing: update model ids by hand when a newer version appears"
+  },
+  "usage": {
+    "kind": "command",
+    "argv": [
+      "-p",
+      "/usage"
+    ],
+    "regex": "^(Current [^:]+): (\\d+)% used[^\\n]*?(resets[^\\n]*)",
+    "groups": [
+      "window",
+      "used",
+      "reset_text"
+    ]
+  },
+  "quota_patterns": [
+    "usage limit",
+    "rate limit",
+    "extra usage"
+  ],
+  "account_login": {
+    "file": ".claude.json"
+  }
+}

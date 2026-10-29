@@ -1,0 +1,45 @@
+#!/bin/bash
+# finish <ISSUE> "<commit subject>" "<body>"
+# Commit the ticket in its worktree (<worktrees_dir>/<ISSUE>, or $WT), cherry-pick every commit of the ticket branch that is
+# not on the project branch (one commit normally; the whole range after a conflict recovery) onto the project branch, remove
+# the worktree, push if state.json says push: true. Prints `COMMITTED <sha> <ISSUE>`. Set NO_WT=1 to commit directly
+# in the repo (a ticket worked on without a worktree); otherwise a missing worktree is an error, never a silent fallback.
+# Exit 3 on a cherry-pick conflict: resolve in the repo (package.json/lockfiles: take the union of both sides' scripts and
+# deps, then reinstall), `git add`, `GIT_EDITOR=true git cherry-pick --continue`, then remove the worktree and branch
+# yourself; or `git cherry-pick --abort`, `rebase-wt <wt>` (it rebases the committed ticket) and run finish again.
+# Exit 4 when the push did not reach the remote.
+set -e
+ID=$1; SUBJ=$2; BODY=$3
+M=${AUTOPILOT_REPO:-$(d=$PWD; while [ "$d" != / ] && [ ! -f "$d/.autopilot/state.json" ]; do d=$(dirname "$d"); done; echo "$d")}
+[ -f "$M/.autopilot/state.json" ] || { echo "finish: no .autopilot/state.json"; exit 1; }
+IFS=$'\t' read -r BRANCH PUSH WTDIR TRAILER < <(python3 - "$M" <<'PY'
+import json, os, sys
+m = sys.argv[1]; s = json.load(open(os.path.join(m, '.autopilot', 'state.json')))
+print('\t'.join([s['branch'], 'yes' if s.get('push') else 'no', s.get('worktrees_dir') or os.path.join(os.path.dirname(m), os.path.basename(m) + '-wt'), s.get('trailer', '')]))
+PY
+)
+WT="${WT:-$WTDIR/$ID}"  # WT= overrides when the worktree is named after a parent ticket (e.g. PRD-2515a for step a1)
+# Append the ticket id once: a subject that already ends with it keeps it as is.
+case "$SUBJ" in *"[$ID]"|*"[${ID%[a-z]}]") FULL="$SUBJ" ;; *) FULL="$SUBJ [$ID]" ;; esac
+commit() { if [ -n "$TRAILER" ]; then git commit -q -m "$FULL" -m "$BODY" -m "$TRAILER"; else git commit -q -m "$FULL" -m "$BODY"; fi; }
+if [ -d "$WT" ]; then
+  cd "$WT"; WTBRANCH=$(git branch --show-current); git add -A
+  if ! git diff --cached --quiet; then commit; fi   # a ticket already committed (recovery after a conflict) has nothing new to commit
+  BASE=$(git merge-base "$BRANCH" HEAD); RANGE=$(git rev-list --count "$BASE..HEAD")
+  [ "$RANGE" -gt 0 ] || { echo "finish: nothing to integrate for $ID (no changes, no commits ahead of $BRANCH)"; exit 1; }
+  cd "$M"; git cherry-pick "$BASE..$WTBRANCH" >/dev/null || { echo "CONFLICT $ID"; git diff --name-only --diff-filter=U; exit 3; }
+  git worktree remove --force "$WT"; git branch -q -D "$WTBRANCH"
+elif [ "${NO_WT:-}" = 1 ]; then
+  cd "$M"; git add -A; commit
+else
+  echo "finish: worktree $WT does not exist (set WT=<path>, or NO_WT=1 to commit in the repo itself)"; exit 1
+fi
+cd "$M"
+if [ "$PUSH" = yes ]; then
+  git push -q origin "$BRANCH" 2>&1 | grep -v '^remote' || true
+  # A silent push failure must not pass for success: compare the remote branch with HEAD.
+  git fetch -q origin "$BRANCH" 2>/dev/null || true
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$BRANCH" 2>/dev/null)" ]; then echo "PUSH FAILED $ID (HEAD not on origin/$BRANCH)"; exit 4; fi
+  echo "PUSHED origin/$BRANCH"
+fi
+echo "COMMITTED $(git rev-parse --short HEAD) $ID"

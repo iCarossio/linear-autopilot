@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""linear: minimal Linear GraphQL client, used when the coordinator has no Linear MCP tools (any harness).
+Needs LINEAR_API_KEY (Settings > API > Personal API keys). No other dependency.
+
+  linear teams                                      # id, key, name
+  linear projects <TEAM_KEY>                        # projects of a team: id, name, state, url
+  linear states <TEAM_KEY>                          # workflow states: id, name, type
+  linear issues <PROJECT_ID>                        # every issue of a project (paginated): identifier, state, milestone, title, blockedBy
+  linear issue <IDENTIFIER>                         # one issue, full description
+  linear import <tickets.json> --team KEY [--project-id ID] [--dry-run]
+                                                    # create the project (unless --project-id), its milestones, every ticket and the
+                                                    # blocks relations. Idempotent and crash-safe: client-generated ids are checkpointed
+                                                    # in <tickets>.created.json BEFORE each request, and an interrupted creation is
+                                                    # reconciled by id on the next run (never a duplicate).
+  linear comment <IDENTIFIER> "<markdown>"
+  linear state <IDENTIFIER> "<state name>"          # e.g. "In Progress", "Done"
+  linear project-update <PROJECT_ID> "<markdown>"   # project status update (the resume point / summary)
+
+tickets.json:
+  {"project": {"name": "...", "description": "one paragraph", "content": "markdown body (the plan)"},
+   "milestones": [{"name": "M1 ...", "description": "..."}],
+   "tickets": [{"slug": "scaffold", "title": "...", "description": "markdown", "milestone": "M1 ...",
+                "estimate": 2, "priority": 2, "blocked_by": ["other-slug"], "labels": ["autopilot"]}]}
+"""
+import json, os, sys, urllib.request, uuid
+
+API = 'https://api.linear.app/graphql'
+
+
+def gql(query, variables=None):
+    key = os.environ.get('LINEAR_API_KEY')
+    if not key: sys.exit('linear: LINEAR_API_KEY is not set')
+    req = urllib.request.Request(API, data=json.dumps({'query': query, 'variables': variables or {}}).encode(),
+                                 headers={'Content-Type': 'application/json', 'Authorization': key})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        body = json.load(r)
+    if body.get('errors'): sys.exit('linear: ' + json.dumps(body['errors'])[:800])
+    return body['data']
+
+
+def paginate(query, path, variables=None):
+    """All nodes of a connection: `query` takes $after and returns pageInfo{hasNextPage endCursor} at `path`."""
+    nodes, after = [], None
+    while True:
+        data = gql(query, {**(variables or {}), 'after': after})
+        for p in path.split('.'): data = data[p]
+        nodes += data['nodes']
+        if not data['pageInfo']['hasNextPage']: return nodes
+        after = data['pageInfo']['endCursor']
+
+
+def all_teams():
+    return paginate('query($after:String){teams(first:100,after:$after){nodes{id key name} pageInfo{hasNextPage endCursor}}}', 'teams')
+
+
+def team(key):
+    t = [t for t in all_teams() if t['key'] == key]
+    if not t: sys.exit(f'linear: no team with key {key}')
+    return t[0]
+
+
+def states_of(team_id):
+    return paginate('query($id:String!,$after:String){team(id:$id){states(first:100,after:$after){nodes{id name type position} pageInfo{hasNextPage endCursor}}}}', 'team.states', {'id': team_id})
+
+
+def issue(identifier):
+    return gql('query($id:String!){issue(id:$id){id identifier title description url state{name} team{id key} project{id name} '
+               'inverseRelations(first:100){nodes{type issue{identifier}}}}}', {'id': identifier})['issue']
+
+
+def cmd_teams(a):
+    for t in all_teams(): print(f"{t['id']}  {t['key']:<8} {t['name']}")
+
+
+def cmd_projects(a):
+    t = team(a[0])
+    for p in paginate('query($id:String!,$after:String){team(id:$id){projects(first:100,after:$after){nodes{id name state url} pageInfo{hasNextPage endCursor}}}}', 'team.projects', {'id': t['id']}):
+        print(f"{p['id']}  {p['state']:<10} {p['name']}  {p['url']}")
+
+
+def cmd_states(a):
+    t = team(a[0])
+    for s in states_of(t['id']):
+        print(f"{s['id']}  {s['type']:<10} {s['name']}")
+
+
+def cmd_issues(a):
+    nodes = paginate('query($id:String!,$after:String){project(id:$id){issues(first:100,after:$after){nodes{identifier title state{name} projectMilestone{name} '
+                     'inverseRelations(first:100){nodes{type issue{identifier}}}} pageInfo{hasNextPage endCursor}}}}', 'project.issues', {'id': a[0]})
+    for i in nodes:
+        blocked = [r['issue']['identifier'] for r in i['inverseRelations']['nodes'] if r['type'] == 'blocks']
+        print(f"{i['identifier']:<10} {i['state']['name']:<12} {(i['projectMilestone'] or {}).get('name', '-'):<20} {i['title']}  blockedBy={blocked or '-'}")
+
+
+def cmd_issue(a):
+    print(json.dumps(issue(a[0]), indent=1))
+
+
+def cmd_import(a):
+    path = a[0]; spec = json.load(open(path)); dry = '--dry-run' in a
+    if '--team' not in a: sys.exit('linear import: --team KEY required')
+    # Validate everything before any mutation: unique slugs, known milestones, resolvable dependencies.
+    slugs = [tk['slug'] for tk in spec['tickets']]
+    dup = sorted({x for x in slugs if slugs.count(x) > 1})
+    if dup: sys.exit(f'linear import: duplicate ticket slugs {dup}')
+    mnames = {m['name'] for m in spec.get('milestones', [])}
+    bad_m = [tk['slug'] for tk in spec['tickets'] if tk.get('milestone') and tk['milestone'] not in mnames]
+    if bad_m: sys.exit(f'linear import: tickets with an unknown milestone: {bad_m}')
+    bad_d = [(tk['slug'], b) for tk in spec['tickets'] for b in tk.get('blocked_by', []) if b not in slugs]
+    if bad_d: sys.exit(f'linear import: unresolved blocked_by references: {bad_d}')
+    t = team(a[a.index('--team') + 1])
+    created_path = path.rsplit('.', 1)[0] + '.created.json'
+    created = json.load(open(created_path)) if os.path.exists(created_path) else {}
+    for k, v in (('project_id', None), ('milestones', {}), ('tickets', {}), ('relations', []), ('pending', {})):
+        created.setdefault(k, v)
+
+    def persist():
+        tmp = created_path + '.tmp'
+        json.dump(created, open(tmp, 'w'), indent=2); os.replace(tmp, created_path)
+
+    def reserve(kind, name):
+        """Client-generated id, checkpointed before the request so a crash mid-request is reconciled, never duplicated."""
+        pid = created['pending'].get(f'{kind}:{name}')
+        if not pid:
+            pid = str(uuid.uuid4()); created['pending'][f'{kind}:{name}'] = pid; persist()
+        return pid
+
+    def exists(kind, id_):
+        q = {'project': 'query($id:String!){project(id:$id){id url}}', 'milestone': 'query($id:String!){projectMilestone(id:$id){id}}',
+             'issue': 'query($id:String!){issue(id:$id){id identifier url}}', 'relation': 'query($id:String!){issueRelation(id:$id){id}}'}[kind]
+        try: return gql(q, {'id': id_})[{'project': 'project', 'milestone': 'projectMilestone', 'issue': 'issue', 'relation': 'issueRelation'}[kind]]
+        except SystemExit: return None
+
+    flag_pid = a[a.index('--project-id') + 1] if '--project-id' in a else None
+    if flag_pid and created['project_id'] and created['project_id'] != flag_pid:
+        sys.exit(f"linear import: checkpoint {created_path} belongs to project {created['project_id']}, not {flag_pid}")
+    pid = flag_pid or created['project_id']
+    if flag_pid and not created['project_id'] and not dry:
+        created['project_id'] = flag_pid; persist()
+    if not pid:
+        p = spec['project']; cid = reserve('project', p['name']) if not dry else None
+        print(f"create project {p['name']!r}")
+        if not dry:
+            found = exists('project', cid)
+            if not found:
+                found = gql('mutation($i:ProjectCreateInput!){projectCreate(input:$i){project{id url}}}',
+                            {'i': {'id': cid, 'name': p['name'], 'description': p.get('description', '')[:255], 'content': p.get('content', ''), 'teamIds': [t['id']]}})['projectCreate']['project']
+            pid = found['id']; created['project_id'] = pid; created['project_url'] = found.get('url'); persist()
+    for m in spec.get('milestones', []):
+        if m['name'] in created['milestones']: continue
+        print(f"create milestone {m['name']!r}")
+        if dry: continue
+        cid = reserve('milestone', m['name'])
+        if not exists('milestone', cid):
+            gql('mutation($i:ProjectMilestoneCreateInput!){projectMilestoneCreate(input:$i){projectMilestone{id}}}',
+                {'i': {'id': cid, 'name': m['name'], 'description': m.get('description', ''), 'projectId': pid}})
+        created['milestones'][m['name']] = cid; persist()
+    labels = {}
+    if any(tk.get('labels') for tk in spec['tickets']) and not dry:
+        labels = {l['name']: l['id'] for l in paginate('query($after:String){issueLabels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}', 'issueLabels')}
+    for tk in spec['tickets']:
+        if tk['slug'] in created['tickets']: continue
+        print(f"create issue [{tk['slug']}] {tk['title']}")
+        if dry: continue
+        if tk.get('milestone') and tk['milestone'] not in created['milestones']: sys.exit(f"linear import: ticket {tk['slug']} names unknown milestone {tk['milestone']!r}")
+        cid = reserve('issue', tk['slug'])
+        found = exists('issue', cid)
+        if not found:
+            inp = {'id': cid, 'teamId': t['id'], 'projectId': pid, 'title': tk['title'], 'description': tk.get('description', '')}
+            if tk.get('milestone'): inp['projectMilestoneId'] = created['milestones'][tk['milestone']]
+            if tk.get('estimate') is not None: inp['estimate'] = tk['estimate']
+            if tk.get('priority') is not None: inp['priority'] = tk['priority']
+            ids = [labels[l] for l in tk.get('labels', []) if l in labels]
+            if ids: inp['labelIds'] = ids
+            found = gql('mutation($i:IssueCreateInput!){issueCreate(input:$i){issue{id identifier url}}}', {'i': inp})['issueCreate']['issue']
+        created['tickets'][tk['slug']] = found; persist()
+    for tk in spec['tickets']:
+        for b in tk.get('blocked_by', []):
+            rel = f'{b}->{tk["slug"]}'
+            if rel in created['relations']: continue
+            print(f"relation {b} blocks {tk['slug']}")
+            if dry: continue
+            cid = reserve('relation', rel)
+            if not exists('relation', cid):
+                gql('mutation($i:IssueRelationCreateInput!){issueRelationCreate(input:$i){success}}',
+                    {'i': {'id': cid, 'issueId': created['tickets'][b]['id'], 'relatedIssueId': created['tickets'][tk['slug']]['id'], 'type': 'blocks'}})
+            created['relations'].append(rel); persist()
+    print(json.dumps({'project_id': pid, 'project_url': created.get('project_url'), 'tickets': {s: v['identifier'] for s, v in created['tickets'].items()}}, indent=1))
+
+
+def cmd_comment(a):
+    i = issue(a[0])
+    gql('mutation($i:CommentCreateInput!){commentCreate(input:$i){success}}', {'i': {'issueId': i['id'], 'body': a[1]}}); print('ok')
+
+
+def cmd_state(a):
+    i = issue(a[0])
+    states = states_of(i['team']['id'])
+    s = next((s for s in states if s['name'].lower() == a[1].lower()), None) or sys.exit(f'linear: no state {a[1]!r} in team {i["team"]["key"]}')
+    gql('mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}', {'id': i['id'], 'i': {'stateId': s['id']}}); print('ok')
+
+
+def cmd_project_update(a):
+    gql('mutation($i:ProjectUpdateCreateInput!){projectUpdateCreate(input:$i){success}}', {'i': {'projectId': a[0], 'body': a[1]}}); print('ok')
+
+
+if __name__ == '__main__':
+    a = sys.argv[1:]
+    cmds = {'teams': cmd_teams, 'projects': cmd_projects, 'states': cmd_states, 'issues': cmd_issues, 'issue': cmd_issue,
+            'import': cmd_import, 'comment': cmd_comment, 'state': cmd_state, 'project-update': cmd_project_update}
+    if not a or a[0] not in cmds: print(__doc__); sys.exit(1)
+    cmds[a[0]](a[1:])

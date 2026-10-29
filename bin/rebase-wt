@@ -1,0 +1,38 @@
+#!/bin/bash
+# rebase-wt <worktree>  : bring a worktree's ticket work onto the current project branch head.
+# - uncommitted work: stash (unique, found by its own message, never by stack position) -> fast-forward -> apply.
+# - work already committed on the ticket branch (e.g. after a `finish` cherry-pick conflict + `git cherry-pick --abort`
+#   in the repo): rebase the ticket branch onto the project branch instead.
+# The whole operation holds a repo-level lock: the stash stack is shared by every worktree of a repo, so two
+# parallel rebase-wt calls must never interleave. On conflicts it prints the files and exits 3 (the stash is kept, or
+# the rebase is aborted): resolve in the worktree, then `git reset -q && git stash drop <ref>` for a kept stash.
+set -e
+W=$1; [ -d "$W" ] || { echo "rebase-wt: no such worktree $W"; exit 1; }
+cd "$W"
+GITDIR=$(git rev-parse --git-common-dir)
+LOCK="$GITDIR/autopilot-rebase.lock"
+for i in $(seq 1 600); do mkdir "$LOCK" 2>/dev/null && break; sleep 1; [ "$i" = 600 ] && { echo "rebase-wt: lock held for 10 min: $LOCK"; exit 1; }; done
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+# The first entry of `git worktree list` is the main checkout, which sits on the project branch.
+BRANCH=$(git worktree list --porcelain | awk '/^branch /{print $2; exit}' | sed 's#refs/heads/##')
+TAG="rebase-wt-$(basename "$W")-$$-$(date +%s)"
+git stash push -u -q -m "$TAG" || true
+REF=$(git stash list --format='%gd %gs' | awk -v t="$TAG" '$0 ~ t {print $1; exit}')
+AHEAD=$(git rev-list --count "$BRANCH..HEAD")
+if [ "$AHEAD" = 0 ]; then
+  git merge -q --ff-only "$BRANCH"
+else
+  if ! git rebase "$BRANCH" >/dev/null 2>&1; then
+    echo "CONFLICT (rebase of $AHEAD committed ticket commit(s) onto $BRANCH)"; git diff --name-only --diff-filter=U; git rebase --abort
+    [ -n "$REF" ] && echo "stash kept: $REF ($TAG)"; exit 3
+  fi
+fi
+if [ -n "$REF" ]; then
+  SHA=$(git rev-parse "$REF")
+  if ! git stash apply -q "$SHA" 2>/dev/null; then
+    echo "CONFLICT"; git diff --name-only --diff-filter=U; echo "stash kept: $REF ($TAG)"; exit 3
+  fi
+  DROP=$(git stash list --format='%gd %gs' | awk -v t="$TAG" '$0 ~ t {print $1; exit}')
+  [ -n "$DROP" ] && git stash drop -q "$DROP"
+fi
+echo "REBASED $(git rev-parse --short HEAD)"

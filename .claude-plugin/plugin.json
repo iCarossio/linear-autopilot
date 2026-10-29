@@ -1,0 +1,7 @@
+{
+  "name": "linear-autopilot",
+  "version": "0.2.0",
+  "description": "Plan a project adversarially (pre-mortem by two high-tier models of different vendors), create the Linear project, then implement it ticket by ticket with cheap models and cross-model review, on any AI coding CLI (Codex, Claude, opencode, Grok, Gemini, ...), several accounts per CLI, never paying for extra credits.",
+  "author": {"name": "Antoine Carossio"},
+  "keywords": ["linear", "autopilot", "multi-model", "codex", "claude", "pre-mortem"]
+}

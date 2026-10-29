@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""premortem <PLAN.md> --planner <KEY> [--repo DIR] [--k 2] [--exclude-vendor V[,V]] [--exclude KEY[,KEY]] [--allow-mid] [--only-pass 1|2] [--dry-run]
+
+Adversarial pre-mortem of a project plan by k high-tier models from k different vendors, before any Linear ticket
+exists. Each reviewer is told: "we are at the deadline and the project failed; what are the most probable reasons?".
+Two passes: (1) independent pre-mortems in parallel; (2) each reviewer re-reads its own list and the other's, agrees
+or disagrees with evidence, adds what both missed, and returns a ranked merged list. The script merges the final list
+of every reviewer (deduplicated by title similarity), ranks by probability x impact and writes:
+
+  <repo>/.autopilot/plan/premortem-<key>-<pass>.md      full reviewer outputs
+  <repo>/.autopilot/plan/premortem.json                 merged, ranked reasons (machine-readable), with per-reviewer status
+  <repo>/.autopilot/plan/premortem.md                   the table to show the user verbatim
+
+Hard rules (fail closed):
+- --planner <roster key> is required (or --exclude-vendor): the planner's vendor and model id are excluded on every
+  account, so a model never reviews its own plan;
+- reviewers come from the `premortem` and `plan_review` pools only, cost `high` only (--allow-mid adds `mid`), k
+  distinct vendors; when fewer are available the run is degraded, never filled with a second model of the same vendor;
+- a reviewer that modified the tree, or whose output does not parse, does not count.
+
+Exit 0 = every reviewer completed both passes; 1 = degraded (fewer reviewers, or a pass-2 missing: the table says
+which); 2 = no usable result. --dry-run prints who would review and exits 0 (k found) or 1.
+"""
+import concurrent.futures as cf, json, os, re, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+RM = os.path.join(lib.HERE, 'run-model')
+IMPACT = {'fatal': 3.0, 'severe': 2.0, 'moderate': 1.0}
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def template(name):
+    for d in (os.path.join(lib.CONFIG_DIR, 'prompts'), os.path.join(lib.HOME, 'prompts')):
+        p = os.path.join(d, name)
+        if os.path.exists(p): return open(p).read()
+    sys.exit(f'premortem: template {name} not found')
+
+
+def words(s): return set(re.findall(r'[a-z]{3,}', (s or '').lower()))
+
+
+def similar(a, b):
+    wa, wb = words(a.get('title')) | words(a.get('id')), words(b.get('title')) | words(b.get('id'))
+    return a.get('id') == b.get('id') or (wa and wb and len(wa & wb) / len(wa | wb) >= 0.5)
+
+
+args = sys.argv[1:]
+if not args or args[0].startswith('--'): print(__doc__); sys.exit(1)
+plan_path = os.path.abspath(args[0])
+repo = os.path.abspath(opt(args, '--repo', os.path.dirname(plan_path)))
+k = int(opt(args, '--k', 2))
+planner = opt(args, '--planner')
+ex_vendors = [v for v in opt(args, '--exclude-vendor', '').split(',') if v]
+ex_keys = [v for v in opt(args, '--exclude', '').split(',') if v]
+only = opt(args, '--only-pass')
+reg = lib.load_reg(); ad = lib.adapters()
+if planner:
+    if planner not in reg['models']: sys.exit(f'premortem: unknown planner key {planner}')
+    ex_keys.append(planner); ex_vendors.append(lib.vendor_of(reg['models'][planner], ad.get(reg['models'][planner]['cli'])))
+if not ex_vendors:
+    sys.exit('premortem: --planner <roster key> (or --exclude-vendor <vendor>) is required: a model must not review its own plan')
+EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, ad=ad)
+floor = {'high', 'mid'} if '--allow-mid' in args else {'high'}
+pick, vendors = lib.pick_reviewers(reg, ['premortem', 'plan_review'], k, EX, ad, cost_floor=floor)
+names = ', '.join('%s (%s)' % (x, v) for x, v in zip(pick, vendors)) or 'none'
+print('reviewers: %s  (excluded vendors: %s; cost: %s)' % (names, ', '.join(sorted(set(ex_vendors))), '/'.join(sorted(floor))))
+if '--dry-run' in args:
+    sys.exit(0 if len(pick) >= k else 1)
+if not pick:
+    print('NO_REVIEWER: no healthy high-tier model outside the excluded vendors (run-model health / usage; --allow-mid; or wait: run-model wait premortem)'); sys.exit(2)
+out_dir = os.path.join(repo, '.autopilot', 'plan'); os.makedirs(out_dir, exist_ok=True)
+plan = open(plan_path).read()
+plan_digest = lib.digest_text(plan)
+run_id = lib.now().strftime('%Y%m%dT%H%M%S')
+meta_path = os.path.join(out_dir, 'premortem.json')
+prev = lib.read_json(meta_path) if os.path.exists(meta_path) else {}
+if only != '2' and prev:
+    # Invalidate the previous metadata BEFORE any output file is overwritten: a crash mid-run must not leave a
+    # stale `ok` that would authorise reusing a replaced file.
+    prev['superseded_by'] = run_id
+    for st_ in (prev.get('reviewers') or {}).values(): st_['pass1'] = st_['pass2'] = 'superseded'
+    lib.write_json_atomic(meta_path, prev)
+
+
+def brief_for(key, n, mine, other):
+    tpl = template('premortem.md' if n == 1 else 'premortem-cross.md')
+    rep = {'PLAN_PATH': plan_path, 'PLAN': plan, 'CWD': repo, 'PASS': str(n), 'REVIEWER': key,
+           'MINE': json.dumps(mine, indent=1) if mine else '(none)', 'OTHER': json.dumps(other, indent=1) if other else '(none)'}
+    for a, b in rep.items(): tpl = tpl.replace('{{' + a + '}}', b)
+    p = os.path.join(out_dir, f'premortem-brief-{key}-{n}.md'); open(p, 'w').write(tpl); return p
+
+
+def run(key, n, mine=None, other=None):
+    out = os.path.join(out_dir, f'premortem-{key}-{n}.md')
+    cmd = [RM, 'run', 'review', brief_for(key, n, mine, other), out, '--cwd', repo, '--standalone', '--pool', 'premortem', '--exclude-vendor', ','.join(sorted(set(ex_vendors))), '--model', key]
+    if '--allow-mid' in args: cmd.append('--allow-mid')
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    try: res = json.loads(p.stdout.strip().splitlines()[-1])
+    except Exception: res = {'status': 'error', 'raw': p.stdout[-300:]}
+    j = lib.parse_json_block(out) if res.get('status') == 'ok' else None
+    res['digest'] = lib.digest_text(open(out, errors='ignore').read()) if os.path.exists(out) else None
+    if res.get('reviewer_modified_tree'): j = None; res['status'] = 'discarded_modified_tree'
+    if j is not None:
+        good, dropped = lib.validate_reasons(j)
+        if good is None or not good: j = None; res['status'] = 'bad_output'
+        else: j = dict(j, reasons=good); res['dropped_reasons'] = dropped
+    print('pass %s %s: %s %ss %s' % (n, key, res.get('status'), res.get('seconds', ''), '(%d reasons, %d dropped)' % (len(j['reasons']), res.get('dropped_reasons', 0)) if j else ''))
+    return key, res, j
+
+
+snap = lib.snapshot(repo)
+status = {x: {'vendor': vendors[i], 'pass1': None, 'pass2': None} for i, x in enumerate(pick)}
+first = {}
+if only == '2':
+    for key in pick:
+        pst = (prev.get('reviewers') or {}).get(key, {})
+        f1 = os.path.join(out_dir, 'premortem-%s-1.md' % key)
+        cur = lib.digest_text(open(f1, errors='ignore').read()) if os.path.exists(f1) else None
+        if pst.get('pass1') not in ('ok', 'ok (reused)') or prev.get('plan_digest') != plan_digest or not cur or pst.get('pass1_digest') != cur:
+            status[key]['pass1'] = 'not reusable (%s)' % ('plan changed' if prev.get('plan_digest') != plan_digest else (pst.get('pass1') or 'no validated prior pass 1 for this file')); continue
+        good, _ = lib.validate_reasons(lib.parse_json_block(f1))
+        if good: first[key] = {'reasons': good}; status[key]['pass1'] = 'ok (reused)'; status[key]['pass1_digest'] = cur
+        else: status[key]['pass1'] = 'not reusable (invalid file)'
+    for key in pick: print('pass 1 %s: %s' % (key, status[key]['pass1']))
+else:
+    with cf.ThreadPoolExecutor(len(pick)) as ex:
+        for key, res, j in ex.map(lambda x: run(x, 1), pick):
+            status[key]['pass1'] = res.get('status')
+            if j: first[key] = j; status[key]['pass1_digest'] = res.get('digest')
+second = {}
+if only != '1' and len(first) >= 1:
+    with cf.ThreadPoolExecutor(len(first)) as ex:
+        jobs = [(key, first[key], {o: first[o] for o in first if o != key}) for key in first]
+        for key, res, j in ex.map(lambda kj: run(kj[0], 2, kj[1], kj[2] or None), jobs):
+            status[key]['pass2'] = res.get('status')
+            if j: second[key] = j; status[key]['pass2_digest'] = res.get('digest')
+restored = lib.restore(repo, snap, 'premortem-junk')
+if restored == 'restored': print('TREE RESTORED: a reviewer modified the tree; its edits were reverted')
+elif restored == 'history_changed': print('HISTORY CHANGED: a reviewer committed or moved HEAD; nothing rewritten automatically. Inspect git log/status; discard this run'); sys.exit(2)
+elif restored == 'restore_failed': print('TREE RESTORE FAILED: a reviewer modified the repository and the snapshot could not be re-applied; inspect it (untracked junk in .tmp/). This run is unusable'); sys.exit(2)
+
+final = {key: (second.get(key) or first.get(key)) for key in pick if second.get(key) or first.get(key)}
+merged = []
+for key, j in final.items():
+    for r in j.get('reasons', []):
+        r = dict(r); r['raised_by'] = [key]
+        hit = next((m for m in merged if similar(m, r)), None)
+        if hit:
+            hit['raised_by'] = sorted(set(hit['raised_by'] + [key]))
+            hit['probability'] = max(float(hit.get('probability') or 0), float(r.get('probability') or 0))
+            if IMPACT.get(r.get('impact'), 0) > IMPACT.get(hit.get('impact'), 0): hit['impact'] = r['impact']
+            for f in ('why', 'early_signal', 'guardrail', 'kpi_link'):
+                if r.get(f) and r[f] not in (hit.get(f) or ''): hit[f] = ((hit.get(f) or '') + ' | ' + r[f]).strip(' |')
+        else:
+            merged.append(r)
+for r in merged:
+    r['score'] = round(float(r.get('probability') or 0) * IMPACT.get(r.get('impact'), 1.0), 2)
+merged.sort(key=lambda r: (-r['score'], -len(r['raised_by'])))
+complete = [x for x in pick if second.get(x)]
+degraded = len(final) < k or len(complete) < len(final)
+result = {'run_id': run_id, 'plan': plan_path, 'plan_digest': plan_digest, 'planner': planner, 'excluded_vendors': sorted(set(ex_vendors)), 'reviewers': status,
+          'answered': list(final), 'complete_both_passes': complete, 'degraded': degraded, 'reasons': merged,
+          'summaries': {x: j.get('summary', '') for x, j in final.items()}, 'at': lib.now().astimezone().isoformat()}
+lib.write_json_atomic(meta_path, result)
+who = ', '.join('%s (%s, %s)' % (x, status[x]['vendor'], 'both passes' if x in complete else 'pass 1 only') for x in final)
+head = '# Pre-mortem: %d failure reasons from %s' % (len(merged), who)
+if degraded: head += '  **DEGRADED**: wanted %d reviewers with both passes (status: %s)' % (k, json.dumps({x: (s['pass1'], s['pass2']) for x, s in status.items()}))
+lines = [head, '', '| # | Failure reason | P | Impact | Raised by | Early signal | Guardrail to add |', '|---|---|---|---|---|---|---|']
+for i, r in enumerate(merged, 1):
+    lines.append('| %d | **%s**: %s | %s | %s | %s | %s | %s |' % (i, r.get('title', r.get('id', '')), r.get('why', ''), r.get('probability', ''), r.get('impact', ''), ', '.join(r['raised_by']), r.get('early_signal', ''), r.get('guardrail', '')))
+for x, s in result['summaries'].items(): lines += ['', '%s: %s' % (x, s)]
+open(os.path.join(out_dir, 'premortem.md'), 'w').write('\n'.join(lines) + '\n')
+print('wrote %s and premortem.json: %d reasons, top: %s' % (os.path.join(out_dir, 'premortem.md'), len(merged), ', '.join(str(r.get('title', '')) for r in merged[:3])))
+sys.exit(2 if not final else (1 if degraded else 0))

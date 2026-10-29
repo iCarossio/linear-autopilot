@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""eta  -> progress bar for the whole project scope, then the ETA line (`eta -v` adds the schedule).
+
+The ETA is a schedule, not a throughput extrapolation:
+- `stages` in state.json: ordered list of stages, each a list of ticket ids that run in parallel. A stage
+  lasts as long as its slowest item; stages run one after the other. In-flight tickets missing from
+  `stages` form the first stage, queued tickets missing from it each get their own stage at the end.
+- Duration of an item: `est` in state.json (ticket -> {"min": minutes, "at": ISO time}) is the
+  coordinator's estimate of the minutes LEFT when it was set; for an in-flight item it counts down from
+  `at` and never drops below 15% of itself while the item is still open (an overdue item keeps a tail);
+  a queued item keeps its full estimate until it starts. Without `est`, the item
+  takes size x (measured minutes per size unit), where the measurement uses the tickets committed in the
+  last 8 active hours (gaps over 1 h count as 1 h) times the average parallelism `parallel`.
+- Update `est` whenever a round starts or ends (a review that sends a ticket back adds a round, ~30-40
+  min for a fix round); keep `stages` in step with the real dependency order.
+
+Progress = size-weighted done / (done + remaining), sizes from `sizes` (default 1.0).
+"""
+import datetime as dt, json, os, re, subprocess, sys
+
+
+def find_repo():
+    if os.environ.get('AUTOPILOT_REPO'):
+        return os.environ['AUTOPILOT_REPO']
+    d = os.getcwd()
+    while d != '/':
+        if os.path.exists(os.path.join(d, '.autopilot', 'state.json')):
+            return d
+        d = os.path.dirname(d)
+    sys.exit('eta: no .autopilot/state.json found (set AUTOPILOT_REPO)')
+
+
+M = find_repo()
+S = json.load(open(os.path.join(M, '.autopilot', 'state.json')))
+sizes, est = S.get('sizes', {}), S.get('est', {})
+size = lambda t: float(sizes.get(t, 1.0))
+inflight, done = S.get('inflight', {}), S.get('done', [])
+queue = [t for i, t in enumerate(S.get('queue', [])) if t not in inflight and t not in done and t not in S.get('queue', [])[:i]]
+now = dt.datetime.now(dt.timezone.utc)
+
+# Measured fallback: minutes of wall time per size unit on one lane, over the recent active window.
+log = subprocess.run(['git', '-C', M, 'log', '--format=%ct %s', S['branch']], capture_output=True, text=True).stdout
+commits = []
+for line in log.splitlines():  # newest first
+    ts, subject = line.split(' ', 1)
+    m = re.search(r'\[([A-Z]+-\d+[a-z]?\d?)\]', subject)
+    if m and m.group(1) in done:
+        commits.append((int(ts), m.group(1)))
+GAP, WINDOW = 3600, 8 * 3600
+active, work, prev = 0.0, 0.0, now.timestamp()
+for ts, t in commits:
+    active += min(prev - ts, GAP)
+    work += size(t)
+    prev = ts
+    if active >= WINDOW:
+        break
+per_unit = (active / 60) / work * float(S.get('parallel', 2)) if work else 60.0
+# A state override wins when the measured window is not representative (new repo, rewritten history).
+if S.get('per_unit_min'): per_unit = float(S['per_unit_min'])
+
+
+def minutes(t):
+    e = est.get(t)
+    if e and t not in inflight:  # not started yet: the full estimate, no countdown
+        return float(e['min'])
+    if e:
+        left = float(e['min']) - (now - dt.datetime.fromisoformat(e['at'])).total_seconds() / 60
+        return max(left, 0.15 * float(e['min']))
+    frac = float(inflight[t].get('remaining', 0.5)) if t in inflight else 1.0
+    return size(t) * frac * per_unit
+
+
+stages, seen = [], set()
+for st in S.get('stages', []):
+    items = [t for t in st if t in inflight or t in queue]
+    if items:
+        stages.append(items)
+        seen.update(items)
+first = [t for t in inflight if t not in seen]
+if first:
+    stages.insert(0, first)
+stages += [[t] for t in queue if t not in seen]
+total, plan = 0.0, []
+for st in stages:
+    d = max(minutes(t) for t in st)
+    total += d
+    plan.append((st, d))
+end = (now + dt.timedelta(minutes=total)).astimezone()
+
+remaining_units = sum(size(t) * (float(inflight[t].get('remaining', 0.5)) if t in inflight else 1.0)
+                      for st in stages for t in st)
+done_units = sum(size(t) for t in done) + sum(size(t) * (1 - float(inflight[t].get('remaining', 0.5))) for t in inflight)
+pct = done_units / (done_units + remaining_units) if done_units + remaining_units else 1.0
+bar = '█' * round(pct * 30) + '░' * (30 - round(pct * 30))
+print(f"[{bar}] {pct:.0%}  {len(done)} done, {len(inflight)} in flight, {len(queue)} to do  |  "
+      f"ETA {end:%a %H:%M} (±{max(10, round(total * 0.2))} min)")
+if '-v' in sys.argv:
+    t0 = now
+    for st, d in plan:
+        t0 += dt.timedelta(minutes=d)
+        src = ', '.join(f"{t} {minutes(t):.0f}m{'' if t in est else '*'}" for t in st)
+        print(f"  until {t0.astimezone():%H:%M}  {src}")
+    print(f"  (* = measured fallback: {per_unit:.0f} min per size unit over {active / 3600:.1f} active h)")

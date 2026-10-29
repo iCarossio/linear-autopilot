@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# codex-reset [--yes] [--account default|CODEX_HOME=<path>]  -> redeem one Codex "Full reset (Weekly + 5 hr)" through the
+# interactive TUI (/usage -> 2. Redeem reset -> 1. the reset that expires first) on one account.
+#
+# Only with the user's explicit permission for the current session (record it in state.json notes).
+# Refuses unless `run-model usage` shows that account's Codex WEEKLY window at 100%: a 5-hour limit alone is never
+# a reason to spend a reset. Without --yes it only prints the available resets and exits.
+# Prints the last screen; any unexpected screen after choosing makes it stop with Esc and exit 2 instead of guessing.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CHOOSE=0; ACCOUNT=default
+while [ $# -gt 0 ]; do case "$1" in --yes) CHOOSE=1;; --account) ACCOUNT="$2"; shift;; *) echo "unknown flag $1"; exit 1;; esac; shift; done
+weekly=$("$HERE/run-model" usage | python3 -c "
+import json, sys
+acc = sys.argv[1]
+u = [e for e in json.load(sys.stdin)['usage'] if e['cli'] == 'codex' and e['account'] == acc]
+w = [x for e in u for x in e['windows'] if x.get('window') == 'weekly' and x.get('used') is not None]
+print(w[0]['used'] if w else -1)" "$ACCOUNT")
+echo "codex weekly used ($ACCOUNT): ${weekly}%"
+[ "$weekly" = -1 ] && { echo "REFUSED: no weekly reading for account $ACCOUNT (run-model usage)"; exit 3; }
+if [ "$CHOOSE" = 1 ] && [ "$weekly" -lt 100 ]; then echo "REFUSED: weekly limit not reached"; exit 3; fi
+case "$ACCOUNT" in CODEX_HOME=*) export CODEX_HOME="${ACCOUNT#CODEX_HOME=}"; CODEX_HOME="${CODEX_HOME/#\~/$HOME}";; esac
+command -v expect >/dev/null || { echo "codex-reset: expect is not installed"; exit 1; }
+TMP=$(mktemp -d)
+cat > "$TMP/r.exp" <<EOX
+set timeout 2
+set stty_init "rows 50 cols 140"
+set env(TERM) xterm-256color
+log_user 0
+log_file -a $TMP/screen.txt
+spawn codex --no-alt-screen
+proc pump {secs} {
+  set end [expr {[clock seconds] + \$secs}]
+  while {[clock seconds] < \$end} {
+    expect {
+      -re "\033\\\\\[6n" { send -- "\033\[20;1R"; exp_continue }
+      -re "\033\\\\\[c" { send -- "\033\[?62;c"; exp_continue }
+      -re "\033\\\\\[\\\\?u" { send -- "\033\[?0u"; exp_continue }
+      timeout {}
+      eof { return }
+    }
+  }
+}
+proc screen {} { set f [open "$TMP/screen.txt"]; set d [read \$f]; close \$f; return \$d }
+proc need {what label} {
+  if {[string first \$what [screen]] < 0} { puts "UNEXPECTED SCREEN: \$label (expected '\$what')"; send -- "\033"; send -- "\033"; catch {send -- "\003"}; exit 2 }
+}
+pump 12
+send -- "/usage"; pump 2
+send -- "\r"; pump 6
+need "Usage limit resets" "the /usage screen did not appear"
+send -- "2"; pump 12
+need "Redeem" "the redeem menu did not appear"
+set before [string length [screen]]
+if {$CHOOSE} {
+  send -- "1"; pump 15
+  set after [string range [screen] \$before end]
+  if {![regexp -nocase {(applied|redeemed|has been reset|success|confirm)} \$after]} { puts "UNEXPECTED SCREEN: no redemption confirmation after choosing"; send -- "\033"; send -- "\033"; catch {send -- "\003"}; exit 2 }
+}
+send -- "\033"; pump 1
+send -- "\033"; pump 1
+catch {send -- "\003"}; pump 1
+catch {send -- "\003"}; pump 2
+exit 0
+EOX
+expect "$TMP/r.exp" > "$TMP/out.txt" 2>&1; EXPECT_RC=$?
+cat "$TMP/screen.txt" >> "$TMP/out.txt" 2>/dev/null || true
+[ "$EXPECT_RC" = 0 ] || { cat "$TMP/out.txt" | tail -5; echo "full transcript: $TMP/out.txt"; exit 2; }
+python3 - "$TMP/out.txt" "$CHOOSE" <<'PYEOF' || { echo "full transcript: $TMP/out.txt"; exit 2; }
+import re, sys
+t = open(sys.argv[1], errors='ignore').read()
+t = re.sub(r'\x1b\[[0-9;?<>=]*[ -/]*[@-~]', '', t); t = re.sub(r'\x1b[\]P][^\x07\x1b]*(\x07|\x1b\\)', '', t); t = re.sub(r'\x1b.', '', t)
+i = t.find('Usage limit resets')
+if i < 0:
+    print('UNEXPECTED SCREEN: the reset menu was not reached (nothing was redeemed)'); sys.exit(2)
+print(re.sub(r' {3,}', '\n', t[i:i + 1500]))
+if sys.argv[2] == '1' and not re.search(r'redeem|reset applied|has been reset|success', t[i:], re.I):
+    print('UNEXPECTED SCREEN after choosing: redemption not confirmed'); sys.exit(2)
+PYEOF
+echo "full transcript: $TMP/out.txt"
+[ "$CHOOSE" = 1 ] && "$HERE/run-model" usage | python3 -c "
+import json, sys
+acc = sys.argv[1]
+print('codex after:', [(x['window'], x['used']) for e in json.load(sys.stdin)['usage'] if e['cli'] == 'codex' and e['account'] == acc for x in e['windows']])" "$ACCOUNT" || true

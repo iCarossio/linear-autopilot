@@ -1,0 +1,14 @@
+{
+  "name": "gemini",
+  "binary": "gemini",
+  "vendor": "google",
+  "doc": "Google Gemini CLI. Untested in the pools so far: smoke it before adding it to a pool.",
+  "run": {
+    "argv": ["-p", "{prompt}", "-m", "{model}", "--yolo"],
+    "env": {},
+    "output": "stdout"
+  },
+  "list_models": {"kind": "none"},
+  "usage": {"kind": "none", "note": "see /stats in an interactive session"},
+  "quota_patterns": ["quota", "rate limit", "429"]
+}
