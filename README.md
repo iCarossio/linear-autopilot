@@ -21,8 +21,8 @@ Plan a software project adversarially, create it in Linear, then implement it ti
 ## Install
 
 ```bash
-git clone <this repo> ~/Work/linear-autopilot-harness
-cd ~/Work/linear-autopilot-harness
+git clone https://github.com/iCarossio/linear-autopilot ~/Work/linear-autopilot
+cd ~/Work/linear-autopilot
 ./install.sh            # symlinks skills/* into ~/.claude/skills, creates ~/.config/linear-autopilot/models.json
 ./install.sh --agents   # also into ~/.agents/skills (other harnesses)
 ./install.sh --import ~/path/to/your/models.json   # start from an existing private roster
