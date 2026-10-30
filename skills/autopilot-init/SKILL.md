@@ -1,6 +1,6 @@
 ---
 name: autopilot-init
-description: One-time setup of the linear-autopilot runtime on this machine. Discovers the AI coding CLIs installed (Codex, Claude Code, opencode, Grok, Gemini, Antigravity, Mistral Vibe, ...), registers several accounts per CLI (e.g. a second Codex login through CODEX_HOME), adds a harness the runtime does not know yet, builds the model roster and pools by cost tier, smoke-tests every model and reads the current quotas. Use when the user says "/autopilot-init", "set up the autopilot", "add a harness/account/model to the autopilot", or when another autopilot skill reports a missing roster.
+description: One-time setup of the linear-autopilot runtime on this machine. Discovers the AI coding CLIs installed (Codex, Claude Code, opencode, Cursor, Grok, Gemini, Antigravity, Mistral Vibe, ...), registers several accounts per CLI (e.g. a second Codex login through CODEX_HOME), adds a harness the runtime does not know yet, builds the model roster and pools by cost tier, smoke-tests every model and reads the current quotas. Use when the user says "/autopilot-init", "set up the autopilot", "add a harness/account/model to the autopilot", or when another autopilot skill reports a missing roster.
 ---
 
 # Autopilot: init
@@ -29,7 +29,8 @@ Goal: a working roster at `~/.config/linear-autopilot/models.json` (`$AUTOPILOT_
      --argv '["-p","{prompt}","--model","{model}","--yes"]' [--output file] \
      [--account-env VAR --account-default ~/.x --account-detect '~/.x*'] \
      [--list-cmd 'models' --list-regex '^\s*(\S+)\s*$'] \
-     [--usage-cmd '-p /usage' --usage-regex '...' --usage-groups window,used,reset_text] [--env K=V]
+     [--usage-cmd '-p /usage' --usage-regex '...' --usage-groups window,used,reset_text] [--env K=V] \
+     [--tokens-kind codex_sessions|claude_projects|opencode_db|grok_sessions|agy_brain|gemini_chats --tokens-path '$VAR/sessions']
    ```
    `{prompt}` is always "read the brief file and follow it"; `{model}` and `{out}` are optional. The adapter lands in `~/.config/linear-autopilot/harnesses/<name>.json` (overrides the repo's). Check it with `bin/harness adapters`.
 4. **Add models.** For each harness and model the user wants: `bin/harness add-model <key> --cli <cli> --model <id> --cost high|mid|cheap|free [--no-implement] [--pools p1,p2] [--note ...]`. Cost means what it costs the user on their plans, not list price. Suggested placement: high -> `premortem,plan_review,review_high` with `--no-implement`; mid -> `review_mid,review_high,fix_mid,implement_escalation`; cheap -> `implement_critical,implement,fix_mid,review_mid`; free -> `implement,review`. Use the family pattern (`--family 'gpt-*-sol'`) so `run-model discover` can upgrade it later.
@@ -42,4 +43,4 @@ Goal: a working roster at `~/.config/linear-autopilot/models.json` (`$AUTOPILOT_
 
 ## Adapter format (for reference)
 
-`harnesses/<cli>.json`: `name`, `binary`, `vendor` (or `by_model` to derive it from the model id), `run.argv` with `{prompt}`, `{model}`, `{out}`, `{cwd}` placeholders, `run.env`, `run.output` (`stdout` or `file`), `account_env` / `account_default` / `account_detect`, `list_models` (`command` + `regex`, `json_file`, or `none`), `usage` (`command` + `regex` + `groups`, `codex_sessions`, or `none`), `quota_patterns`. The repo's `harnesses/` has one per known CLI; copy the closest one as a starting point.
+`harnesses/<cli>.json`: `name`, `binary`, `vendor` (or `by_model` to derive it from the model id), `run.argv` with `{prompt}`, `{model}`, `{out}`, `{cwd}` placeholders, `run.env`, `run.output` (`stdout` or `file`), `account_env` / `account_default` / `account_detect`, `account_login` (the file that proves a login, and optional JWT claims naming the account), `list_models` (`command` + `regex`, `json_file`, or `none`), `usage` (`command` + `regex` + `groups`, `codex_sessions`, or `none`), `quota_patterns`, `tokens` (`kind` + `path`: the local log `bin/tokens` counts consumption from, one of `codex_sessions`, `claude_projects`, `opencode_db`, `grok_sessions`, `agy_brain`, `gemini_chats`, or `none` with a `note`). The repo's `harnesses/` has one per known CLI (Codex, Claude Code, opencode, Cursor, Grok, Antigravity, Gemini, Vibe); copy the closest one as a starting point. Cursor: `cursor-agent` has one login per machine and no account directory; its models (GPT, Claude, Gemini, Grok, Composer) are listed by `cursor-agent --list-models`, and `auto` is not a model id to put in the roster.

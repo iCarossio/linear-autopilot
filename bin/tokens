@@ -1,0 +1,630 @@
+#!/usr/bin/env python3
+"""tokens: total token consumption of every connected harness and account, from the logs the CLIs keep locally.
+
+  tokens [--period 7d|12w|12m|5y|all] [--by account|harness] [--metric total|input|output|cached]
+         [--cli codex,claude,...] [--models] [--json] [--html PATH] [--no-cache] [--no-color] [--width N]
+
+Periods: 7d = the last 7 days, one bar per day; 12w = per week (Monday start); 12m = per month; 5y = per year.
+`--period all` (and the HTML page by default) shows 7d, 12m and 5y. Buckets are in local time.
+Each bar is split per harness and account (codex, codex-b, codex-c share one hue with three shades and three
+glyphs; claude, opencode, ... have their own hues). The total on the period, and a per-account breakdown
+(input, of which cached, output, total, share), follow the chart. `--models` adds the split per model id.
+
+Sources: the `tokens` spec of each adapter (harnesses/<cli>.json): codex_sessions, claude_projects, opencode_db,
+grok_sessions, agy_brain, gemini_chats, or none (the CLI keeps no local count: the report says so). Nothing is run,
+no quota is spent. Parsed files are cached in $AUTOPILOT_CONFIG_DIR/tokens-cache.json by size and mtime.
+Numbers: input = everything sent (cached included), cached = the part served from the prompt cache, output =
+everything generated (reasoning included), total = input + output. They are what the CLI logged, not an invoice.
+"""
+import datetime as dt, glob, html, json, os, re, sqlite3, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+CACHE = os.path.join(lib.CONFIG_DIR, 'tokens-cache.json')
+# One hue per harness, in a fixed order (never cycled): the first eight slots of the validated categorical palette.
+HUES = [('codex', '#2a78d6', '#3987e5'), ('claude', '#eb6834', '#d95926'), ('opencode', '#1baf7a', '#199e70'),
+        ('cursor', '#eda100', '#c98500'), ('grok', '#e87ba4', '#d55181'), ('agy', '#008300', '#008300'),
+        ('gemini', '#6250d6', '#9085e9'), ('vibe', '#e34948', '#e66767')]
+OTHER = ('#898781', '#898781')
+GLYPHS = ['█', '▓', '▒', '░', '■']
+MONO = ['█', '▓', '▒', '░', '▞', '▚', '▙', '▟', '▀', '▄', '■', '▣']  # one glyph per series when colour is off
+PERIODS = {'7d': ('day', 7), '12w': ('week', 12), '12m': ('month', 12), '5y': ('year', 5)}
+
+
+# ---------- small helpers ----------
+
+def to_local(ts):
+    """ISO string (Z or offset) or epoch seconds/ms -> local naive datetime."""
+    if isinstance(ts, (int, float)):
+        if ts > 1e11:
+            ts = ts / 1000.0
+        return dt.datetime.fromtimestamp(ts)
+    s = str(ts).strip()
+    if re.fullmatch(r'\d+(\.\d+)?', s):
+        return to_local(float(s))
+    s = s.replace('Z', '+00:00')
+    if '.' in s:  # trim sub-microsecond fractions for fromisoformat (3.9)
+        head, tail = s.split('.', 1)
+        mt = re.match(r'(\d+)(.*)', tail)
+        s = head + '.' + mt.group(1)[:6] + mt.group(2)
+    d = dt.datetime.fromisoformat(s)
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=dt.timezone.utc)
+    return d.astimezone().replace(tzinfo=None)
+
+
+def day_of(ts):
+    try:
+        return to_local(ts).strftime('%Y-%m-%d')
+    except Exception:
+        return None
+
+
+def sig_of(path):
+    st = os.stat(path)
+    return '%d:%d' % (st.st_size, int(st.st_mtime))
+
+
+def fmt(n):
+    n = float(n)
+    for unit, div in (('B', 1e9), ('M', 1e6), ('k', 1e3)):
+        if abs(n) >= div:
+            v = n / div
+            return ('%.2f' % v if v < 10 else '%.1f' % v if v < 100 else '%.0f' % v) + unit
+    return '%d' % n
+
+
+def pct(part, whole):
+    return '%.1f%%' % (100.0 * part / whole) if whole else '-'
+
+
+def hex_rgb(h):
+    return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def mix(h, other, t):
+    a, b = hex_rgb(h), hex_rgb(other)
+    return '#%02x%02x%02x' % tuple(int(round(x + (y - x) * t)) for x, y in zip(a, b))
+
+
+def shade(base, idx):
+    """Account shades of one harness hue: default, then lighter, darker, lighter still, darker still."""
+    steps = [0.0, ('#ffffff', 0.38), ('#000000', 0.32), ('#ffffff', 0.62), ('#000000', 0.55)]
+    s = steps[idx] if idx < len(steps) else steps[-1]
+    return base if s == 0.0 else mix(base, s[0], s[1])
+
+
+# ---------- parsers: each returns rows [day, model, input, cached, output, calls] for one file ----------
+
+def rows_codex(path):
+    """Codex rollout: event_msg/token_count carries the cumulative total_token_usage of the session; the delta
+    between two events is what that turn cost (the first event's delta is its total). Model from turn_context."""
+    rows = {}; prev = None; model = ''
+    with open(path, errors='ignore') as f:
+        for line in f:
+            if '"turn_context"' in line:
+                try:
+                    model = (json.loads(line).get('payload') or {}).get('model') or model
+                except Exception:
+                    pass
+                continue
+            if '"token_count"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            info = (e.get('payload') or {}).get('info') or {}
+            tot = info.get('total_token_usage')
+            if not tot:
+                continue
+            cur = (tot.get('input_tokens', 0), tot.get('cached_input_tokens', 0), tot.get('output_tokens', 0))
+            if prev and all(c >= p for c, p in zip(cur, prev)):
+                d = tuple(c - p for c, p in zip(cur, prev))
+            else:
+                d = cur
+            prev = cur
+            if not any(d):
+                continue
+            day = day_of(e.get('timestamp') or (e.get('payload') or {}).get('timestamp') or os.path.getmtime(path))
+            k = (day, model)
+            r = rows.setdefault(k, [day, model, 0, 0, 0, 0])
+            r[2] += d[0]; r[3] += d[1]; r[4] += d[2]; r[5] += 1
+    return list(rows.values())
+
+
+def rows_claude(path):
+    """Claude Code transcript: assistant records with message.usage; a streamed reply is written once per content
+    block with the same message id and requestId, so keep one record per (id, requestId), the fullest one."""
+    seen = {}
+    with open(path, errors='ignore') as f:
+        for line in f:
+            if '"usage"' not in line or '"assistant"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get('type') != 'assistant':
+                continue
+            m = e.get('message') or {}; u = m.get('usage') or {}
+            if not u:
+                continue
+            key = (m.get('id') or e.get('uuid'), e.get('requestId'))
+            inp = u.get('input_tokens', 0) + u.get('cache_creation_input_tokens', 0) + u.get('cache_read_input_tokens', 0)
+            rec = (day_of(e.get('timestamp') or os.path.getmtime(path)), m.get('model') or '', inp, u.get('cache_read_input_tokens', 0), u.get('output_tokens', 0))
+            old = seen.get(key)
+            if not old or rec[4] >= old[4]:
+                seen[key] = rec
+    rows = {}
+    for day, model, inp, cached, out in seen.values():
+        r = rows.setdefault((day, model), [day, model, 0, 0, 0, 0])
+        r[2] += inp; r[3] += cached; r[4] += out; r[5] += 1
+    return list(rows.values())
+
+
+def rows_grok(path):
+    """Grok session usage.json: one entry per turn with endedAt and per-model usage."""
+    rows = {}
+    try:
+        d = lib.read_json(path)
+    except Exception:
+        return []
+    for t in d.get('turns') or []:
+        day = day_of(t.get('endedAt') or d.get('updatedAt') or os.path.getmtime(path))
+        mu = t.get('modelUsage') or {t.get('primaryModelId') or d.get('session', {}).get('primaryModelId') or '': t}
+        for model, u in mu.items():
+            r = rows.setdefault((day, model), [day, model, 0, 0, 0, 0])
+            r[2] += u.get('inputTokens', 0); r[3] += u.get('cachedReadTokens', 0); r[4] += u.get('outputTokens', 0); r[5] += u.get('modelCalls', 1)
+    return list(rows.values())
+
+
+MODEL_RX = re.compile(rb'(claude-(?:opus|sonnet|haiku)[a-z0-9.-]*[a-z0-9]|gemini-[0-9][a-z0-9.-]*[a-z0-9]|gpt-[a-z0-9.-]*[a-z0-9])')
+
+
+def rows_agy(path):
+    """Antigravity brain transcript: MODEL steps carry input_tokens / cache_read_tokens / output_tokens (input excludes
+    the cached part). The model id is not in the transcript: read it from the conversation database of the same id."""
+    rows = {}
+    conv_id = path.split('/brain/')[-1].split('/')[0]
+    model = ''
+    db = os.path.join(path.split('/brain/')[0], 'conversations', conv_id + '.db')
+    try:
+        with open(db, 'rb') as f:
+            mt = MODEL_RX.search(f.read())
+            model = mt.group(1).decode() if mt else ''
+    except Exception:
+        pass
+    with open(path, errors='ignore') as f:
+        for line in f:
+            if '"input_tokens"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            inp, cached, out = e.get('input_tokens', 0), e.get('cache_read_tokens', 0), e.get('output_tokens', 0)
+            if not (inp or out):
+                continue
+            day = day_of(e.get('created_at') or os.path.getmtime(path))
+            r = rows.setdefault((day, model), [day, model, 0, 0, 0, 0])
+            r[2] += inp + cached; r[3] += cached; r[4] += out; r[5] += 1
+    return list(rows.values())
+
+
+def rows_gemini(path):
+    """Gemini CLI chat recording (~/.gemini/tmp/<project>/chats/*.json): gemini messages with a tokens object."""
+    rows = {}
+    try:
+        d = lib.read_json(path)
+    except Exception:
+        return []
+    for m in d.get('messages') or []:
+        t = m.get('tokens') or {}
+        if m.get('type') != 'gemini' or not t:
+            continue
+        day = day_of(m.get('timestamp') or os.path.getmtime(path)); model = m.get('model') or ''
+        r = rows.setdefault((day, model), [day, model, 0, 0, 0, 0])
+        r[2] += t.get('input', 0); r[3] += t.get('cached', 0); r[4] += t.get('output', 0) + t.get('thoughts', 0) + t.get('tool', 0); r[5] += 1
+    return list(rows.values())
+
+
+def rows_opencode(path):
+    """opencode SQLite store: assistant messages with data.tokens {input, output, reasoning, cache{read, write}};
+    input excludes the cached part. Read-only; the live WAL is honoured when the database is not locked."""
+    q = ("select date(time_created/1000, 'unixepoch', 'localtime'), coalesce(json_extract(data, '$.model.id'), ''),"
+         " sum(coalesce(json_extract(data, '$.tokens.input'), 0) + coalesce(json_extract(data, '$.tokens.cache.read'), 0) + coalesce(json_extract(data, '$.tokens.cache.write'), 0)),"
+         " sum(coalesce(json_extract(data, '$.tokens.cache.read'), 0)),"
+         " sum(coalesce(json_extract(data, '$.tokens.output'), 0) + coalesce(json_extract(data, '$.tokens.reasoning'), 0)), count(*)"
+         " from %s where type = 'assistant' and json_extract(data, '$.tokens') is not null group by 1, 2")
+    for uri in ('file:%s?mode=ro' % path, 'file:%s?immutable=1' % path):
+        try:
+            con = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
+                tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
+                table = 'session_message' if 'session_message' in tables else 'message'
+                if table == 'message':  # older layout: no type column, tokens inside data.role == assistant
+                    q2 = q.replace("where type = 'assistant' and", "where json_extract(data, '$.role') = 'assistant' and")
+                    rows = con.execute(q2 % table).fetchall()
+                else:
+                    rows = con.execute(q % table).fetchall()
+                return [list(r) for r in rows]
+            finally:
+                con.close()
+        except sqlite3.Error:
+            continue
+    return []
+
+
+KINDS = {
+    'codex_sessions': ('**/*.jsonl', rows_codex), 'claude_projects': ('**/*.jsonl', rows_claude), 'grok_sessions': ('*/*/usage.json', rows_grok),
+    'agy_brain': ('*/.system_generated/logs/transcript.jsonl', rows_agy), 'gemini_chats': ('*/chats/*.json', rows_gemini), 'opencode_db': (None, rows_opencode),
+}
+
+
+# ---------- collection with the file cache ----------
+
+def collect(ad, reg, clis, since_day, use_cache=True):
+    """-> (records, sources). records: [cli, account, day, model, input, cached, output, calls]."""
+    cache = lib.read_json(CACHE) if use_cache and os.path.exists(CACHE) else {}
+    if not isinstance(cache, dict) or cache.get('_v') != 1:
+        cache = {'_v': 1}
+    recs, sources, dirty = [], [], False
+    since_ts = dt.datetime.strptime(since_day, '%Y-%m-%d').timestamp() if since_day else 0
+    todo = []
+    for name in sorted(ad):
+        a = ad[name]
+        if clis and name not in clis:
+            continue
+        spec = a.get('tokens') or {'kind': 'none'}
+        kind = spec.get('kind', 'none')
+        for label, home in lib.account_homes(a, reg):
+            src = {'cli': name, 'account': label, 'home': (home or '').replace(os.path.expanduser('~'), '~'), 'kind': kind, 'files': 0, 'note': ''}
+            sources.append(src)
+            if kind not in KINDS:
+                src['note'] = spec.get('note', 'this CLI keeps no local token count')
+                continue
+            env = dict(os.environ)
+            if home and a.get('account_env'):
+                env[a['account_env']] = home
+            root = lib.expand_path(spec['path'], a, env)
+            pattern, fn = KINDS[kind]
+            if pattern is None:
+                paths = [root] if os.path.exists(root) else []
+            else:
+                paths = [p for p in glob.glob(os.path.join(root, pattern), recursive=True) if os.path.isfile(p)]
+            if not paths:
+                src['note'] = 'nothing under %s' % root.replace(os.path.expanduser('~'), '~')
+                continue
+            for p in paths:
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                if since_ts and st.st_mtime < since_ts - 86400:
+                    continue  # a file last written before the period holds no row inside it
+                src['files'] += 1
+                todo.append((src, p, fn, pattern is None))
+    uncached = [t for t in todo if t[3] or cache.get(t[1], {}).get('sig') != sig_of(t[1])]
+    if len(uncached) > 25:
+        sys.stderr.write('tokens: indexing %d log files (cached afterwards)\n' % len(uncached))
+    for src, p, fn, nocache in todo:
+        sig = sig_of(p)
+        ent = None if nocache else cache.get(p)
+        if ent and ent.get('sig') == sig:
+            rows = ent['rows']
+        else:
+            try:
+                rows = fn(p)
+            except Exception as e:
+                rows = []; src['note'] = 'unreadable: %s' % e
+            if not nocache:
+                cache[p] = {'sig': sig, 'rows': rows}; dirty = True
+        for day, model, inp, cached, out, calls in rows:
+            if day and (not since_day or day >= since_day):
+                recs.append([src['cli'], src['account'], day, model, inp, cached, out, calls])
+    if dirty and use_cache:
+        live = {p for _, p, _, _ in todo}
+        for p in [k for k in cache if k != '_v' and not os.path.exists(k)]:
+            del cache[p]
+        try:
+            lib.write_json_atomic(CACHE, cache)
+        except Exception as e:
+            sys.stderr.write('tokens: cache not written: %s\n' % e)
+    return recs, sources
+
+
+# ---------- bucketing ----------
+
+def bucket_key(day, unit):
+    d = dt.datetime.strptime(day, '%Y-%m-%d').date()
+    if unit == 'day':
+        return day
+    if unit == 'week':
+        return (d - dt.timedelta(days=d.weekday())).strftime('%Y-%m-%d')
+    if unit == 'month':
+        return d.strftime('%Y-%m')
+    return d.strftime('%Y')
+
+
+def bucket_list(unit, n, today):
+    out = []
+    if unit == 'day':
+        out = [(today - dt.timedelta(days=i)).strftime('%Y-%m-%d') for i in range(n - 1, -1, -1)]
+    elif unit == 'week':
+        monday = today - dt.timedelta(days=today.weekday())
+        out = [(monday - dt.timedelta(weeks=i)).strftime('%Y-%m-%d') for i in range(n - 1, -1, -1)]
+    elif unit == 'month':
+        y, m = today.year, today.month
+        for i in range(n - 1, -1, -1):
+            yy, mm = divmod(m - 1 - i, 12)
+            out.append('%04d-%02d' % (y + yy, mm + 1))
+    else:
+        out = ['%04d' % (today.year - i) for i in range(n - 1, -1, -1)]
+    return out
+
+
+def report(recs, period, by, metric, today=None):
+    unit, n = PERIODS[period]
+    today = today or dt.date.today()
+    keys = bucket_list(unit, n, today)
+    series_of = (lambda r: r[0]) if by == 'harness' else (lambda r: r[1])
+    totals, buckets, models = {}, {k: {} for k in keys}, {}
+    for r in recs:
+        k = bucket_key(r[2], unit)
+        if k not in buckets:
+            continue
+        s = series_of(r)
+        for store in (totals.setdefault(s, {'input': 0, 'cached': 0, 'output': 0, 'calls': 0}),
+                      buckets[k].setdefault(s, {'input': 0, 'cached': 0, 'output': 0, 'calls': 0})):
+            store['input'] += r[4]; store['cached'] += r[5]; store['output'] += r[6]; store['calls'] += r[7]
+        mm = models.setdefault((r[0], r[3] or '?'), {'input': 0, 'cached': 0, 'output': 0, 'calls': 0})
+        mm['input'] += r[4]; mm['cached'] += r[5]; mm['output'] += r[6]; mm['calls'] += r[7]
+    for store in list(totals.values()) + [v for b in buckets.values() for v in b.values()] + list(models.values()):
+        store['total'] = store['input'] + store['output']
+    grand = {k: sum(v[k] for v in totals.values()) for k in ('input', 'cached', 'output', 'calls', 'total')}
+    return {'period': period, 'unit': unit, 'by': by, 'metric': metric, 'since': keys[0], 'until': keys[-1], 'buckets': [{'key': k, 'series': buckets[k]} for k in keys],
+            'totals': totals, 'grand': grand, 'models': {'%s %s' % k: v for k, v in sorted(models.items(), key=lambda kv: -kv[1]['total'])}}
+
+
+# ---------- colours and series order ----------
+
+def series_style(series_names, by, dark=False, mono=False):
+    """{series: (hex, glyph, harness)}: one hue per harness in the fixed palette order, one shade and glyph per account.
+    Without colour (mono) every series gets its own glyph, so the bars stay readable in a plain log."""
+    hue = {h[0]: (h[2] if dark else h[1]) for h in HUES}
+    extra = sorted({s.split('-')[0].split('@')[0] for s in series_names} - set(hue))
+    for i, cli in enumerate(extra):
+        hue[cli] = OTHER[0]
+    order = [h[0] for h in HUES] + extra
+    out = {}
+    for cli in order:
+        accs = sorted([s for s in series_names if s == cli or s.startswith(cli + '-') or s.startswith(cli + '@')],
+                      key=lambda s: (s != cli, s))
+        for i, s in enumerate(accs):
+            g = MONO[len(out) % len(MONO)] if mono else GLYPHS[min(i, len(GLYPHS) - 1)]
+            out[s] = (shade(hue[cli], i) if by == 'account' else hue[cli], g, cli)
+    return out
+
+
+# ---------- terminal ----------
+
+def ansi(hexcol, text, color=True):
+    if not color:
+        return text
+    r, g, b = hex_rgb(hexcol)
+    return '\x1b[38;2;%d;%d;%dm%s\x1b[0m' % (r, g, b, text)
+
+
+def print_report(rep, color=True, width=48, show_models=False):
+    unit, metric = rep['unit'], rep['metric']
+    names = [s for s in rep['totals']]
+    style = series_style(names, rep['by'], mono=not color)
+    order = [s for s in style if s in rep['totals']]
+    title = {'7d': 'past 7 days, per day', '12w': 'past 12 weeks, per week (Monday start)', '12m': 'past 12 months, per month', '5y': 'past 5 years, per year'}[rep['period']]
+    print('Tokens (%s), %s, local time' % (metric, title))
+    mx = max([sum(v[metric] for v in b['series'].values()) for b in rep['buckets']] + [0])
+    for b in rep['buckets']:
+        tot = sum(v[metric] for v in b['series'].values())
+        bar, pos = '', 0.0
+        for s in order:
+            v = b['series'].get(s, {}).get(metric, 0)
+            if not v or not mx:
+                continue
+            end = pos + v / mx * width
+            cells = int(round(end)) - int(round(pos))
+            if cells > 0:
+                bar += ansi(style[s][0], style[s][1] * cells, color)
+            pos = end
+        label = b['key'] if unit != 'week' else 'wk ' + b['key']
+        print('  %-11s %s %s' % (label, bar.ljust(width) if not color else bar + ' ' * max(0, width - int(round(pos))), fmt(tot).rjust(7) if tot else '-'))
+    g = rep['grand']
+    print('  %-11s %s %s' % ('total', ' ' * width, fmt(g[metric]).rjust(7)))
+    print('  legend: ' + '  '.join(ansi(style[s][0], style[s][1] * 2, color) + ' ' + s for s in order))
+    print()
+    print('  %-22s %9s %9s %9s %9s %7s %7s' % ('harness / account' if rep['by'] == 'account' else 'harness', 'input', 'cached', 'output', 'total', 'share', 'calls'))
+    for s in order:
+        v = rep['totals'][s]
+        print('  %-22s %9s %9s %9s %9s %7s %7s' % (ansi(style[s][0], style[s][1], color) + ' ' + s, fmt(v['input']), fmt(v['cached']), fmt(v['output']), fmt(v['total']), pct(v['total'], g['total']), fmt(v['calls'])))
+    print('  %-22s %9s %9s %9s %9s %7s %7s' % ('  total', fmt(g['input']), fmt(g['cached']), fmt(g['output']), fmt(g['total']), '100%' if g['total'] else '-', fmt(g['calls'])))
+    print('  total on the period: %s tokens (%s input, of which %s cached; %s output)' % (fmt(g['total']), fmt(g['input']), fmt(g['cached']), fmt(g['output'])))
+    if show_models and rep['models']:
+        print()
+        print('  %-44s %9s %9s %9s %7s' % ('harness model', 'input', 'output', 'total', 'share'))
+        for name, v in list(rep['models'].items())[:25]:
+            print('  %-44s %9s %9s %9s %7s' % (name[:44], fmt(v['input']), fmt(v['output']), fmt(v['total']), pct(v['total'], g['total'])))
+    print()
+
+
+def print_sources(sources):
+    print('  sources:')
+    for s in sources:
+        where = s['home'] or '-'
+        state = ('%d %s' % (s['files'], 'database' if s['kind'].endswith('_db') else 'files')) if s['files'] else (s['note'] or 'no data')
+        print('    %-14s %-24s %-15s %s' % (s['account'], where, s['kind'], state))
+
+
+# ---------- HTML ----------
+
+def svg_chart(rep, style_light, style_dark, metric, cid):
+    """Stacked bars, thin marks, 2px surface gap between segments, rounded top on the top segment, hover tooltip."""
+    W, H, L, R, T, B = 920, 300, 64, 16, 16, 44
+    keys = [b['key'] for b in rep['buckets']]
+    n = len(keys); slot = (W - L - R) / n; bw = min(slot * 0.62, 56)
+    mx = max([sum(v[metric] for v in b['series'].values()) for b in rep['buckets']] + [1])
+    # nice axis max
+    mag = 10 ** (len('%d' % mx) - 1); top = ((mx // mag) + 1) * mag if mx % mag else mx
+    sy = (H - T - B) / float(top)
+    order = [s for s in style_light if s in rep['totals']]
+    parts = ['<svg class="chart" viewBox="0 0 %d %d" role="img" aria-label="tokens per %s" data-chart="%s">' % (W, H, rep['unit'], cid)]
+    for i in range(5):
+        v = top * i / 4.0; y = H - B - v * sy
+        parts.append('<line class="grid" x1="%d" x2="%d" y1="%.1f" y2="%.1f"/><text class="tick" x="%d" y="%.1f" text-anchor="end">%s</text>' % (L, W - R, y, y, L - 8, y + 4, fmt(v)))
+    parts.append('<line class="axis" x1="%d" x2="%d" y1="%.1f" y2="%.1f"/>' % (L, W - R, H - B, H - B))
+    for i, b in enumerate(rep['buckets']):
+        x = L + slot * i + (slot - bw) / 2
+        tot = sum(v[metric] for v in b['series'].values())
+        y = H - B
+        segs = [(s, b['series'][s][metric]) for s in order if b['series'].get(s, {}).get(metric, 0) > 0]
+        for j, (s, v) in enumerate(segs):
+            h = v * sy; y0 = y - h
+            gap = 2 if j < len(segs) - 1 else 0
+            hh = max(h - gap, 0.5)
+            attrs = 'class="seg" data-series="%s" data-value="%d" data-key="%s" data-share="%s" fill="var(--c-%s)"' % (html.escape(s), v, html.escape(b['key']), pct(v, tot), re.sub(r'[^a-z0-9]', '_', s))
+            if j == len(segs) - 1 and hh > 4:
+                r = 4
+                parts.append('<path %s d="M%.1f,%.1f v%.1f a%d,%d 0 0 1 %d,-%d h%.1f a%d,%d 0 0 1 %d,%d v%.1f z"/>' % (attrs, x, y0 + hh, -(hh - r), r, r, r, r, bw - 2 * r, r, r, r, r, hh - r))
+            else:
+                parts.append('<rect %s x="%.1f" y="%.1f" width="%.1f" height="%.1f"/>' % (attrs, x, y0, bw, hh))
+            y = y0
+        label = b['key'] if rep['unit'] != 'month' else b['key'][2:]
+        if rep['unit'] == 'day':
+            label = b['key'][5:]
+        elif rep['unit'] == 'week':
+            label = b['key'][5:]
+        parts.append('<text class="tick" x="%.1f" y="%d" text-anchor="middle">%s</text>' % (x + bw / 2, H - B + 18, label))
+        if tot:
+            parts.append('<text class="value" x="%.1f" y="%.1f" text-anchor="middle">%s</text>' % (x + bw / 2, max(y - 6, 12), fmt(tot)))
+    parts.append('</svg>')
+    return '\n'.join(parts)
+
+
+def html_page(reports, sources, by, metric, generated):
+    names = sorted({s for rep in reports for s in rep['totals']})
+    st_l, st_d = series_style(names, by), series_style(names, by, dark=True)
+    css_vars = lambda st: '\n'.join('  --c-%s: %s;' % (re.sub(r'[^a-z0-9]', '_', s), v[0]) for s, v in st.items())
+    titles = {'7d': 'Past 7 days', '12w': 'Past 12 weeks', '12m': 'Past 12 months', '5y': 'Past 5 years'}
+    subs = {'7d': 'per day', '12w': 'per week, Monday start', '12m': 'per month', '5y': 'per year'}
+    secs = []
+    for i, rep in enumerate(reports):
+        g = rep['grand']
+        order = [s for s in st_l if s in rep['totals']]
+        legend = ''.join('<span class="key"><i style="background:var(--c-%s)"></i>%s</span>' % (re.sub(r'[^a-z0-9]', '_', s), html.escape(s)) for s in order)
+        rows = ''.join('<tr><td><i class="sw" style="background:var(--c-%s)"></i>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (
+            re.sub(r'[^a-z0-9]', '_', s), html.escape(s), fmt(v['input']), fmt(v['cached']), fmt(v['output']), fmt(v['total']), pct(v['total'], g['total'])) for s, v in ((s, rep['totals'][s]) for s in order))
+        rows += '<tr class="sum"><td>total</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>100%%</td></tr>' % (fmt(g['input']), fmt(g['cached']), fmt(g['output']), fmt(g['total']))
+        head = '<tr><th>%s</th>%s</tr>' % (rep['unit'], ''.join('<th>%s</th>' % html.escape(s) for s in order))
+        body = ''.join('<tr><td>%s</td>%s</tr>' % (b['key'], ''.join('<td>%s</td>' % (fmt(b['series'][s][metric]) if b['series'].get(s, {}).get(metric) else '·') for s in order)) for b in rep['buckets'])
+        mrows = ''.join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (html.escape(k), fmt(v['input']), fmt(v['output']), fmt(v['total']), pct(v['total'], g['total'])) for k, v in list(rep['models'].items())[:30])
+        secs.append('''<section>
+<header><div><h2>%s</h2><p class="sub">%s, %s to %s, local time</p></div>
+<div class="hero"><div class="num">%s</div><div class="cap">tokens, %s input (%s cached) and %s output</div></div></header>
+<div class="legend">%s</div>
+%s
+<table class="totals"><thead><tr><th>%s</th><th>input</th><th>cached</th><th>output</th><th>total</th><th>share</th></tr></thead><tbody>%s</tbody></table>
+<details><summary>Table per %s</summary><div class="scroll"><table class="grid"><thead>%s</thead><tbody>%s</tbody></table></div></details>
+<details><summary>Per model</summary><table class="totals"><thead><tr><th>harness, model</th><th>input</th><th>output</th><th>total</th><th>share</th></tr></thead><tbody>%s</tbody></table></details>
+</section>''' % (titles[rep['period']], subs[rep['period']], rep['since'], rep['until'], fmt(g['total']), fmt(g['input']), fmt(g['cached']), fmt(g['output']), legend,
+                 svg_chart(rep, st_l, st_d, metric, 'c%d' % i), 'harness / account' if by == 'account' else 'harness', rows, rep['unit'], head, body, mrows))
+    srcs = ''.join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>' % (html.escape(s['account']), html.escape(s['home'] or '-'), html.escape(s['kind']), html.escape(('%d %s' % (s['files'], 'database' if s['kind'].endswith('_db') else 'files')) if s['files'] else (s['note'] or 'no data'))) for s in sources)
+    return '''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token usage</title>
+<style>
+:root { color-scheme: light; --bg: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,.10);
+%s
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark; --bg: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781; --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+%s
+} }
+:root[data-theme="dark"] { color-scheme: dark; --bg: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781; --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,.10);
+%s
+}
+* { box-sizing: border-box } body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 24px 16px }
+main { max-width: 980px; margin: 0 auto } h1 { font-size: 22px; margin: 0 0 4px } h2 { font-size: 18px; margin: 0 } .sub, .cap, .meta { color: var(--ink2); font-size: 13px; margin: 2px 0 0 }
+section { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; margin: 16px 0 }
+header { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 8px } .hero .num { font-size: 32px; font-weight: 600; line-height: 1.1 } .hero { text-align: right }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--ink2); margin: 6px 0 } .key i, .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; box-shadow: inset 0 0 0 1px var(--ring) }
+svg.chart { width: 100%%; height: auto; display: block; overflow: visible } .grid { stroke: var(--grid); stroke-width: 1 } .axis { stroke: var(--axis); stroke-width: 1 }
+.tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums } .value { fill: var(--ink2); font-size: 11px; font-variant-numeric: tabular-nums } .seg { cursor: default } .seg:hover { stroke: var(--ink); stroke-width: 1.5 }
+table { border-collapse: collapse; width: 100%%; font-size: 13px; font-variant-numeric: tabular-nums } th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--grid) } th:first-child, td:first-child { text-align: left } th { color: var(--ink2); font-weight: 500 } tr.sum td { font-weight: 600 }
+details { margin-top: 10px } summary { cursor: pointer; color: var(--ink2); font-size: 13px } .scroll { overflow-x: auto }
+#tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--bg); padding: 6px 9px; border-radius: 6px; font-size: 12px; display: none; z-index: 9; white-space: nowrap }
+</style></head><body><main>
+<h1>Token usage across harnesses</h1><p class="meta">%s. Input counts everything sent (cached included), output everything generated (reasoning included), total = input + output. Numbers come from the logs each CLI keeps on this machine, not from invoices.</p>
+%s
+<section><h2>Sources</h2><table class="totals"><thead><tr><th>account</th><th>home</th><th>kind</th><th>state</th></tr></thead><tbody>%s</tbody></table></section>
+</main><div id="tip"></div>
+<script>
+(function () {
+  var tip = document.getElementById('tip');
+  function fmt(n) { n = +n; var u = [['B', 1e9], ['M', 1e6], ['k', 1e3]]; for (var i = 0; i < u.length; i++) if (Math.abs(n) >= u[i][1]) { var v = n / u[i][1]; return (v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : v.toFixed(0)) + u[i][0]; } return String(n); }
+  document.addEventListener('mousemove', function (e) {
+    var t = e.target.closest && e.target.closest('.seg');
+    if (!t) { tip.style.display = 'none'; return; }
+    tip.textContent = t.dataset.key + ' · ' + t.dataset.series + ' · ' + fmt(t.dataset.value) + ' tokens (' + t.dataset.share + ')';
+    tip.style.display = 'block'; tip.style.left = (e.clientX + 12) + 'px'; tip.style.top = (e.clientY + 12) + 'px';
+  });
+})();
+</script></body></html>''' % (css_vars(st_l), css_vars(st_d), css_vars(st_d), html.escape(generated), '\n'.join(secs), srcs)
+
+
+# ---------- main ----------
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
+
+
+def main(argv):
+    args = argv[1:]
+    if '-h' in args or '--help' in args:
+        print(__doc__); return 0
+    period = opt(args, '--period', '7d')
+    periods = ['7d', '12m', '5y'] if period == 'all' else [p.strip() for p in period.split(',')]
+    for p in periods:
+        if p not in PERIODS:
+            sys.exit('tokens: unknown period %s (7d, 12w, 12m, 5y, all)' % p)
+    by = opt(args, '--by', 'account'); metric = opt(args, '--metric', 'total')
+    if by not in ('account', 'harness') or metric not in ('total', 'input', 'output', 'cached'):
+        sys.exit('tokens: --by account|harness, --metric total|input|output|cached')
+    clis = set((opt(args, '--cli') or '').split(',')) - {''}
+    html_out = opt(args, '--html')
+    if html_out and '--period' not in args:
+        periods = ['7d', '12m', '5y']
+    color = '--no-color' not in args and not os.environ.get('NO_COLOR') and sys.stdout.isatty()
+    width = int(opt(args, '--width', '48'))
+    ad = lib.adapters(); reg = lib.load_reg() if os.path.exists(lib.REG) else {'models': {}}
+    unknown = clis - set(ad)
+    if unknown:
+        sys.exit('tokens: no adapter for %s' % ', '.join(sorted(unknown)))
+    today = dt.date.today()
+    since = min(bucket_list(PERIODS[p][0], PERIODS[p][1], today)[0] for p in periods)
+    since = since if len(since) == 10 else since + ('-01' if len(since) == 7 else '-01-01')
+    recs, sources = collect(ad, reg, clis, since, use_cache='--no-cache' not in args)
+    reports = [report(recs, p, by, metric, today) for p in periods]
+    if html_out:
+        with open(html_out, 'w') as f:
+            f.write(html_page(reports, sources, by, metric, 'Generated %s' % dt.datetime.now().strftime('%Y-%m-%d %H:%M')))
+        print('wrote %s' % html_out)
+    if '--json' in args:
+        print(json.dumps({'reports': reports, 'sources': sources}, indent=1))
+    elif not html_out or '--print' in args:
+        for rep in reports:
+            print_report(rep, color, width, '--models' in args)
+        print_sources(sources)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

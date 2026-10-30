@@ -4,11 +4,40 @@
   "vendor": "xai",
   "doc": "xAI Grok CLI on a subscription. Renewal time is shown by /usage in an interactive session.",
   "run": {
-    "argv": ["-p", "{prompt}", "-m", "{model}", "--output-format", "plain", "--always-approve", "--sandbox", "off"],
-    "env": {"GROK_SANDBOX": "off"},
+    "argv": [
+      "-p",
+      "{prompt}",
+      "-m",
+      "{model}",
+      "--output-format",
+      "plain",
+      "--always-approve",
+      "--sandbox",
+      "off"
+    ],
+    "env": {
+      "GROK_SANDBOX": "off"
+    },
     "output": "stdout"
   },
-  "list_models": {"kind": "command", "argv": ["models"], "regex": "^\\s*[*-]\\s+(grok[\\w.-]*)"},
-  "usage": {"kind": "none", "note": "interactive /usage only (the CLI `grok usage` needs a session id); set the cooldown from the reset shown there or in the quota error"},
-  "quota_patterns": ["402", "balance", "usage limit"]
+  "list_models": {
+    "kind": "command",
+    "argv": [
+      "models"
+    ],
+    "regex": "^\\s*[*-]\\s+(grok[\\w.-]*)"
+  },
+  "usage": {
+    "kind": "none",
+    "note": "interactive /usage only (the CLI `grok usage` needs a session id); set the cooldown from the reset shown there or in the quota error"
+  },
+  "quota_patterns": [
+    "402",
+    "balance",
+    "usage limit"
+  ],
+  "tokens": {
+    "kind": "grok_sessions",
+    "path": "~/.grok/sessions"
+  }
 }

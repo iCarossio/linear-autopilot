@@ -4,6 +4,7 @@ concurrently (implementers, implementer_ids). Never edit state.json with a plain
 
   state get [dotted.key]                  # print the state, or one value
   state set <dotted.key> <json-value>     # e.g. state set inflight.ENG-12 '{"wt": "...", "round": 2}'  |  state set push true
+                                          # ids with dots: use '/' as separator, e.g. state set est/M8.3a '{...}'
   state del <dotted.key>
   state push <dotted.key> <json-value>    # append to a list if absent (e.g. state push done '"ENG-12"')
   state pull <dotted.key> <json-value>    # remove from a list (e.g. state pull queue '"ENG-12"')
@@ -19,7 +20,8 @@ import autopilot_lib as lib
 
 
 def walk(st, dotted, create=False):
-    parts = dotted.split('.')
+    # Ticket ids may contain dots (M8.3a): a path with '/' splits on '/' instead.
+    parts = dotted.split('/') if '/' in dotted else dotted.split('.')
     cur = st
     for p in parts[:-1]:
         if p not in cur or not isinstance(cur[p], dict):

@@ -16,7 +16,9 @@
   harness new <name> --binary B --vendor V --argv '<json list of strings with {prompt} [{model}] [{out}]>' [--output stdout|file]
               [--account-env VAR --account-default PATH --account-detect GLOB] [--list-cmd 'args' --list-regex RX]
               [--usage-cmd 'args' --usage-regex RX --usage-groups window,used|remaining,reset_text|reset_iso] [--env K=V ...] [--doc TEXT]
-                                                       # write a new adapter to $AUTOPILOT_CONFIG_DIR/harnesses/<name>.json
+              [--tokens-kind codex_sessions|claude_projects|opencode_db|grok_sessions|agy_brain|gemini_chats --tokens-path PATH]
+                                                       # write a new adapter to $AUTOPILOT_CONFIG_DIR/harnesses/<name>.json; --tokens-* tells
+                                                       # `bin/tokens` which local log format the CLI writes and where ($VAR of account_env allowed)
   harness pools                                        # pools and their members
   harness pools set <pool> k1,k2,...                   # replace a pool
   harness adapters                                     # adapters known (repo + user), with the run command of each
@@ -29,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import autopilot_lib as lib
 
 COSTS = ('high', 'mid', 'cheap', 'free')
-KNOWN_CLIS = ['codex', 'claude', 'opencode', 'grok', 'agy', 'vibe', 'gemini', 'aider', 'goose', 'amp', 'cursor-agent', 'copilot', 'kiro', 'qwen', 'droid', 'crush']
+KNOWN_CLIS = ['codex', 'claude', 'opencode', 'grok', 'agy', 'vibe', 'gemini', 'aider', 'goose', 'amp', 'cursor', 'copilot', 'kiro', 'qwen', 'droid', 'crush']
 today = lambda: str(dt.date.today())
 
 
@@ -265,7 +267,12 @@ def cmd_new(args):
     a = {'name': name, 'binary': binary, 'vendor': vendor, 'doc': opt(args, '--doc', ''),
          'run': {'argv': argv, 'env': envs(args), 'output': output},
          'list_models': {'kind': 'none'}, 'usage': {'kind': 'none', 'note': 'no usage probe: set cooldowns from the reset time in quota errors'},
-         'quota_patterns': ['quota', 'rate limit', 'usage limit']}
+         'quota_patterns': ['quota', 'rate limit', 'usage limit'],
+         'tokens': {'kind': 'none', 'note': 'no local token log known for this CLI (harness new --tokens-kind ... --tokens-path ... if it writes one)'}}
+    if opt(args, '--tokens-kind'):
+        kinds = ('codex_sessions', 'claude_projects', 'opencode_db', 'grok_sessions', 'agy_brain', 'gemini_chats')
+        if opt(args, '--tokens-kind') not in kinds or not opt(args, '--tokens-path'): sys.exit('harness new: --tokens-kind must be one of %s and come with --tokens-path' % ', '.join(kinds))
+        a['tokens'] = {'kind': opt(args, '--tokens-kind'), 'path': opt(args, '--tokens-path')}
     if opt(args, '--account-env'):
         a['account_env'] = opt(args, '--account-env'); a['account_default'] = opt(args, '--account-default', '')
         a['account_detect'] = opt(args, '--account-detect') or (a['account_default'].rstrip('/') + '-[a-z]')  # the standard: <default>-<letter>

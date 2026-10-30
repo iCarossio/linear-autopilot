@@ -152,6 +152,30 @@ def account_of(m, a):
     return '%s=%s' % (k, v)
 
 
+def account_homes(a, reg=None):
+    """Every account of a harness present on this machine, as (label, home): the default home as `<cli>`, the standard
+    `<default>-<letter>` homes as `<cli>-<letter>`, and any non-standard home the roster declares as `<cli>@<home>`.
+    A harness without account_env has one account, label `<cli>`, home None. Only existing directories count."""
+    cli = a['name']
+    k = a.get('account_env')
+    if not k:
+        return [(cli, None)]
+    default = os.path.expanduser(a.get('account_default', '')).rstrip('/')
+    out, seen = [], set()
+    if default and os.path.isdir(default):
+        out.append((cli, default)); seen.add(os.path.realpath(default))
+    for p in sorted(glob.glob(os.path.expanduser(a.get('account_detect') or (default + '-[a-z]')))):
+        if os.path.isdir(p) and os.path.realpath(p) not in seen:
+            out.append(('%s-%s' % (cli, os.path.basename(p).rsplit('-', 1)[-1]), p.rstrip('/'))); seen.add(os.path.realpath(p))
+    for m in (reg or {}).get('models', {}).values():
+        if m.get('cli') != cli:
+            continue
+        home = explicit_account(m, a)
+        if home and os.path.isdir(os.path.expanduser(home)) and os.path.realpath(os.path.expanduser(home)) not in seen:
+            out.append(('%s@%s' % (cli, home.replace(os.path.expanduser('~'), '~')), os.path.expanduser(home).rstrip('/'))); seen.add(os.path.realpath(os.path.expanduser(home)))
+    return out
+
+
 VENDOR_HINTS = [('claude', 'anthropic'), ('gpt', 'openai'), ('codex', 'openai'), (r'\bo\d-', 'openai'), ('gemini', 'google'),
                 ('grok', 'xai'), ('deepseek', 'deepseek'), ('glm', 'zhipu'), ('mistral', 'mistral'), ('devstral', 'mistral'),
                 ('qwen', 'alibaba'), ('kimi', 'moonshot'), ('llama', 'meta'), ('nemotron', 'nvidia'), ('mimo', 'xiaomi'), ('beam', 'opencode')]

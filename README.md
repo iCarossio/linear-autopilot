@@ -9,7 +9,24 @@ Four skills for Claude Code (or any harness that reads `~/.claude/skills`):
 | `/autopilot-init` | once per machine | finds your CLIs (Codex, Claude Code, opencode, Grok, ...), their accounts and quotas; builds the model roster |
 | `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by two high-tier models, guardrails, then the Linear project with all tickets |
 | `/autopilot-run` | per project, for hours | one ticket at a time: plan review, cheap implementation, two-vendor review, one commit, Linear updated |
-| `/autopilot-usage` | any time | what quota is left on every CLI and account, and which pools can run now |
+| `/autopilot-usage` | any time | what quota is left on every CLI and account, which pools can run now, and how many tokens went through every harness and account (per day, month, year; terminal chart or HTML page) |
+
+## Supported harnesses
+
+One JSON adapter per CLI in `harnesses/`. "Accounts" means several logins of the same CLI, each its own quota, selected by an environment variable; "usage" is the quota probe; "tokens" is the local log `bin/tokens` reads to count consumption.
+
+| Harness | CLI | Accounts | Usage probe | Token log |
+|---|---|---|---|---|
+| OpenAI Codex | `codex` | `CODEX_HOME`: `~/.codex`, `~/.codex-b`, ... | rate limits in the session logs | session rollouts |
+| Claude Code | `claude` | `CLAUDE_CONFIG_DIR`: `~/.claude`, `~/.claude-b`, ... | `/usage` | project transcripts |
+| opencode | `opencode` | `XDG_DATA_HOME`: `~/.local/share`, `~/.local/share-b`, ... | none (quota errors) | SQLite store |
+| Cursor | `cursor-agent` | one login (an API key per extra account) | none (cursor.com) | none |
+| xAI Grok | `grok` | one login | interactive `/usage` only | session usage files |
+| Google Antigravity | `agy` | one login | `/usage` | brain transcripts |
+| Google Gemini CLI | `gemini` | one login | `/stats` only | chat recordings (untested) |
+| Mistral Vibe | `vibe` | one login | interactive `/usage` only | none |
+
+Any other CLI with a non-interactive mode is added with `bin/harness new` (see `/autopilot-init`); accounts, usage and token logs are optional fields of the adapter.
 
 ## Principles
 
@@ -36,7 +53,7 @@ Then run `/autopilot-init` in your harness. Requirements: Python 3.9+, git, and 
 
 ```
 skills/      the four SKILL.md files
-bin/         shared runtime (run-model, review, premortem, harness, linear, state, ...)
+bin/         shared runtime (run-model, review, premortem, harness, linear, state, tokens, ...)
 harnesses/   one JSON adapter per CLI: how to call it, where its accounts live, how to read its usage
 prompts/     briefs for implementers, reviewers and the pre-mortem
 templates/   example roster, state, plan and ticket

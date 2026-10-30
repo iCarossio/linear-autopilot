@@ -43,5 +43,9 @@
   ],
   "account_login": {
     "file": ".claude.json"
+  },
+  "tokens": {
+    "kind": "claude_projects",
+    "path": "$CLAUDE_CONFIG_DIR/projects"
   }
 }

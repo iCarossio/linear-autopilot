@@ -4,12 +4,46 @@
   "vendor": "by_model",
   "doc": "Google Antigravity CLI: Gemini, Claude and GPT-OSS models on a Google account, quota separate from the Claude plan. Two usage groups: Gemini vs Claude/GPT.",
   "run": {
-    "argv": ["-p", "{prompt}", "--model", "{model}", "--dangerously-skip-permissions"],
+    "argv": [
+      "-p",
+      "{prompt}",
+      "--model",
+      "{model}",
+      "--dangerously-skip-permissions"
+    ],
     "env": {},
     "output": "stdout"
   },
-  "list_models": {"kind": "command", "argv": ["models"], "regex": "^\\s*[*-]?\\s*([a-z][\\w.-]+)\\s*$"},
-  "usage": {"kind": "command", "argv": ["-p", "/usage"], "regex": "^(.+?)\\t[^\\t]*Remaining\\t(\\d+)%\\t(\\S+)", "groups": ["window", "remaining", "reset_iso"],
-            "window_groups": {"gemini": "^gemini", "claude|gpt": "^(claude|gpt)"}},
-  "quota_patterns": ["quota", "rate limit"]
+  "list_models": {
+    "kind": "command",
+    "argv": [
+      "models"
+    ],
+    "regex": "^\\s*[*-]?\\s*([a-z][\\w.-]+)\\s*$"
+  },
+  "usage": {
+    "kind": "command",
+    "argv": [
+      "-p",
+      "/usage"
+    ],
+    "regex": "^(.+?)\\t[^\\t]*Remaining\\t(\\d+)%\\t(\\S+)",
+    "groups": [
+      "window",
+      "remaining",
+      "reset_iso"
+    ],
+    "window_groups": {
+      "gemini": "^gemini",
+      "claude|gpt": "^(claude|gpt)"
+    }
+  },
+  "quota_patterns": [
+    "quota",
+    "rate limit"
+  ],
+  "tokens": {
+    "kind": "agy_brain",
+    "path": "~/.gemini/antigravity-cli/brain"
+  }
 }

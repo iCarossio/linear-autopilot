@@ -39,5 +39,9 @@
   "account_detect": "~/.local/share-[a-z]",
   "account_login": {
     "file": "opencode/auth.json"
+  },
+  "tokens": {
+    "kind": "opencode_db",
+    "path": "$XDG_DATA_HOME/opencode/opencode.db"
   }
 }

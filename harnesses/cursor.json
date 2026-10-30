@@ -1,0 +1,44 @@
+{
+  "name": "cursor",
+  "binary": "cursor-agent",
+  "vendor": "by_model",
+  "doc": "Cursor CLI (cursor-agent) on a Cursor subscription: GPT, Claude, Gemini, Grok and Composer models through one login. One login per machine (`cursor-agent login`); a second account can only go through an API key (CURSOR_API_KEY in the roster entry's env), which is the user's call. `auto` is not a model: pin a model id from `cursor-agent --list-models`.",
+  "run": {
+    "argv": [
+      "-p",
+      "--force",
+      "--sandbox",
+      "disabled",
+      "--trust",
+      "--approve-mcps",
+      "--output-format",
+      "text",
+      "--model",
+      "{model}",
+      "{prompt}"
+    ],
+    "env": {},
+    "output": "stdout"
+  },
+  "list_models": {
+    "kind": "command",
+    "argv": [
+      "--list-models"
+    ],
+    "regex": "^([a-z][\\w.-]+) - "
+  },
+  "usage": {
+    "kind": "none",
+    "note": "no CLI usage probe: the plan's usage is on cursor.com (Settings > Usage); the reset time in a quota error is parsed by run-model"
+  },
+  "quota_patterns": [
+    "usage limit",
+    "rate limit",
+    "quota",
+    "402"
+  ],
+  "tokens": {
+    "kind": "none",
+    "note": "the Cursor CLI keeps no token counts in its chat store (~/.cursor/chats); see cursor.com > Usage"
+  }
+}

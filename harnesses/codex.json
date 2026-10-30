@@ -51,5 +51,9 @@
         "account": "https://api.openai.com/auth|chatgpt_account_id"
       }
     }
+  },
+  "tokens": {
+    "kind": "codex_sessions",
+    "path": "$CODEX_HOME/sessions"
   }
 }

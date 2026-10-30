@@ -4,11 +4,31 @@
   "vendor": "google",
   "doc": "Google Gemini CLI. Untested in the pools so far: smoke it before adding it to a pool.",
   "run": {
-    "argv": ["-p", "{prompt}", "-m", "{model}", "--yolo"],
+    "argv": [
+      "-p",
+      "{prompt}",
+      "-m",
+      "{model}",
+      "--yolo"
+    ],
     "env": {},
     "output": "stdout"
   },
-  "list_models": {"kind": "none"},
-  "usage": {"kind": "none", "note": "see /stats in an interactive session"},
-  "quota_patterns": ["quota", "rate limit", "429"]
+  "list_models": {
+    "kind": "none"
+  },
+  "usage": {
+    "kind": "none",
+    "note": "see /stats in an interactive session"
+  },
+  "quota_patterns": [
+    "quota",
+    "rate limit",
+    "429"
+  ],
+  "tokens": {
+    "kind": "gemini_chats",
+    "path": "~/.gemini/tmp",
+    "note": "chat recordings under ~/.gemini/tmp/<project>/chats; untested, check the first numbers against /stats"
+  }
 }
