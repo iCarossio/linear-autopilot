@@ -81,6 +81,22 @@ A new coordinator session finds `inflight` tickets whose model runs died with th
 - Before running checks, make sure nothing of the implementer still runs (no process with the worktree path in `ps`; remove its containers).
 - Collisions to prevent up front: fixed ports and container names, shared generated files, two tickets editing the same layout or manifest. When the merged branch fails because parallel tickets disagree, create a small integration follow-up ticket in Linear with `blocks`; don't hide it in the next ticket.
 
+### Re-plan for speed, regularly
+
+Fewer tickets in flight than the machine and quotas allow is lost time. Don't wait for the user to ask "can't you go faster?". Re-plan when a ticket lands, when a review sends one back, when fewer than 3 tickets are in flight, and at least at every heartbeat:
+
+1. **List what is idle.** List every queued ticket and what really blocks it: a file the in-flight work edits, an output it needs, or only ordering. Most "waits for X" are partial: only one part of the ticket needs X.
+2. **Split to unblock.** Cut the part that doesn't depend on the blocker into its own sub-ticket and start it now. Examples:
+   - docs, investigations or tooling ahead of the code they describe;
+   - the implementation half of a ticket whose measurement needs a quiet machine;
+   - a fix found during a review, as its own ticket in another worktree.
+3. **Overlap your own steps.** Run the next ticket's plan review while the current one implements or reviews. Run checks of ticket A while ticket B's review runs, in other worktrees. Write the next ticket file while you wait.
+4. **Attack the shared bottleneck.** If every cycle waits on the same slow suite, a flaky test or a cooled-down pool, a ticket that fixes it pays back on every later ticket. Examples: test-suite speed, a flake, ephemeral ports that remove collisions, another account login (`/autopilot-init`). Schedule it early, not at the end.
+5. **Keep the schedule honest.** `stages` must show real parallelism: a side ticket goes in a parallel stage that doesn't gate the critical path. An item already done or still blocked on the owner does not sit in the current stage. Re-check `bin/eta -v` after every change.
+6. **Respect the limits.** Machine load (watch `uptime`: past roughly 2× the core count, runs slow down and flakes appear), review capacity, and quota. Add parallel work only while the load average and healthy pools allow it. Say which limit stops you, so the user can lift it.
+
+State each re-plan in one line in the user update: what you started, or which limit stops you.
+
 ## Merging (cherry-pick conflicts)
 
 - `package.json` / lockfiles: take the **union** of both sides' scripts and dependencies, dedupe, then reinstall to regenerate the lockfile. `.gitignore`: union.
