@@ -13,7 +13,8 @@ The ETA is a schedule, not a throughput extrapolation:
   last 8 active hours (gaps over 1 h count as 1 h) times the average parallelism `parallel`.
 - Re-plan signals (printed as `REPLAN:` lines after the ETA line): a slip of more than 30 min against
   the reading 1-3 h ago (kept in `.autopilot/eta-history.jsonl`), two or more single-item stages in a
-  row, and fewer in-flight tickets than `parallel_target` (default 6) while work is queued.
+  row, and fewer in-flight tickets than `parallel_target` (default 6) while work is queued, unless the
+  load average is over 2x the core count: then it says to shed load instead.
 - Update `est` whenever a round starts or ends (a review that sends a ticket back adds a round, ~30-40
   min for a fix round); keep `stages` in step with the real dependency order.
 
@@ -124,7 +125,14 @@ if len(worst) >= 2:
                   "check each real dependency; move ordering-only items into an earlier stage")
 # Idle lanes: fewer tickets in flight than the target while work is queued.
 target = int(S.get('parallel_target', 6))
-if queue and len(inflight) < target:
+cores = os.cpu_count() or 1
+load = os.getloadavg()[0] if hasattr(os, 'getloadavg') else 0.0
+if os.environ.get('ETA_LOAD'):  # tests
+    load = float(os.environ['ETA_LOAD'])
+if load > 2 * cores:
+    replan.append(f"machine load {load:.0f} on {cores} cores (over 2x): do not add work; serialise the full "
+                  "suites (implementers run focused tests only) before starting more tickets")
+elif queue and len(inflight) < target:
     replan.append(f"{len(inflight)} in flight, target {target}, {len(queue)} queued: "
                   "start an independent ticket, or the independent part of one")
 

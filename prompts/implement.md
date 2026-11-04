@@ -18,6 +18,7 @@ You are the implementer. Another model will adversarially review your diff, so b
 ## Rules
 - Change only what this ticket needs. Match the surrounding code style, naming and comment density.
 - Run these checks and make them pass before finishing: {{CHECKS}}
+- Test scope: run the tests that cover what you changed, plus the type check and build when the brief lists them. Do not run the whole suite of a repository whose full run takes more than about 5 minutes (a nested build, a browser suite, a full migration suite). The coordinator runs full suites one at a time through its own queue: several tickets run in parallel on one machine, and parallel full suites overload it until unrelated tests time out. Name in CHECKS the tests you ran and the ones you left to the coordinator.
 - Run checks in the foreground and wait for them. Never end your session while a check runs in the background: when you stop, your final message must already contain the STATUS block with the real results.
 - Do NOT commit, push, open PRs, or touch git history. Do not edit files outside the working directory.
 - Do not delete or rewrite data/fixtures/snapshots unless the ticket says so.

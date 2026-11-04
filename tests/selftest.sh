@@ -230,19 +230,21 @@ cat > $ER/.autopilot/state.json <<EOF
 {"branch": "$EB", "queue": ["A", "B", "C"], "inflight": {}, "done": [], "per_unit_min": 60,
  "stages": [["A"], ["B"], ["C"]], "parallel_target": 3}
 EOF
-EO=$(AUTOPILOT_REPO=$ER $H/bin/eta)
+EO=$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta)
 check "eta: timezone on the ETA line" "$(echo "$EO" | head -1 | grep -cE 'ETA [A-Z][a-z]{2} [0-9]{2}:[0-9]{2} [A-Z+0-9-]+ ')" "1"
 check "eta: serial tail flagged" "$(echo "$EO" | grep -c 'REPLAN: 3 single-item stages in a row (A -> B -> C)')" "1"
 check "eta: idle lanes flagged" "$(echo "$EO" | grep -c 'REPLAN: 0 in flight, target 3, 3 queued')" "1"
+check "eta: overload suppresses idle lanes" "$(ETA_LOAD=999 AUTOPILOT_REPO=$ER $H/bin/eta | grep -cE 'REPLAN: (machine load 999|0 in flight)' ; ETA_LOAD=999 AUTOPILOT_REPO=$ER $H/bin/eta | grep -c 'REPLAN: machine load')" "1
+1"
 python3 -c "
 import datetime as d,json
 n=d.datetime.now(d.timezone.utc)
 open('$ER/.autopilot/eta-history.jsonl','w').write(json.dumps({'at':(n-d.timedelta(minutes=90)).isoformat(),'end':(n-d.timedelta(minutes=30)).isoformat(),'total':60})+'\n')"
-check "eta: slip against a reading 90 min ago flagged" "$(AUTOPILOT_REPO=$ER $H/bin/eta | grep -c 'REPLAN: ETA slipped')" "1"
+check "eta: slip against a reading 90 min ago flagged" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta | grep -c 'REPLAN: ETA slipped')" "1"
 cat > $ER/.autopilot/state.json <<EOF
 {"branch": "$EB", "queue": ["A", "B", "C"], "inflight": {}, "done": [], "per_unit_min": 60,
  "stages": [["A", "B", "C"]], "parallel_target": 0}
 EOF
 rm -f $ER/.autopilot/eta-history.jsonl
-check "eta: parallel plan, no REPLAN" "$(AUTOPILOT_REPO=$ER $H/bin/eta | grep -c REPLAN)" "0"
+check "eta: parallel plan, no REPLAN" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta | grep -c REPLAN)" "0"
 echo "=== $PASS passed, $FAIL failed"

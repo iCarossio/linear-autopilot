@@ -17,6 +17,7 @@ You are the **coordinator**. You read the Linear project, write briefs, dispatch
 | `bin/finish` | `finish <ISSUE> "<subject>" "<body>"`: commits in the worktree, cherry-picks onto the project branch, removes the worktree, pushes if allowed. Exit 3 conflict, 4 push failed. |
 | `bin/rebase-wt` | `rebase-wt <worktree>`: stash, fast-forward to the project branch, pop. Exit 3 on conflict. |
 | `bin/eta` | Progress bar and ETA for the scope, from `stages`/`est` in state.json. |
+| `bin/docker-reap` | `docker-reap [--apply] [--min-age-hours H] [--keep RE]`: removes dead containers (older than H, default 2 h, with no live process referencing them: leaked test servers, never-started containers). Dry-run without `--apply`. |
 | `bin/state` | `state get|set|del|push|pull|merge`: locked edits of `.autopilot/state.json`. Use it for every state change while runs are in flight: `run-model` writes implementer history concurrently and a plain file write would lose it. |
 | `bin/linear` | Linear GraphQL fallback (`LINEAR_API_KEY`) when this harness has no Linear MCP tools: `issues`, `comment`, `state`, `project-update`. |
 | `bin/docker-up` | Makes sure the Docker daemon answers: starts a stopped runtime (OrbStack, colima, Docker Desktop, systemd), `--restart` also restarts a hung one, `--check` only probes. Coordinator only. |
@@ -38,6 +39,10 @@ Helper scripts find the project through the nearest `.autopilot/state.json` (or 
 
 ## Setup (once per project)
 
+0. **Permissions before anything else.** Check that every rule in `templates/permissions.json` is in the user's `permissions.allow`, and that the project's own check commands are covered. They are normally added by `/autopilot-init`, step 10.
+   - If any is missing, ask the user once, now, while they are still here, to approve adding them (Claude Code: the `update-config` skill), together with the project's check commands. An unattended run that hits a prompt or an auto-mode block stalls for hours: that happened with `docker-reap --apply`.
+   - Never start dispatching with a known missing permission, and never work around a block with another command.
+   - Actions that need the owner each time (publishing a website, merging to the default branch, opening a PR) stay prompts by design.
 1. If `<repo>/.autopilot/plan/` exists (the project came from `/autopilot-plan`): read `PLAN.md`, `premortem.md` and `tickets.created.json`; the guardrails there are rules for every ticket. The plan skill may already have created the branch and seeded `state.json`: reuse both (steps 4 and 6 then only fill what is missing, never overwrite `queue`, `sizes`, `stages`, `critical_path`). Otherwise ask only what you can't infer: Linear project, repo path, push allowed (default no), scope (milestones), tickets to skip, check commands not discoverable. Then the user may leave: never ask again during the run; decide, and record the decision in Linear and in the repo's agent docs.
 2. `bin/run-model usage --apply` (exact quota resets per harness and account), `bin/run-model discover --apply`, then `bin/run-model smoke <key>` for every healthy model in the pools you will use. If a pool has fewer than two healthy vendors, say so to the user before they leave.
 3. Read the project and its issues (milestones in order, then sort order, `blockedBy` relations). Linear MCP tools when this harness has them, else `bin/linear issues <project-id>`.
@@ -80,6 +85,7 @@ A new coordinator session finds `inflight` tickets whose model runs died with th
 - Before a later round of a worktree ticket, and before checks that depend on newly merged code, `bin/rebase-wt <wt>` (serialised across worktrees by a repo-level lock; the stash is found by its own message, never by stack position); then check that every untracked file of the ticket came back (a path that now exists on the branch is silently not restored by `stash apply`; recover it from the kept stash's untracked tree).
 - Never run a review in parallel with your own checks in the same worktree (reviewers may start or stop servers there). Check first, then review.
 - Before running checks, make sure nothing of the implementer still runs (no process with the worktree path in `ps`; remove its containers).
+- **Dead containers are removed automatically** (owner's standing rule). Run `bin/docker-reap --apply` at every heartbeat and before each full check. Leaked test servers keep their fixed names and make later browser tests fail on name collisions. The reaper never touches a container younger than 2 h or one that a live process references, so in-flight runs are safe. Orphaned processes reparented to launchd (pinned Chrome for Testing, `node --test` suites) in a ticket's worktree are stopped the same way, when older than 1 h.
 - Collisions to prevent up front: fixed ports and container names, shared generated files, two tickets editing the same layout or manifest. When the merged branch fails because parallel tickets disagree, create a small integration follow-up ticket in Linear with `blocks`; don't hide it in the next ticket.
 
 ### Re-plan for speed, regularly

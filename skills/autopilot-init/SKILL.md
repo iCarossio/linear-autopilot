@@ -39,7 +39,12 @@ Goal: a working roster at `~/.config/linear-autopilot/models.json` (`$AUTOPILOT_
 7. **Smoke test every model** you placed in a pool: `bin/run-model smoke <key>` (a 120 s "reply AUTOPILOT_OK" run). A model that fails is cooled down; fix the adapter or the login, `bin/run-model reset <key>`, smoke again. Remove what cannot be made to work (`bin/harness remove <key>`).
 8. **Read the quotas.** `bin/run-model usage --apply` prints every harness and account with its windows, used percentage and reset time, and cools down what is exhausted. Harnesses without a usage probe say so: tell the user the runtime will learn their resets from quota errors.
 9. **Linear access.** Check that this harness has Linear tools (MCP), else that `LINEAR_API_KEY` is set and `bin/linear teams` answers.
-10. **Summary for the user:** harnesses and accounts registered, models per cost tier, pools with their vendors, what was removed and why, quotas right now, and that `/autopilot-plan` is the next step.
+10. **Permissions, so the run never stops on a prompt.** An unattended run that hits a permission prompt or an auto-mode block stalls until the user comes back.
+    - Show the user the rules in `templates/permissions.json`, plus any project command they already know their checks need.
+    - With their approval, merge the rules into `~/.claude/settings.json` under `permissions.allow`, through the harness's settings mechanism (in Claude Code, the `update-config` skill). Never replace existing entries.
+    - Rules use the prefix form `Bash(<command> *)`, which matches the start of the command line. Every harness script is listed under both `~/...` and the absolute home path: replace `{HOME}` with the user's home, because rules do not expand `$HOME`. A call that starts with an environment prefix such as `AUTOPILOT_REPO=` does not match, so the run invokes the scripts without one.
+    - Never pre-approve actions that need a per-use owner decision: publishing a website, merging to the default branch, opening a PR, deleting branches or worktrees, paying for credits.
+11. **Summary for the user:** harnesses and accounts registered, models per cost tier, pools with their vendors, what was removed and why, quotas right now, and that `/autopilot-plan` is the next step.
 
 ## Adapter format (for reference)
 
