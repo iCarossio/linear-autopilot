@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""docker-up: make sure the Docker daemon answers, starting it when it is stopped. Coordinator only: implementers and
+reviewers never start, stop or restart Docker (their brief says so).
+
+  docker-up              # probe; start a stopped runtime, wait until the daemon answers
+  docker-up --restart    # also restart a runtime that runs but whose daemon does not answer (hung)
+  docker-up --check      # probe only, change nothing
+
+Runtimes: OrbStack (`orb`), colima, Docker Desktop (macOS), rootless Docker under systemd (`systemctl --user`).
+AUTOPILOT_DOCKER_RUNTIME=orbstack|colima|desktop|systemd forces one. DOCKER_UP_TIMEOUT (seconds, default 300) bounds
+the wait. Prints one line. Exit 0 the daemon answers, 1 it still does not, 2 no Docker or no known runtime,
+3 the daemon is hung and --restart was not given.
+
+A restart stops every running container for a moment; containers with a restart policy come back. Use --restart
+only when the daemon is hung (nothing can use it then anyway), never to clean up.
+"""
+import os, shutil, subprocess, sys, time
+
+PROBE_SECONDS = 15
+
+
+def run(cmd, timeout):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def daemon_ok():
+    r = run(['docker', 'version', '--format', '{{.Server.Version}}'], PROBE_SECONDS)
+    return bool(r and r.returncode == 0 and r.stdout.strip())
+
+
+def detect():
+    forced = os.environ.get('AUTOPILOT_DOCKER_RUNTIME')
+    if forced: return forced
+    if shutil.which('orb'): return 'orbstack'
+    if shutil.which('colima'): return 'colima'
+    if sys.platform == 'darwin' and os.path.isdir('/Applications/Docker.app'): return 'desktop'
+    if shutil.which('systemctl'): return 'systemd'
+    return None
+
+
+def running(rt):
+    """True when the runtime itself runs (so a silent daemon is hung, not stopped)."""
+    if rt == 'orbstack':
+        r = run(['orb', 'status'], 30); return bool(r and r.stdout.strip().lower().startswith('running'))
+    if rt == 'colima':
+        r = run(['colima', 'status'], 30); return bool(r and r.returncode == 0)
+    if rt == 'desktop':
+        r = run(['pgrep', '-f', 'com.docker.backend'], 10); return bool(r and r.returncode == 0)
+    if rt == 'systemd':
+        r = run(['systemctl', '--user', 'is-active', 'docker'], 10); return bool(r and r.stdout.strip() == 'active')
+    return False
+
+
+START = {
+    'orbstack': [['orb', 'start']],
+    'colima': [['colima', 'start']],
+    'desktop': [['open', '-g', '-a', 'Docker']],
+    'systemd': [['systemctl', '--user', 'start', 'docker']],
+}
+RESTART = {
+    'orbstack': [['orb', 'stop'], ['orb', 'start']],  # `orb restart docker` can hang along with the daemon
+    'colima': [['colima', 'restart']],
+    'desktop': [['osascript', '-e', 'quit app "Docker"'], ['open', '-g', '-a', 'Docker']],
+    'systemd': [['systemctl', '--user', 'restart', 'docker']],
+}
+
+
+def main():
+    args = sys.argv[1:]
+    unknown = [a for a in args if a not in ('--restart', '--check')]
+    if unknown: print(__doc__); sys.exit(2)
+    if not shutil.which('docker'): print('docker-up: no docker CLI on PATH'); sys.exit(2)
+    if daemon_ok(): print('docker-up: up'); return
+    if '--check' in args: print('docker-up: down'); sys.exit(1)
+    rt = detect()
+    if rt not in START: print(f'docker-up: daemon does not answer and no known runtime ({rt})'); sys.exit(2)
+    hung = running(rt)
+    if hung and '--restart' not in args:
+        print(f'docker-up: {rt} runs but the daemon does not answer (hung); rerun with --restart'); sys.exit(3)
+    for cmd in (RESTART if hung else START)[rt]:
+        run(cmd, 180)
+    deadline = time.time() + int(os.environ.get('DOCKER_UP_TIMEOUT', '300'))
+    while time.time() < deadline:
+        if daemon_ok():
+            print(f"docker-up: {'restarted' if hung else 'started'} {rt}, up"); return
+        time.sleep(3)
+    print(f"docker-up: {'restarted' if hung else 'started'} {rt}, daemon still does not answer"); sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

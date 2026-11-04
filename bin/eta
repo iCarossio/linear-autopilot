@@ -11,6 +11,9 @@ The ETA is a schedule, not a throughput extrapolation:
   a queued item keeps its full estimate until it starts. Without `est`, the item
   takes size x (measured minutes per size unit), where the measurement uses the tickets committed in the
   last 8 active hours (gaps over 1 h count as 1 h) times the average parallelism `parallel`.
+- Re-plan signals (printed as `REPLAN:` lines after the ETA line): a slip of more than 30 min against
+  the reading 1-3 h ago (kept in `.autopilot/eta-history.jsonl`), two or more single-item stages in a
+  row, and fewer in-flight tickets than `parallel_target` (default 6) while work is queued.
 - Update `est` whenever a round starts or ends (a review that sends a ticket back adds a round, ~30-40
   min for a fix round); keep `stages` in step with the real dependency order.
 
@@ -87,13 +90,53 @@ for st in stages:
     plan.append((st, d))
 end = (now + dt.timedelta(minutes=total)).astimezone()
 
+# Re-plan signals. They print after the ETA line, so `bin/eta | head -1` hides them: run it in full.
+replan = []
+hist_path = os.path.join(M, '.autopilot', 'eta-history.jsonl')
+hist = []
+try:
+    hist = [json.loads(l) for l in open(hist_path) if l.strip()]
+except (OSError, ValueError):
+    pass
+# Slip: compare with the oldest reading taken 60-180 min ago.
+past = [h for h in hist if 60 <= (now - dt.datetime.fromisoformat(h['at'])).total_seconds() / 60 <= 180]
+if past:
+    ref = past[0]
+    slip = (end - dt.datetime.fromisoformat(ref['end'])).total_seconds() / 60
+    if slip > 30:
+        replan.append(f"ETA slipped {slip:+.0f} min since {dt.datetime.fromisoformat(ref['at']).astimezone():%H:%M}: "
+                      "find what added time, then look for work to start in parallel")
+if not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300:
+    try:
+        with open(hist_path, 'a') as f:
+            f.write(json.dumps({'at': now.isoformat(), 'end': end.astimezone(dt.timezone.utc).isoformat(),
+                                'total': round(total)}) + '\n')
+    except OSError:
+        pass
+# Serial tail: consecutive single-item stages. Each must truly depend on the one before it.
+run, worst = [], []
+for st, _ in plan:
+    run = run + [st[0]] if len(st) == 1 else []
+    if len(run) > len(worst):
+        worst = run
+if len(worst) >= 2:
+    replan.append(f"{len(worst)} single-item stages in a row ({' -> '.join(worst)}): "
+                  "check each real dependency; move ordering-only items into an earlier stage")
+# Idle lanes: fewer tickets in flight than the target while work is queued.
+target = int(S.get('parallel_target', 6))
+if queue and len(inflight) < target:
+    replan.append(f"{len(inflight)} in flight, target {target}, {len(queue)} queued: "
+                  "start an independent ticket, or the independent part of one")
+
 remaining_units = sum(size(t) * (float(inflight[t].get('remaining', 0.5)) if t in inflight else 1.0)
                       for st in stages for t in st)
 done_units = sum(size(t) for t in done) + sum(size(t) * (1 - float(inflight[t].get('remaining', 0.5))) for t in inflight)
 pct = done_units / (done_units + remaining_units) if done_units + remaining_units else 1.0
 bar = '█' * round(pct * 30) + '░' * (30 - round(pct * 30))
 print(f"[{bar}] {pct:.0%}  {len(done)} done, {len(inflight)} in flight, {len(queue)} to do  |  "
-      f"ETA {end:%a %H:%M} (±{max(10, round(total * 0.2))} min)")
+      f"ETA {end:%a %H:%M %Z} (±{max(10, round(total * 0.2))} min)")
+for r in replan:
+    print(f"REPLAN: {r}")
 if '-v' in sys.argv:
     t0 = now
     for st, d in plan:

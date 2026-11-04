@@ -8,7 +8,11 @@ Read the section whose symptom you observe. These are facts measured on real pro
 
 ## `docker version` blocks; runs report `docker_hung`; serve tests hang for everyone
 
-**Docker can hang under many parallel container start/stop cycles (2026-10-25).** Probe with a bounded `docker version`; on OrbStack `orb restart docker` may hang too, so kill the stuck docker clients and run `orb stop && orb start` (containers survive). Implementers must never restart Docker themselves: the brief says to stop and report. Then restart the stuck checks and rounds, and `run-model reset` any model cooled during the hang. With a 64 GB VM, up to 5 Docker-heavy jobs at a time were fine; the hangs came with small VM memory and 3 capture-heavy suites at once.
+**Docker can hang under many parallel container start/stop cycles (2026-10-25).** `bin/docker-up --restart` probes with a bounded `docker version` and, when the runtime runs but the daemon is silent, restarts it (on OrbStack `orb stop && orb start`, because `orb restart docker` may hang too; containers survive). If it still does not answer, kill the stuck docker clients and run it again. Implementers must never restart Docker themselves: the brief says to stop and report. Then restart the stuck checks and rounds, and `run-model reset` any model cooled during the hang. With a 64 GB VM, up to 5 Docker-heavy jobs at a time were fine; the hangs came with small VM memory and 3 capture-heavy suites at once.
+
+## Docker is down after the machine restarted
+
+**OrbStack does not always start at login (2026-11-01).** After a reboot every run died and `docker` failed with `connect: no such file or directory` on the socket. `bin/docker-up` starts the runtime and waits until the daemon answers; run it at setup, on each heartbeat and when resuming.
 
 ## Everything stalled for hours overnight, logs stopped at the same minute
 
@@ -69,3 +73,5 @@ Best first: Claude Opus 5.5, Codex gpt-6.1-sol, Codex gpt-6.1-terra (good mid-ti
 ## A reviewer was flagged `modified tree` but changed nothing
 
 The fingerprint covers the whole working directory (tracked state, untracked content, HEAD). Editing the repo yourself while a review runs there (a hot fix to a script, a doc update) flags that review and discards its verdict. Edit in another checkout, or wait for the review to finish.
+- 2026-11-04: `run-model wait <pool> <excluded>` knows nothing about vendors. For a plan review it returned `claude-opus-b`, another account of the planner's vendor, and `bin/review` then refused with NO_REVIEWER. Pass every key of the excluded vendor (all `claude-*` keys, including `-b` accounts) until `wait` takes a vendor filter.
+- 2026-11-04: the ETA kept slipping while the tail of `stages` held eight single-item stages that nobody had re-checked. Three of those items were independent: PRD-2578b only needed an owner token for its live run, PRD-2579 only needed a plan, and PRD-2627 only conflicts on generated files. `bin/eta` now prints `REPLAN:` lines (slip, serial tail, idle lanes); act on them.

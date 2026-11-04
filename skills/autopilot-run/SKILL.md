@@ -19,6 +19,7 @@ You are the **coordinator**. You read the Linear project, write briefs, dispatch
 | `bin/eta` | Progress bar and ETA for the scope, from `stages`/`est` in state.json. |
 | `bin/state` | `state get|set|del|push|pull|merge`: locked edits of `.autopilot/state.json`. Use it for every state change while runs are in flight: `run-model` writes implementer history concurrently and a plain file write would lose it. |
 | `bin/linear` | Linear GraphQL fallback (`LINEAR_API_KEY`) when this harness has no Linear MCP tools: `issues`, `comment`, `state`, `project-update`. |
+| `bin/docker-up` | Makes sure the Docker daemon answers: starts a stopped runtime (OrbStack, colima, Docker Desktop, systemd), `--restart` also restarts a hung one, `--check` only probes. Coordinator only. |
 | `bin/codex-reset` | Redeems a Codex usage reset through the TUI; refuses unless the weekly window is exhausted; per-session user permission. |
 
 Helper scripts find the project through the nearest `.autopilot/state.json` (or `$AUTOPILOT_REPO`).
@@ -44,7 +45,7 @@ Helper scripts find the project through the nearest `.autopilot/state.json` (or 
 5. Discover the checks (package.json, Makefile, AGENTS.md / CLAUDE.md, the `checks` column of the plan). If the repo has none yet, checks are per ticket (a `CHECKS:` line in the ticket file) until a scaffold ticket adds them.
 6. Write `.autopilot/state.json` from `templates/state.json` (repo root of this skill) if it does not exist, add `.autopilot/` to `.git/info/exclude`. Set `coordinator` to your own roster key (plan reviews exclude its vendor; without it `bin/review` refuses a plan review) and `critical_path` from the plan.
 7. **Make the work visible.** Everything lands on `autopilot/<project-slug>`, never on the default branch. If push is allowed, open a draft PR/MR from that branch at setup, titled with the project name, and keep its description updated with the done list. Every user update and Linear summary includes the branch name and the compare URL or draft PR link, and says that nothing is merged into the default branch.
-8. Keep the machine awake (`caffeinate -dimsu -t <seconds> < /dev/null` on macOS, in the background) and check it is on AC power on each heartbeat.
+8. Keep the machine awake (`caffeinate -dimsu -t <seconds> < /dev/null` on macOS, in the background) and check it is on AC power on each heartbeat. If the project's checks use containers, run `bin/docker-up`: it starts Docker when it is stopped (after a reboot, for example).
 
 ## Ticket files (your briefs' source)
 
@@ -83,7 +84,20 @@ A new coordinator session finds `inflight` tickets whose model runs died with th
 
 ### Re-plan for speed, regularly
 
-Fewer tickets in flight than the machine and quotas allow is lost time. Don't wait for the user to ask "can't you go faster?". Re-plan when a ticket lands, when a review sends one back, when fewer than 3 tickets are in flight, and at least at every heartbeat:
+Fewer tickets in flight than the machine and quotas allow is lost time. Don't wait for the user to ask "can't you go faster?". Re-plan when a ticket lands, when a review sends one back, when fewer than 3 tickets are in flight, and at least at every heartbeat.
+
+**`REPLAN:` lines from `bin/eta` are mandatory triggers.** Run `bin/eta` in full, not `| head -1`: the signals print after the ETA line. Act on every `REPLAN:` line before you send the update.
+- A slip of more than 30 min against the reading 1–3 h ago.
+- Two or more single-item stages in a row. A serial tail is usually an untested assumption, not a real dependency chain.
+- Fewer in-flight tickets than `parallel_target` (default 6) while work is queued.
+
+A slipping ETA means the plan is stale. Recompute the plan, not just the estimate: an ETA that only grows means nobody re-checked the order.
+
+Two cases are never a reason to leave a ticket idle:
+- **Blocked on the owner** (a token, an export, an approval): build and test the offline part now, with fixtures sampled from real data, and leave only the live run for later.
+- **Blocked on a plan review because the high tier is cooling down:** run a read-only diagnosis brief on a free model now (`mkbrief diag`), so the plan is ready to review the minute the quota resets.
+
+The steps:
 
 1. **List what is idle.** List every queued ticket and what really blocks it: a file the in-flight work edits, an output it needs, or only ordering. Most "waits for X" are partial: only one part of the ticket needs X.
 2. **Split to unblock.** Cut the part that doesn't depend on the blocker into its own sub-ticket and start it now. Examples:
@@ -140,15 +154,15 @@ Watch quotas with `bin/run-model usage` (the `/autopilot-usage` skill explains t
 - `all_failed` or `review` exit 2: `bin/run-model health` shows the first cooldown end. Meanwhile do anything else.
 - **Reuse every model the minute it is back.** Cooldowns hold the exact reset (from `usage --apply` or parsed from the quota error). Put blocked work behind `bin/run-model wait <pool> [EXCLUDE]` in a background job: it sleeps until the earliest cooldown end and prints the first healthy key, e.g. `bin/run-model wait review_high >/dev/null && POOL=review_high ... bin/review ...` with the tool's background mode. Never a foreground sleep.
 - Quota cooldowns without a known reset last 60 min; when the user says a model works again, `reset` + `smoke`.
-- Keep a heartbeat (`sleep 1500` in the background) whenever jobs run: on each heartbeat check that every in-flight log moved recently, run `usage --apply`, and renew it.
+- Keep a heartbeat (`sleep 1500` in the background) whenever jobs run: on each heartbeat check that every in-flight log moved recently, run `usage --apply`, run `bin/docker-up` when the checks use containers, and renew it.
 - When a CLI announces its reset time, don't smoke it before: schedule one background job that sleeps until just after the reset, then `reset` + `smoke`.
 - macOS has no `timeout`: bound a background command with an `until` loop on its end condition and `kill` it.
-- A run that returns `docker_hung` is an environment stall, not a model failure: recover Docker (see `references/lessons.md`), `reset` any model cooled during the hang, relaunch.
+- A run that returns `docker_hung` is an environment stall, not a model failure: run `bin/docker-up --restart` (it restarts the runtime only when the daemon is hung; see `references/lessons.md` if that fails), `reset` any model cooled during the hang, relaunch.
 - Background jobs launched with `&` inside a command don't notify you; use the tool's background mode, or wrap the job with a background `until` loop that waits for its result file.
 
 ## ETA (always shown)
 
-Every message to the user, every heartbeat summary and every Linear project summary starts with the first line of `bin/eta` in a code span (run it, never guess). Keep its inputs current in state.json: `stages` (ordered list of parallel groups, including your own final steps), `est` per ticket (`{"min": minutes left, "at": ISO}`, set when a round starts and re-set when a review sends the ticket back), `sizes`, `queue` without done or in-flight tickets. When asked for a tighter bound, name what drives the error rather than inventing precision.
+Every message to the user, every heartbeat summary and every Linear project summary starts with the first line of `bin/eta` in a code span (run it, never guess). The line carries the machine's timezone: convert it to the user's timezone when they differ, and say so. When the ETA moves, give the cause in one line (a review sent a ticket back, a lost run, a new ticket) and what the re-plan changed. Keep its inputs current in state.json: `stages` (ordered list of parallel groups, including your own final steps), `est` per ticket (`{"min": minutes left, "at": ISO}`, set when a round starts and re-set when a review sends the ticket back), `sizes`, `queue` without done or in-flight tickets. When asked for a tighter bound, name what drives the error rather than inventing precision.
 
 ## Self-update
 

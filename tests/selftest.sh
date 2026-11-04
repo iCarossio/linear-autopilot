@@ -197,4 +197,52 @@ check "tokens: a grown log file is re-indexed" "$(TJ --period 7d | sed 's/.*gran
 $H/bin/tokens --cli fk-claude,fk-codex,fk-grok --html $SCR/tokens.html >/dev/null; check "tokens --html writes the page" "$(grep -c 'fk-codex' $SCR/tokens.html | awk '{print ($1>0)}')" "1"
 $H/bin/tokens --cli nope >/dev/null 2>&1; check "tokens refuses an unknown --cli" "$?" "1"
 $H/bin/tokens --cli fk-claude --no-color --period 7d | grep -q 'total on the period: 1.17k tokens' && echo "ok   tokens terminal report" || { echo "FAIL tokens terminal report"; FAIL=$((FAIL+1)); }
+# docker-up with fake docker/orb binaries: a flag file stands for a daemon that answers.
+DK=$SCR/dk; mkdir -p $DK/bin
+cat > $DK/bin/docker <<EOF
+#!/bin/bash
+[ -f $DK/up ] && { echo 27.0; exit 0; }; exit 1
+EOF
+cat > $DK/bin/orb <<EOF
+#!/bin/bash
+echo "\$*" >> $DK/calls
+case "\$1" in status) [ -f $DK/vm ] && echo Running || echo Stopped;; start) touch $DK/vm $DK/up;; stop) rm -f $DK/vm $DK/up;; esac
+EOF
+chmod +x $DK/bin/*
+DU() { PATH="$DK/bin:$PATH" AUTOPILOT_DOCKER_RUNTIME=orbstack DOCKER_UP_TIMEOUT=10 $H/bin/docker-up "$@"; }
+touch $DK/up; check "docker-up: daemon up, nothing started" "$(DU; echo rc=$?; [ -f $DK/calls ] && echo called)" "docker-up: up
+rc=0"
+rm -f $DK/up; check "docker-up --check: down, nothing started" "$(DU --check; echo rc=$?; [ -f $DK/calls ] && echo called)" "docker-up: down
+rc=1"
+check "docker-up: stopped runtime is started" "$(DU; echo rc=$?; grep -c start $DK/calls)" "docker-up: started orbstack, up
+rc=0
+1"
+rm -f $DK/up $DK/calls; touch $DK/vm; check "docker-up: hung daemon is not restarted without --restart" "$(DU; echo rc=$?; grep -c -E 'start|stop' $DK/calls)" "docker-up: orbstack runs but the daemon does not answer (hung); rerun with --restart
+rc=3
+0"
+check "docker-up --restart: hung daemon is stopped then started" "$(DU --restart; echo rc=$?; grep -E 'start|stop' $DK/calls | tr '\n' ' ')" "docker-up: restarted orbstack, up
+rc=0
+stop start "
+# eta: REPLAN signals (serial tail, idle lanes, slip against a reading 1-3 h ago) and the timezone on the ETA line.
+ER=$SCR/eta-repo; mkdir -p $ER/.autopilot && (cd $ER && git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init)
+EB=$(git -C $ER branch --show-current)
+cat > $ER/.autopilot/state.json <<EOF
+{"branch": "$EB", "queue": ["A", "B", "C"], "inflight": {}, "done": [], "per_unit_min": 60,
+ "stages": [["A"], ["B"], ["C"]], "parallel_target": 3}
+EOF
+EO=$(AUTOPILOT_REPO=$ER $H/bin/eta)
+check "eta: timezone on the ETA line" "$(echo "$EO" | head -1 | grep -cE 'ETA [A-Z][a-z]{2} [0-9]{2}:[0-9]{2} [A-Z+0-9-]+ ')" "1"
+check "eta: serial tail flagged" "$(echo "$EO" | grep -c 'REPLAN: 3 single-item stages in a row (A -> B -> C)')" "1"
+check "eta: idle lanes flagged" "$(echo "$EO" | grep -c 'REPLAN: 0 in flight, target 3, 3 queued')" "1"
+python3 -c "
+import datetime as d,json
+n=d.datetime.now(d.timezone.utc)
+open('$ER/.autopilot/eta-history.jsonl','w').write(json.dumps({'at':(n-d.timedelta(minutes=90)).isoformat(),'end':(n-d.timedelta(minutes=30)).isoformat(),'total':60})+'\n')"
+check "eta: slip against a reading 90 min ago flagged" "$(AUTOPILOT_REPO=$ER $H/bin/eta | grep -c 'REPLAN: ETA slipped')" "1"
+cat > $ER/.autopilot/state.json <<EOF
+{"branch": "$EB", "queue": ["A", "B", "C"], "inflight": {}, "done": [], "per_unit_min": 60,
+ "stages": [["A", "B", "C"]], "parallel_target": 0}
+EOF
+rm -f $ER/.autopilot/eta-history.jsonl
+check "eta: parallel plan, no REPLAN" "$(AUTOPILOT_REPO=$ER $H/bin/eta | grep -c REPLAN)" "0"
 echo "=== $PASS passed, $FAIL failed"
