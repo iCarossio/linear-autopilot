@@ -20,7 +20,10 @@ Record the answers verbatim in the `Expectations and KPIs` and `Constraints` sec
 
 ## 1. Draft the plan (you, high tier)
 
-Before writing, read the repository: conventions, existing checks, generators, data, agent docs (AGENTS.md / CLAUDE.md), recent history. A plan that is wrong about the repo is the most common failure cause. Then write `PLAN.md` with:
+Before writing, read the repository: conventions, existing checks, generators, data, agent docs (AGENTS.md / CLAUDE.md), recent history. A plan that is wrong about the repo is the most common failure cause. 
+**Latest technologies by default.** For a new project or a new dependency, choose the latest stable release of the language, runtime and libraries (e.g. the newest Python, Node LTS or current, framework majors), not a conservative older pin. Verify it before writing it into the plan: install the candidate stack in a scratch directory on this machine (`uv init --python <latest>` + `uv add ...`, `npm view <pkg> version`, etc.) and import or run it once. Pin what passed exactly; write the next-older version as the project-wide fallback (switch the whole project, never work around one library). An existing repo keeps its own versions unless the user asks to upgrade.
+
+Then write `PLAN.md` with:
 - Goal, KPIs, non-goals, constraints, architecture decisions (with the rejected alternatives).
 - Milestones and tickets: slug, title, size (S/M/L), blocked-by, checks, guardrails. One ticket is one commit when reasonable (one concern, under ~400 changed lines); split otherwise, group tiny ones. Include the tickets nobody likes to write: scaffold and checks, test data sampled from real inputs, integration after parallel work, docs merge, final QA.
 - Rules for implementers and reviewers (forbidden shortcuts, required tests).

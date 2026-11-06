@@ -17,6 +17,7 @@ COMMON RULES
 - Never copy expected outputs, fixtures or snapshots into the product; never hard-code test answers; never ship test-only code.
 - Fix causes in shared code (generators, engines), not in generated files.
 - Do not weaken tests, thresholds or baselines.
+- New dependencies: the latest stable release that installs on the project's pinned runtime; never pin an older version without a written reason in docs/notes/<ISSUE>.md.
 - Write notes for later tickets in docs/notes/<ISSUE>.md, never in shared docs (parallel tickets).
 
 Coordinator decision: <appended after each review round for every dispute settled, so later reviewers don't raise it again>
