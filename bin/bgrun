@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""bgrun: run one long coordinator command under a stall watchdog.
+
+Usage:
+  bgrun [--idle SEC] [--timeout SEC] [--log FILE] [--watch PATH]... [--name NAME] -- <command...>
+  bgrun ls        list jobs started by bgrun in this project, with the age of their last output
+
+The command runs in its own session, with stdin closed and stdout and stderr appended to the log
+(default: .autopilot/out/bg-<name>.log). Every 5 s the watchdog checks for progress: the log grew, or a
+--watch path (file or directory, not recursive) changed. When nothing moved for --idle seconds
+(default 900), or the run exceeds --timeout seconds (default: none), it writes a STALL or TIMEOUT report
+(the last log lines and the process tree) to the log, kills every process of the run, including
+descendants that started their own session (a headless browser, a server), and exits 124.
+
+A single command argument is run with `bash -c`, so pipes and redirections work.
+
+Exit codes: the command's own exit code; 124 stall or timeout; 2 usage error.
+
+The last line printed on stdout is one summary line, so a background-task notification carries the outcome:
+  bgrun <name>: ok rc=0 in 532s
+  bgrun <name>: FAILED rc=1 in 61s (log: ...)
+  bgrun <name>: STALL no output for 900s, killed (log: ...)
+
+Why: an unattended run lost 2.5 h to a proof that hung silently in a headless browser while the
+coordinator waited for its completion notification. A command that can hang must never be waited on
+without a watchdog.
+"""
+import json, os, signal, subprocess, sys, time
+
+POLL = 5
+
+
+def find_repo():
+    if os.environ.get('AUTOPILOT_REPO'):
+        return os.environ['AUTOPILOT_REPO']
+    d = os.getcwd()
+    while d != '/':
+        if os.path.exists(os.path.join(d, '.autopilot', 'state.json')):
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def stamp(path):
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime_ns)
+    except FileNotFoundError:
+        return None
+
+
+def descendants(root):
+    """Every process whose ancestry leads to root, including ones that called setsid."""
+    try:
+        out = subprocess.run(['ps', '-axo', 'pid=,ppid='], capture_output=True, text=True).stdout
+    except Exception:
+        return []
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found, todo = [], [root]
+    while todo:
+        p = todo.pop()
+        for c in children.get(p, []):
+            found.append(c)
+            todo.append(c)
+    return found
+
+
+def tree_text(root):
+    pids = [root] + descendants(root)
+    try:
+        out = subprocess.run(['ps', '-o', 'pid,ppid,etime,time,command', '-p', ','.join(map(str, pids))],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        out = ''
+    return '\n'.join(l[:200] for l in out.splitlines())
+
+
+def kill_all(proc):
+    pids = descendants(proc.pid)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.time() + 10
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.2)
+        if sig == signal.SIGTERM:
+            time.sleep(1)
+    proc.wait()
+
+
+def tail(path, n=15):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 8192))
+            return '\n'.join(l[:200] for l in f.read().decode('utf-8', 'replace').splitlines()[-n:])
+    except FileNotFoundError:
+        return ''
+
+
+def jobs_dir(repo):
+    d = os.path.join(repo, '.autopilot', 'jobs')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def cmd_ls():
+    repo = find_repo()
+    if not repo or not os.path.isdir(os.path.join(repo, '.autopilot', 'jobs')):
+        print('no bgrun jobs')
+        return 0
+    now = time.time()
+    d = os.path.join(repo, '.autopilot', 'jobs')
+    for name in sorted(os.listdir(d)):
+        try:
+            j = json.load(open(os.path.join(d, name)))
+        except Exception:
+            continue
+        st = stamp(j['log'])
+        age = int(now - st[1] / 1e9) if st else -1
+        print(f"{j['name']}: {j.get('status', '?')} pid={j['pid']} started={j['started']} "
+              f"last_output={age}s ago idle_limit={j['idle']}s log={j['log']}")
+    return 0
+
+
+def main(argv):
+    if argv[:1] == ['ls']:
+        return cmd_ls()
+    idle, timeout, log, watch, name = 900, None, None, [], None
+    i = 0
+    while i < len(argv) and argv[i] != '--':
+        a = argv[i]
+        if a in ('--idle', '--timeout', '--log', '--watch', '--name') and i + 1 < len(argv):
+            v = argv[i + 1]
+            if a == '--idle': idle = int(v)
+            elif a == '--timeout': timeout = int(v)
+            elif a == '--log': log = v
+            elif a == '--watch': watch.append(v)
+            else: name = v
+            i += 2
+        else:
+            print(f'bgrun: unknown argument {a}', file=sys.stderr)
+            return 2
+    cmd = argv[i + 1:]
+    if not cmd:
+        print(__doc__, file=sys.stderr)
+        return 2
+    repo = find_repo()
+    name = name or os.path.basename(cmd[0].split()[0]) + '-' + time.strftime('%H%M%S')
+    if not log:
+        base = os.path.join(repo, '.autopilot', 'out') if repo else os.getcwd()
+        os.makedirs(base, exist_ok=True)
+        log = os.path.join(base, f'bg-{name}.log')
+    log = os.path.abspath(log)
+    argv_run = ['bash', '-c', cmd[0]] if len(cmd) == 1 else cmd
+    logf = open(log, 'ab', buffering=0)
+    logf.write(f'[bgrun {time.strftime("%Y-%m-%dT%H:%M:%S")}] start idle={idle}s timeout={timeout or "none"}s: {" ".join(cmd)[:300]}\n'.encode())
+    proc = subprocess.Popen(argv_run, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    job = None
+    if repo:
+        job = os.path.join(jobs_dir(repo), f'{name}.json')
+        json.dump({'name': name, 'pid': proc.pid, 'log': log, 'idle': idle, 'timeout': timeout,
+                   'started': time.strftime('%Y-%m-%dT%H:%M:%S'), 'status': 'running', 'cwd': os.getcwd()},
+                  open(job, 'w'))
+    t0 = last_move = time.time()
+    seen = {p: stamp(p) for p in [log] + watch}
+    verdict = None
+    while True:
+        try:
+            rc = proc.wait(timeout=POLL)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.time()
+        for p in seen:
+            s = stamp(p)
+            if s != seen[p]:
+                seen[p], last_move = s, now
+        if now - last_move >= idle:
+            verdict = f'STALL no output for {int(now - last_move)}s'
+        elif timeout and now - t0 >= timeout:
+            verdict = f'TIMEOUT after {int(now - t0)}s'
+        if verdict:
+            report = (f'\n[bgrun {time.strftime("%Y-%m-%dT%H:%M:%S")}] {verdict}; killing the run. Process tree:\n'
+                      f'{tree_text(proc.pid)}\n')
+            logf.write(report.encode())
+            kill_all(proc)
+            rc = 124
+            break
+    took = int(time.time() - t0)
+    logf.write(f'[bgrun {time.strftime("%Y-%m-%dT%H:%M:%S")}] end rc={rc} after {took}s\n'.encode())
+    logf.close()
+    if job:
+        try:
+            j = json.load(open(job))
+            j.update(status='stalled' if verdict else ('ok' if rc == 0 else f'rc={rc}'), rc=rc, seconds=took)
+            json.dump(j, open(job, 'w'))
+        except Exception:
+            pass
+    if rc != 0:
+        print(tail(log))
+    if verdict:
+        print(f'bgrun {name}: {verdict}, killed (log: {log})')
+    elif rc == 0:
+        print(f'bgrun {name}: ok rc=0 in {took}s')
+    else:
+        print(f'bgrun {name}: FAILED rc={rc} in {took}s (log: {log})')
+    return rc
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
