@@ -18,7 +18,7 @@ m = sys.argv[1]; s = json.load(open(os.path.join(m, '.autopilot', 'state.json'))
 print('\t'.join([s['branch'], 'yes' if s.get('push') else 'no', s.get('worktrees_dir') or os.path.join(os.path.dirname(m), os.path.basename(m) + '-wt'), s.get('trailer', '')]))
 PY
 )
-WT="${WT:-$WTDIR/$ID}"  # WT= overrides when the worktree is named after a parent ticket (e.g. PRD-2515a for step a1)
+WT="${WT:-$WTDIR/$ID}"  # WT= overrides when the worktree is named after a parent ticket (e.g. ENG-101a for step a1)
 # Append the ticket id once: a subject that already ends with it keeps it as is.
 case "$SUBJ" in *"[$ID]"|*"[${ID%[a-z]}]") FULL="$SUBJ" ;; *) FULL="$SUBJ [$ID]" ;; esac
 commit() { if [ -n "$TRAILER" ]; then git commit -q -m "$FULL" -m "$BODY" -m "$TRAILER"; else git commit -q -m "$FULL" -m "$BODY"; fi; }

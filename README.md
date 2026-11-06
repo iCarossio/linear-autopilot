@@ -44,8 +44,8 @@ Any other CLI with a non-interactive mode is added with `bin/harness new` (see `
 ## Install
 
 ```bash
-git clone https://github.com/iCarossio/linear-autopilot ~/Work/linear-autopilot
-cd ~/Work/linear-autopilot && ./install.sh
+git clone https://github.com/iCarossio/linear-autopilot
+cd linear-autopilot && ./install.sh
 ```
 Then run `/autopilot-init` in your harness. Requirements: Python 3.9+, git, and the model CLIs you want to use, logged in.
 

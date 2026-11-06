@@ -24,7 +24,7 @@ description: Check the remaining quota of every AI coding harness and account re
 
 - `input` counts everything sent to the model, the cached part included; `cached` is that part; `output` counts everything generated, reasoning included; `total` = input + output. These are the CLIs' own counts, not an invoice: on subscriptions they measure context churn, and the cached share tells how much of it was cheap.
 - Report the total on the period, the three biggest accounts with their share, and the output tokens (the number that tracks actual work), then one line on what it suggests: an account far ahead of the others is a candidate for load spreading (`/autopilot-init` adds accounts), a large uncached input share on one harness means its sessions restart too often.
-- When the user wants the page: `bin/tokens --html ~/Desktop/tokens.html` and open it (`open ~/Desktop/tokens.html`); it is static, self-contained, and can be regenerated any time.
+- When the user wants the page: `bin/tokens --html ./tokens.html` and open it (`open` or `xdg-open ./tokens.html`); it is static, self-contained, and can be regenerated any time.
 
 ## How to report
 
