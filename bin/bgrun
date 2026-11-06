@@ -7,7 +7,8 @@ Usage:
 
 The command runs in its own session, with stdin closed and stdout and stderr appended to the log
 (default: .autopilot/out/bg-<name>.log). Every 5 s the watchdog checks for progress: the log grew, or a
---watch path (file or directory, not recursive) changed. When nothing moved for --idle seconds
+--watch path (file or directory, not recursive) changed, or the run started a new process (a test runner
+that prints only when a whole file ends still spawns builds and browsers while it works). When nothing moved for --idle seconds
 (default 900), or the run exceeds --timeout seconds (default: none), it writes a STALL or TIMEOUT report
 (the last log lines and the process tree) to the log, kills every process of the run, including
 descendants that started their own session (a headless browser, a server), and exits 124.
@@ -66,6 +67,29 @@ def descendants(root):
         for c in children.get(p, []):
             found.append(c)
             todo.append(c)
+    return found
+
+
+# Short utilities a polling loop runs over and over: a new one is not progress.
+POLL_TOOLS = {'sleep', 'date', 'ps', 'pgrep', 'cat', 'grep', 'tail', 'head', 'awk', 'sed', 'stat', 'curl', 'wc',
+              'test', '[', 'true', 'false', 'kill', 'lsof', 'nc', 'wget', 'tr', 'cut', 'sort', 'uniq', 'echo'}
+
+
+def working_pids(root):
+    """Descendants that are not polling utilities, as (pid, command) pairs."""
+    pids = descendants(root)
+    if not pids:
+        return set()
+    try:
+        out = subprocess.run(['ps', '-o', 'pid=,comm=', '-p', ','.join(map(str, pids))],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        return set()
+    found = set()
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and os.path.basename(parts[1].strip()) not in POLL_TOOLS:
+            found.add((int(parts[0]), parts[1].strip()))
     return found
 
 
@@ -176,6 +200,7 @@ def main(argv):
                   open(job, 'w'))
     t0 = last_move = time.time()
     seen = {p: stamp(p) for p in [log] + watch}
+    known_pids = working_pids(proc.pid)
     verdict = None
     while True:
         try:
@@ -188,6 +213,10 @@ def main(argv):
             s = stamp(p)
             if s != seen[p]:
                 seen[p], last_move = s, now
+        pids = working_pids(proc.pid)
+        if pids - known_pids:
+            last_move = now
+        known_pids = pids
         if now - last_move >= idle:
             verdict = f'STALL no output for {int(now - last_move)}s'
         elif timeout and now - t0 >= timeout:

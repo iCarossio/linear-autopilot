@@ -57,6 +57,8 @@ Helper scripts find the project through the nearest `.autopilot/state.json` (or 
 
 For each ticket write `.autopilot/tickets/<ISSUE>.md` from `templates/ticket.md`: `# Title`, the Linear description rewritten as precise instructions, an explicit `CHECKS:` line, `**Acceptance**`, the pre-mortem guardrails that apply, and COMMON RULES. A good ticket file is the cheapest way to save rounds: exact inputs (files, formats, counts), the architecture decision when the ticket shapes the project, what not to touch, its own port and container name when it starts a server, and the notes of the tickets it builds on (`docs/notes/<ISSUE>.md`). After a round, append "Coordinator decision: ..." lines for every dispute you settled.
 
+A ticket that spans several repos lists every worktree under a `## Worktrees` heading and says they are all the implementer's working directories. The brief template allows edits there; without that list, implementers refuse to edit the second repo and the round is lost.
+
 ## The loop (one ticket)
 
 1. **Pick** a ticket whose blockers are Done (or ordering-only, see "Parallelism"). Linear: In Progress. Create the worktree from the current head and install dependencies there.
@@ -164,6 +166,7 @@ Watch quotas with `bin/run-model usage` (the `/autopilot-usage` skill explains t
 - Keep a heartbeat (`sleep 1500` in the background) whenever jobs run: on each heartbeat run `bin/bgrun ls` and check every in-flight model log (`run-model` has its own idle watchdog): any job whose last output is older than its idle limit is a stall to act on now, not later; run `usage --apply`, run `bin/docker-up` when the checks use containers, and renew it.
 - When a CLI announces its reset time, don't smoke it before: schedule one background job that sleeps until just after the reset, then `reset` + `smoke`.
 - macOS BSD userland has no `timeout` command by default: use `bin/bgrun --timeout` (it also kills descendants that left the process group), never a hand-written `until` loop.
+- **Never buffer a `bgrun` command's output.** A pipe to `tail`, `grep` or `sort` inside the command holds every line until the end, so a healthy run looks silent and is killed (seen: a 30 min full check killed as a STALL). Stream the output (`grep --line-buffered`), and filter it only outside `bgrun` (`bgrun ... | tail -15`). For a command that writes its progress to other files (per-lane check logs), add each one with `--watch`. For a step that is silent by design but bounded elsewhere (a review: `run-model` caps it at 1800 s), set `--idle` above that bound.
 - **A long command that logs nothing is a defect of that command.** When `bgrun` reports a STALL, the fix is not a bigger `--idle`: send the tool back with findings to add per-step progress lines and a bounded timeout on every wait (browser, server, child process) that fails closed with the step named, plus a test with a step that never finishes.
 - A run that returns `docker_hung` is an environment stall, not a model failure: run `bin/docker-up --restart` (it restarts the runtime only when the daemon is hung; see `references/lessons.md` if that fails), `reset` any model cooled during the hang, relaunch.
 - Background jobs launched with `&` inside a command don't notify you; use the tool's background mode, or wrap the job with a background `until` loop that waits for its result file.

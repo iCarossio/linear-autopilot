@@ -95,3 +95,7 @@ The fingerprint covers the whole working directory (tracked state, untracked con
 ## A long coordinator command hung silently for hours
 
 **A command the coordinator ran itself had no watchdog.** A sync proof drove a headless browser that never finished one page. The process sat idle with almost no CPU for 2.5 h, while the coordinator waited for its completion notification, which never comes for a hang. `run-model` guards model runs, but the coordinator's own long commands (checks, syncs, proofs, captures, pipelines) were bare background shells, and the heartbeat rule "check that every log moved" was not enforced because no heartbeat ran. Run every such command through `bin/bgrun` (stall and timeout watchdog, kills the whole tree, exits 124 with the process tree in the log), and treat a silent long step as a defect of the tool: per-step progress lines and bounded waits that fail closed with the step named.
+
+## A healthy check was killed twice as a stall
+
+`bgrun` judged progress only by output. A test runner that prints a result only when a whole test file ends was silent for 45 minutes while it ran builds, so two healthy checks were killed. Progress now also counts any new working process in the run's tree; polling utilities (`sleep`, `date`, `ps`, ...) do not count, so a stuck wait loop still stalls. Self-tests cover both cases.
