@@ -1,9 +1,11 @@
 ---
 name: autopilot-milestone
-description: Add a major milestone to a Linear project that already exists (planned with /autopilot-plan or running under /autopilot-run), with the same adversarial treatment as the first plan, scoped to the new milestone. Refuses to continue without measurable KPIs for the milestone, reads the current PLAN.md, state and Linear, drafts the milestone spec and its tickets, runs a pre-mortem by a high-tier model of another vendor and an adversarial plan review, shows every failure reason and finding to the user, folds the accepted ones in, and only after the user approves creates the Linear milestone, issues and relations, appends PLAN.md, logs the decision and recomputes the ETAs. Use when the user says "add a milestone", "extend the project", "new phase", "/autopilot-milestone", or brings new scope for a project the autopilot already knows.
+description: /autopilot-plan for a project that already exists. Adds a major milestone to a Linear project planned with /autopilot-plan or running under /autopilot-run, with the same adversarial treatment as the first plan, scoped to the new milestone. Takes new scope from the user, or one or several ideas parked with /autopilot-idea (promoted into the milestone and closed as duplicates of its tickets on approval). Refuses to continue without measurable KPIs for the milestone, reads the current PLAN.md, state and Linear, drafts the milestone spec and its tickets, runs a pre-mortem by a high-tier model of another vendor and an adversarial plan review, shows every failure reason and finding to the user, folds the accepted ones in, and only after the user approves creates the Linear milestone, issues and relations, appends PLAN.md, logs the decision and recomputes the ETAs. Use when the user says "add a milestone", "extend the project", "new phase", "promote idea ENG-40", "schedule these ideas", "/autopilot-milestone [ENG-40,...]", or brings new scope for a project the autopilot already knows.
 ---
 
 # Autopilot: milestone
+
+This is `/autopilot-plan` for a project that already exists: same intake gate, same pre-mortem and plan review, same approval, but scoped to one new milestone and fitted into the plan that is already running.
 
 You are the **milestone planner**. A project exists: `PLAN.md` at the repo root, `.autopilot/state.json`, a Linear project, maybe tickets in flight under `/autopilot-run`. You add one major milestone to it. The user is present: ask what you need, show your work, and create nothing in Linear before the user approves.
 
@@ -14,9 +16,21 @@ You are the **milestone planner**. A project exists: `PLAN.md` at the repo root,
 | `bin/milestone` | `add <spec>`: validation, pre-mortem of the delta, plan review, approval stop, decision, Linear, `PLAN.md`, state, bars. Resumable. `list`, `recompute`, `sync`. |
 | `bin/decision` | The sourced Decision log in `PLAN.md`. |
 | `bin/eta` | One bar + ETA per milestone, then overall. |
+| `bin/idea` | `list`, `promote ENG-1,... --id --name`: turns parked ideas into this skill's spec skeleton. |
 | `bin/bgrun` | Runs the 10-40 min review under a stall and timeout watchdog. |
 
 Not this skill: a project with no `PLAN.md` / no Linear project yet (`/autopilot-plan`); grouping tickets that already exist into a milestone (`bin/milestone adopt`, see `/autopilot-run` setup); a small change inside an existing milestone (a decision under `/autopilot-run`, "Changes of plan").
+
+## Inputs
+
+The milestone comes from one of:
+- **New scope from the user** (a message, a doc, a spec): start at step 0.
+- **Ideas parked with `/autopilot-idea`**: identifiers (`/autopilot-milestone ENG-40,ENG-41`), titles ("the RBAC idea"), or "promote the ideas about X". Resolve them with `bin/idea list` (match titles there; ask only if two ideas match). Propose the ideas related to them (`related` column) and let the user decide which come along: an idea left out stays parked. Then, after step 0:
+  ```
+  bin/idea promote ENG-40,ENG-41 --id <milestone-slug> --name "<milestone name>"
+  ```
+  It writes the skeleton `.autopilot/plan/milestones/<id>/spec.json`: the owner's words of every idea quoted in `description`, one placeholder ticket per idea (`from_idea`), KPIs, plan and ticket instructions marked `TODO`, and `from_ideas`. If a skeleton already exists for that id (an earlier, interrupted session), continue from it; `--force` only when the user wants to start over.
+- **A skeleton or spec already on disk** (`.autopilot/plan/milestones/<id>/spec.json`): continue from it; `status.json` next to it says which steps of `bin/milestone add` already ran.
 
 ## 0. Context
 
@@ -26,12 +40,12 @@ Not this skill: a project with no `PLAN.md` / no Linear project yet (`/autopilot
 
 ## 1. Intake gate (no milestone without expectations)
 
-Ask for, and do not proceed without:
+Ask for, and do not proceed without the following. For promoted ideas, the owner's words quoted in the skeleton are the starting point, not the answer: an idea says what, rarely how much or how it is measured. Restate each idea in one line, then ask only what it leaves open.
 1. **What exists when the milestone is done**, for whom, why now, and what is out of scope.
 2. **Milestone KPIs**: each with a target and a measurement (command, query, count, date). Push back on vague ones; if the user cannot name one, propose three and let them pick. No measurable KPI: stop here.
 3. **Ordering**: must it wait for a current milestone, run beside it, or preempt it? A deadline?
 
-Keep the user's answers verbatim: they are the `user:"..."` source of the approval decision.
+Keep the user's answers verbatim: they are the `user:"..."` source of the approval decision. A promoted idea whose answers turn it into something else than its words (narrowed, split, merged with another) is fine: say so in `why`, the idea's words stay quoted in `description`.
 
 ## 2. Draft the spec (you, high tier)
 
@@ -42,7 +56,7 @@ Read the code the milestone touches before writing (conventions, existing checks
 - `blocked_by`: real dependencies only, on new slugs or existing issues (`ENG-12`). An ordering-only dependency on a current milestone is not a blocker: say it in `plan`.
 - Latest stable technologies for anything new, verified on this machine, as in `/autopilot-plan` step 1; existing dependencies keep their versions.
 
-Starting from parked ideas (`/autopilot-idea`): `bin/idea promote <ENG-1,...> --id <id> --name "<name>"` writes this spec as a skeleton (the ideas quoted, one placeholder ticket per idea, KPIs, plan and ticket instructions marked TODO, `from_ideas`). The intake gate of step 1 still applies: fill every TODO (the real add refuses one); keep `from_ideas` and each ticket's `from_idea`, so the approval closes those ideas as duplicates of their new tickets.
+From promoted ideas: replace every `TODO` (the real add refuses one; `--dry-run` only warns). Each placeholder ticket becomes as many real tickets as the idea needs; every ticket that implements an idea keeps `"from_idea": "<its identifier>"`, and `from_ideas` stays as written, so the approval links each idea as a duplicate of its tickets and closes it. Integration, fixtures and QA tickets carry no `from_idea`. An idea the user drops during intake: remove it from `from_ideas` and from its tickets; it stays parked.
 
 Then `bin/milestone add <spec> --dry-run`: fix every validation error, and show the user the stages and the ETA of every milestone with this one added. If it pushes an existing milestone's ETA, say so now.
 
@@ -83,7 +97,7 @@ Then: apply the outside-the-milestone decisions from step 4, run `bin/decision c
 
 ## 6. Handoff
 
-Tell the user in a few lines: the Linear milestone link, the number of tickets, the top three failure reasons and their guardrails, the `bin/eta` lines (one bar per milestone), and what happens next: the running `/autopilot-run` picks the tickets up at its next re-plan; if none is running, `/autopilot-run` starts them.
+Tell the user in a few lines: the Linear milestone link, the ideas closed into it (with their new tickets), the number of tickets, the top three failure reasons and their guardrails, the `bin/eta` lines (one bar per milestone), and what happens next: the running `/autopilot-run` picks the tickets up at its next re-plan; if none is running, `/autopilot-run` starts them.
 
 ## Rules
 

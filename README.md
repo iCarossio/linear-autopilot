@@ -8,7 +8,7 @@ Six skills for Claude Code (or any harness that reads `~/.claude/skills`):
 |---|---|---|
 | `/autopilot-init` | once per machine | finds your CLIs (Codex, Claude Code, opencode, Grok, ...), their accounts and quotas; builds the model roster |
 | `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by one high-tier model of another vendor, guardrails, then the Linear project with all tickets |
-| `/autopilot-milestone` | when the project grows | a new major milestone for an existing project: its KPIs, a pre-mortem and plan review of the delta, your approval, then the Linear milestone, tickets and ETA bar |
+| `/autopilot-milestone` | when the project grows | `/autopilot-plan` for an existing project: a new major milestone from new scope or from parked ideas (`/autopilot-milestone ENG-40,ENG-41`), its KPIs, a pre-mortem and plan review of the delta, your approval, then the Linear milestone, tickets and ETA bar |
 | `/autopilot-run` | per project, for hours | one ticket at a time: plan review, cheap implementation, two-vendor review, one commit, Linear updated; one progress bar and ETA per major milestone, mirrored on the Linear milestones |
 | `/autopilot-idea` | any time | captures the owner's quick ideas, verbatim, in the project's "Ideas (unscheduled)" Linear milestone, out of the queue and every ETA; later promotes one or several into a real milestone (pre-mortem, plan review, approval) |
 | `/autopilot-usage` | any time | what quota is left on every CLI and account, which pools can run now, and how many tokens went through every harness and account (per day, month, year; terminal chart or HTML page) |

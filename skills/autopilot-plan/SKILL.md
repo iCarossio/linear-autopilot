@@ -101,7 +101,7 @@ From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the p
 
 ## Extending a project (a milestone added later)
 
-Adding a major milestone to a project that already exists is `/autopilot-milestone`: the same intake gate, pre-mortem, plan review and approval, scoped to the new milestone, through `bin/milestone add`. Never hand-edit state, `PLAN.md` or Linear for it. To start from parked ideas, `bin/idea promote <ENG-1,...> --id <slug> --name "<name>"` writes the spec skeleton (every TODO to fill, `from_ideas`: on approval those ideas are closed as duplicates of the new tickets) for `/autopilot-milestone` to complete.
+Adding a major milestone to a project that already exists is `/autopilot-milestone`: the same intake gate, pre-mortem, plan review and approval, scoped to the new milestone, through `bin/milestone add`. Never hand-edit state, `PLAN.md` or Linear for it. It also takes ideas parked with `/autopilot-idea` as input (`/autopilot-milestone ENG-40,ENG-41`): it promotes them into the milestone and, on approval, closes them as duplicates of the new tickets.
 
 ## Rules
 
