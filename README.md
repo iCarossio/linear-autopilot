@@ -7,7 +7,7 @@ Four skills for Claude Code (or any harness that reads `~/.claude/skills`):
 | Skill | When | What it does |
 |---|---|---|
 | `/autopilot-init` | once per machine | finds your CLIs (Codex, Claude Code, opencode, Grok, ...), their accounts and quotas; builds the model roster |
-| `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by two high-tier models, guardrails, then the Linear project with all tickets |
+| `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by one high-tier model of another vendor, guardrails, then the Linear project with all tickets |
 | `/autopilot-run` | per project, for hours | one ticket at a time: plan review, cheap implementation, two-vendor review, one commit, Linear updated |
 | `/autopilot-usage` | any time | what quota is left on every CLI and account, which pools can run now, and how many tokens went through every harness and account (per day, month, year; terminal chart or HTML page) |
 

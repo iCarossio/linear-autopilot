@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""premortem <PLAN.md> --planner <KEY> [--repo DIR] [--k 2] [--exclude-vendor V[,V]] [--exclude KEY[,KEY]] [--allow-mid] [--only-pass 1|2] [--dry-run]
+"""premortem <PLAN.md> --planner <KEY> [--repo DIR] [--k 1] [--exclude-vendor V[,V]] [--exclude KEY[,KEY]] [--allow-mid] [--only-pass 1|2] [--dry-run]
 
-Adversarial pre-mortem of a project plan by k high-tier models from k different vendors, before any Linear ticket
-exists. Each reviewer is told: "we are at the deadline and the project failed; what are the most probable reasons?".
-Two passes: (1) independent pre-mortems in parallel; (2) each reviewer re-reads its own list and the other's, agrees
-or disagrees with evidence, adds what both missed, and returns a ranked merged list. The script merges the final list
-of every reviewer (deduplicated by title similarity), ranks by probability x impact and writes:
+Adversarial pre-mortem of a project plan by k high-tier models from k different vendors (default k=1: one
+reviewer, outside the planner's vendor), before any Linear ticket exists. Each reviewer is told: "we are at the
+deadline and the project failed; what are the most probable reasons?". Two passes: (1) independent pre-mortems (in
+parallel when k > 1); (2) with one reviewer, an adversarial self-review of its own list (re-check evidence, drop the
+generic, add the missed angles); with k > 1, each reviewer re-reads its own list and the others', agrees or disagrees
+with evidence and adds what both missed. The script merges the final list of every reviewer (deduplicated by title
+similarity), ranks by probability x impact and writes:
 
   <repo>/.autopilot/plan/premortem-<key>-<pass>.md      full reviewer outputs
   <repo>/.autopilot/plan/premortem.json                 merged, ranked reasons (machine-readable), with per-reviewer status
@@ -53,7 +55,7 @@ args = sys.argv[1:]
 if not args or args[0].startswith('--'): print(__doc__); sys.exit(1)
 plan_path = os.path.abspath(args[0])
 repo = os.path.abspath(opt(args, '--repo', os.path.dirname(plan_path)))
-k = int(opt(args, '--k', 2))
+k = int(opt(args, '--k', 1))
 planner = opt(args, '--planner')
 ex_vendors = [v for v in opt(args, '--exclude-vendor', '').split(',') if v]
 ex_keys = [v for v in opt(args, '--exclude', '').split(',') if v]
@@ -88,7 +90,7 @@ if only != '2' and prev:
 
 
 def brief_for(key, n, mine, other):
-    tpl = template('premortem.md' if n == 1 else 'premortem-cross.md')
+    tpl = template('premortem.md' if n == 1 else 'premortem-cross.md' if other else 'premortem-self.md')
     rep = {'PLAN_PATH': plan_path, 'PLAN': plan, 'CWD': repo, 'PASS': str(n), 'REVIEWER': key,
            'MINE': json.dumps(mine, indent=1) if mine else '(none)', 'OTHER': json.dumps(other, indent=1) if other else '(none)'}
     for a, b in rep.items(): tpl = tpl.replace('{{' + a + '}}', b)

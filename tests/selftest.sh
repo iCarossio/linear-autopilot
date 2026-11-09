@@ -85,14 +85,16 @@ POOL=plan_review ALLOW_MID=1 FAKE_BEHAVIOUR=approve $H/bin/review T-1 p2 "$RB" >
 POOL=plan_review ALLOW_MID=1 FAKE_BEHAVIOUR=approve $H/bin/review T-1 p3 "$RB" 1 >/dev/null; check "plan review k=1 -> 0" "$?" "0"
 
 echo "--- premortem"
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a); RC=$?; check "premortem planner fk-a: only fk-b high -> degraded 1" "$RC" "1"
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a); RC=$?; check "premortem default k=1: fk-b alone, both passes -> 0" "$RC" "0"
+grep -q "adversarial self-review" .autopilot/plan/premortem-brief-fk-b-2.md && echo "ok   single reviewer gets the self-review pass 2" || { echo "FAIL pass 2 brief is not the self-review"; FAIL=$((FAIL+1)); }
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2); RC=$?; check "premortem --k 2: only fk-b high -> degraded 1" "$RC" "1"
 echo "$OUT" | grep -q "1 dropped" && echo "ok   malformed reason dropped" || { echo "FAIL malformed reason not reported: $OUT"; FAIL=$((FAIL+1)); }
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --allow-mid); check "premortem --allow-mid: fk-b + fk-d both passes -> 0" "$?" "0"
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --allow-mid); check "premortem --allow-mid: fk-b + fk-d both passes -> 0" "$?" "0"
 check "merged reasons (same tag from both reviewers merges to 2)" "$(python3 -c "import json;print(len(json.load(open('.autopilot/plan/premortem.json'))['reasons']))")" "2"
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --allow-mid --only-pass 2); check "only-pass 2 reuses validated pass 1 -> 0" "$?" "0"
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --allow-mid --only-pass 2); check "only-pass 2 reuses validated pass 1 -> 0" "$?" "0"
 $H/bin/premortem PLAN.md >/dev/null 2>&1; check "premortem without --planner refused" "$?" "1"
 echo "edit" >> PLAN.md
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --allow-mid --only-pass 2); RC=$?
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --allow-mid --only-pass 2); RC=$?
 echo "$OUT" | grep -q "plan changed" && echo "ok   changed plan is not reused for pass 2" || { echo "FAIL changed plan reused: $OUT"; FAIL=$((FAIL+1)); }
 git checkout -q -- PLAN.md
 

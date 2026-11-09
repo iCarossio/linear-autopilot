@@ -1,6 +1,6 @@
 ---
 name: autopilot-plan
-description: Adversarial planning before a Linear project exists. Takes the user's plan and expectations, refuses to continue without measurable KPIs, drafts the full plan, sends it to a pre-mortem by two high-tier models of different vendors ("we are at the deadline and we failed, why?"), shows the failure reasons to the user, folds a guardrail for each into the plan, gets the user's approval, then creates the Linear project with milestones, tickets and dependencies ready for /autopilot-run. Use when the user says "plan this project", "pre-mortem", "/autopilot-plan", "create the Linear project for ...", or brings a plan or spec to execute with the autopilot.
+description: Adversarial planning before a Linear project exists. Takes the user's plan and expectations, refuses to continue without measurable KPIs, drafts the full plan, sends it to a pre-mortem by one high-tier model of another vendor ("we are at the deadline and we failed, why?"), shows the failure reasons to the user, folds a guardrail for each into the plan, gets the user's approval, then creates the Linear project with milestones, tickets and dependencies ready for /autopilot-run. Use when the user says "plan this project", "pre-mortem", "/autopilot-plan", "create the Linear project for ...", or brings a plan or spec to execute with the autopilot.
 ---
 
 # Autopilot: plan
@@ -29,14 +29,14 @@ Then write `PLAN.md` with:
 - Rules for implementers and reviewers (forbidden shortcuts, required tests).
 - Open human decisions with a safe default each.
 
-## 2. Pre-mortem (two high-tier models, two other vendors)
+## 2. Pre-mortem (one high-tier model of another vendor)
 
 ```
 bin/run-model usage --apply            # know which high-tier models are available now
 bin/premortem <repo>/PLAN.md --repo <repo> --planner <your roster key> --dry-run   # who would review (no quota spent)
 bin/premortem <repo>/PLAN.md --repo <repo> --planner <your roster key>             # e.g. --planner claude-opus when you are Claude Opus
 ```
-`--planner` is mandatory: `premortem` excludes your vendor and your model id on every account (a model must not review its own plan), then picks two healthy `cost: high` models from the `premortem` and `plan_review` pools with two distinct vendors. It runs pass 1 (independent pre-mortems) and pass 2 (each re-reads its own list and the other's, agrees or disagrees with evidence, adds what both missed), merges and ranks by probability x impact, and writes `.autopilot/plan/premortem.md` and `premortem.json` (with each reviewer's status per pass). It takes 10 to 40 minutes: run it in the background and keep working on the ticket breakdown meanwhile. Exit 1 means degraded (one reviewer, or a pass 2 missing): the table says so; tell the user and offer to rerun later (`bin/run-model wait premortem`) or continue degraded with their consent. Exit 2: nothing usable.
+`--planner` is mandatory: `premortem` excludes your vendor and your model id on every account (a model must not review its own plan), then picks one healthy `cost: high` model from the `premortem` and `plan_review` pools (`--k 2` adds a second reviewer of a distinct vendor, only when the user asks for it). It runs pass 1 (the pre-mortem) and pass 2 (an adversarial self-review: the reviewer re-checks its own reasons against the repo, drops the generic ones and adds the angles it missed), and ranks by probability x impact, and writes `.autopilot/plan/premortem.md` and `premortem.json` (with each reviewer's status per pass). It takes 10 to 40 minutes: run it in the background and keep working on the ticket breakdown meanwhile. Exit 1 means degraded (no pass 2, or fewer reviewers than `--k`): the table says so; tell the user and offer to rerun later (`bin/run-model wait premortem`) or continue degraded with their consent. Exit 2: nothing usable.
 
 If your own vendor is the only high tier available, do not substitute another account of it: wait for a reset (`bin/run-model wait premortem`), or, with the user's consent, `--allow-mid` to accept `cost: mid` models of other vendors (say so in the Approval section).
 
@@ -79,4 +79,4 @@ Then post a project update with the KPI table and the top pre-mortem reasons, so
 - You plan; you never implement during this phase. Reading the repo is allowed, editing code is not.
 - Pre-mortem reviewers are read-only; `premortem` restores the tree if one of them changes it.
 - Keep each reviewer's full output on disk (`.autopilot/plan/premortem-<key>-<pass>.md`) and never paraphrase a reason into something weaker than the reviewer wrote.
-- Budget: the pre-mortem is the one place where high-tier models are spent on purpose. Two reviewers, two passes, once per plan (plus one rerun on a material change). Never pay for extra credits to run it: wait for a reset instead (`bin/run-model wait premortem`).
+- Budget: the pre-mortem is the one place where high-tier models are spent on purpose. One reviewer, two passes, once per plan (plus one rerun on a material change). Never pay for extra credits to run it: wait for a reset instead (`bin/run-model wait premortem`).

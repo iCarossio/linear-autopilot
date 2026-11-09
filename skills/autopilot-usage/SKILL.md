@@ -33,7 +33,7 @@ One table, then one line of advice:
 | Harness / account | Window | Used | Resets | Pools affected |
 |---|---|---|---|---|
 
-Then: which pools have at least two healthy vendors (reviews and pre-mortems are possible), which tier is cheapest to spend right now (e.g. "implement with the free pool, review with Codex Terra on account b and Grok"), the next reset worth waiting for, and anything the probes cannot see (ask the user to read `/usage` in that CLI's interactive session once and set the cooldown with the time it shows).
+Then: which pools have at least two healthy vendors (ticket reviews are possible) and at least one high-tier vendor besides the coordinator's (a pre-mortem is possible), which tier is cheapest to spend right now (e.g. "implement with the free pool, review with Codex Terra on account b and Grok"), the next reset worth waiting for, and anything the probes cannot see (ask the user to read `/usage` in that CLI's interactive session once and set the cooldown with the time it shows).
 
 ## Rules
 
