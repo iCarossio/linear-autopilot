@@ -90,7 +90,9 @@ def run_one(r, key, role, brief, out, cwd, timeout=None):
     # a run that exits 0 without its required final block is a failure too (model rambled or gave up)
     tail = body[-4000:]
     if status == 'ok' and 'AUTOPILOT_OK' not in body and (
-            (role == 'implement' and not re.search(r'STATUS\W{0,6}(done|partial|blocked)', tail, re.I))
+            (role == 'implement' and '-diag-' not in os.path.basename(brief)
+             and not re.search(r'STATUS\W{0,6}(done|partial|blocked)', tail, re.I))
+            or (role == 'implement' and '-diag-' in os.path.basename(brief) and '"verdict"' not in body)
             or (role == 'review' and '"verdict"' not in body)):
         status = 'bad_output'
     res = {'model': key, 'cli': m['cli'], 'id': m['model'], 'account': lib.account_of(m, a), 'vendor': lib.vendor_of(m, a), 'role': role,

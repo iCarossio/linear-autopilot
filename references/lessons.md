@@ -99,3 +99,19 @@ The fingerprint covers the whole working directory (tracked state, untracked con
 ## A healthy check was killed twice as a stall
 
 `bgrun` judged progress only by output. A test runner that prints a result only when a whole test file ends was silent for 45 minutes while it ran builds, so two healthy checks were killed. Progress now also counts any new working process in the run's tree; polling utilities (`sleep`, `date`, `ps`, ...) do not count, so a stuck wait loop still stalls. Self-tests cover both cases.
+
+## A 3.7 h proof ran without one of its flags
+
+The coordinator saved a long proof command in a file and ran it with `bash -c "$(cat file)"`. The last flag (`--accept-unproved visualSource=...`) had landed on a second line. The shell ran the proof without it, then tried the flag as a command (rc=127). The proof's substance passed, but its verdict was FAIL for the missing acceptance. Rule: before launching a saved command file, check that it is one line (`wc -l`), parse it with `bash -n`, and grep it for every flag you expect.
+
+## A diagnosis brief burned 8 model runs as "bad output"
+
+`mkbrief diag` asks for a JSON verdict, but `run-model run implement` required a `STATUS` line, so every model's valid diagnosis was rejected and the pool fell through to the last resort. `run-model` now accepts a `"verdict"` block for briefs named `*-diag-*`.
+
+## Symlinked node_modules in a side worktree
+
+To run a fix round beside a long proof, the coordinator symlinked the proof worktree's `node_modules` and acquisition folder into a new worktree. The implementer ran `npm ci` and a fresh acquisition there. This time npm replaced the symlink rather than emptying its target, and the acquisition replaced its symlink with a real folder, so the proof survived. Rule: give a side worktree its own `npm ci` and copies of its inputs, never symlinks into a worktree that is in use.
+
+## A fallback implementer stops on its predecessor's partial work (2026-11-08)
+
+`claude-sonnet` timed out after 80 minutes of correct partial work in a round whose brief demanded a clean site tree. `run-model` fell back to `codex-terra-c`, which saw the dirty tree, followed the brief literally and returned `STATUS: blocked` in 21 seconds. The round looked like a blocker but was an interruption. Fix candidate: when `run-model` falls back after a timeout or idle kill in the same worktree, prepend to the brief "a previous attempt in this round was interrupted: the uncommitted changes are its partial work; verify and continue". Until then, read `tried` in the JSON line before treating a short `blocked` as real, and write clean-tree rules as "sync-managed files" rather than "the whole tree".
