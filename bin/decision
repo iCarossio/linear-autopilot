@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""decision: the sourced log of every change of plan, kept in the "Decision log" table of <repo>/PLAN.md.
+A change of plan (scope, KPI, ticket added/split/dropped/reordered, architecture, guardrail, rule, acceptance criterion,
+degraded mode, human decision taken by default) is recorded here BEFORE it is acted on, with the source that caused it.
+No decision stays unsourced: `add` refuses an entry without a known source kind and a reference.
+
+  decision add --change "<before -> after>" --source <kind>:<reference> --by <owner name | roster key>
+               [--why "<one sentence>"] [--affects "K1, PM-3, ENG-12"] [--linear pending|pre-linear|<url>]
+  decision list                          # every entry
+  decision pending                       # entries not yet mirrored in Linear (exit 1 if any)
+  decision synced <D-n> <url>            # mark an entry mirrored in Linear (comment / project update / issue url)
+  decision check                         # exit 1 if any entry is pending or malformed (for heartbeats and handoffs)
+
+Source kinds:
+  user:"<the user's answer, quoted>"     premortem:PM-<n>             plan-review:<ISSUE> round <n> <finding>
+  review:<ISSUE> round <n> <finding>     replan:<bin/eta REPLAN line> quota:<pool/model and reset time>
+  human-default:<open decision>          check:<command and result>   coordinator:<evidence: command, file, number>
+--linear defaults to `pre-linear` when state.json has no project_id yet (the plan skill puts the whole PLAN.md in the
+project content at creation), else `pending` until `synced`.
+Repo: $AUTOPILOT_REPO, else the nearest .autopilot/state.json, else the git root of the current directory. PLAN.md path:
+$AUTOPILOT_PLAN overrides.
+"""
+import argparse, datetime, json, os, re, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+KINDS = ('user', 'premortem', 'plan-review', 'review', 'replan', 'quota', 'human-default', 'check', 'coordinator')
+HEAD = '## Decision log'
+COLS = '| # | Date | Change (before -> after) | Why | Source | Decided by | Affects | Linear |'
+SEP = '|---|---|---|---|---|---|---|---|'
+ROW = re.compile(r'^\|\s*(D-\d+)\s*\|')
+
+
+def repo_dir():
+    r = lib.find_repo(required=False)
+    if r: return r
+    g = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+    if g.returncode == 0: return g.stdout.strip()
+    sys.exit('decision: no repo (set AUTOPILOT_REPO)')
+
+
+def plan_path(repo):
+    p = os.environ.get('AUTOPILOT_PLAN') or os.path.join(repo, 'PLAN.md')
+    if not os.path.exists(p): sys.exit(f'decision: {p} not found')
+    return p
+
+
+def cell(s):
+    return ' '.join((s or '').split()).replace('|', '\\|') or '-'
+
+
+def split_row(line):
+    cells = re.split(r'(?<!\\)\|', line.strip())[1:-1]
+    return [c.strip() for c in cells]
+
+
+def rows(text):
+    return [split_row(l) for l in text.splitlines() if ROW.match(l)]
+
+
+def ensure_section(text):
+    if HEAD in text: return text
+    block = f'{HEAD}\nEvery change of plan after the first draft, with its source. Written before the change is acted on.\n\n{COLS}\n{SEP}\n'
+    m = re.search(r'^## Approval', text, re.M)
+    return text[:m.start()] + block + '\n' + text[m.start():] if m else text.rstrip('\n') + '\n\n' + block
+
+
+def insert_row(text, row):
+    lines = text.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == HEAD)
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith('## '): end += 1
+    last = max((i for i in range(start, end) if ROW.match(lines[i]) or lines[i].strip() == SEP), default=None)
+    if last is None:
+        lines[end:end] = ['', COLS, SEP, row]
+    else:
+        lines.insert(last + 1, row)
+    return '\n'.join(lines) + '\n'
+
+
+def write(path, text):
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f: f.write(text)
+    os.replace(tmp, path)
+
+
+def project_exists(repo):
+    try:
+        pid = lib.load_state(repo).get('project_id') or ''
+    except SystemExit:
+        return False
+    except Exception:
+        return False
+    return bool(pid) and not pid.startswith('<')
+
+
+def cmd_add(a, repo, path):
+    kind, _, ref = a.source.partition(':')
+    if kind not in KINDS or not ref.strip():
+        sys.exit(f'decision: --source must be <kind>:<reference> with kind in {", ".join(KINDS)}; got {a.source!r}')
+    if kind == 'user' and not re.search(r'["“].+["”]', ref):
+        sys.exit('decision: a user source quotes the answer: user:"<what the user said>"')
+    if not a.change.strip() or not a.by.strip():
+        sys.exit('decision: --change and --by are required')
+    text = ensure_section(open(path).read())
+    n = max([int(r[0][2:]) for r in rows(text)] or [0]) + 1
+    linear = a.linear or ('pending' if project_exists(repo) else 'pre-linear')
+    today = datetime.date.today().isoformat()
+    row = '| ' + ' | '.join([f'D-{n}', today, cell(a.change), cell(a.why), cell(a.source), cell(a.by), cell(a.affects), cell(linear)]) + ' |'
+    write(path, insert_row(text, row))
+    print(f'D-{n}' + ('' if linear != 'pending' else '  (mirror it in Linear, then: decision synced D-%d <url>)' % n))
+
+
+def cmd_list(repo, path, only_pending=False):
+    bad = 0
+    for r in rows(open(path).read()):
+        if only_pending and (len(r) == 8 and r[7] != 'pending'): continue
+        if len(r) != 8:
+            print(f'{r[0]}  MALFORMED ({len(r)} columns)'); bad += 1; continue
+        print(f'{r[0]}  {r[1]}  [{r[7]}]  {r[2]}  <- {r[4]}')
+        bad += r[7] == 'pending'
+    return bad
+
+
+def cmd_synced(a, path):
+    text = open(path).read(); out, hit = [], False
+    for l in text.splitlines():
+        if ROW.match(l) and split_row(l)[0] == a.id:
+            c = split_row(l); c[7] = cell(a.url); l = '| ' + ' | '.join(c) + ' |'; hit = True
+        out.append(l)
+    if not hit: sys.exit(f'decision: no entry {a.id}')
+    write(path, '\n'.join(out) + '\n'); print('ok')
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'): print(__doc__); sys.exit(0 if len(sys.argv) > 1 else 1)
+    p = argparse.ArgumentParser(prog='decision'); sub = p.add_subparsers(dest='cmd')
+    ad = sub.add_parser('add'); ad.add_argument('--change', required=True); ad.add_argument('--source', required=True)
+    ad.add_argument('--by', required=True); ad.add_argument('--why', default=''); ad.add_argument('--affects', default='')
+    ad.add_argument('--linear')
+    sub.add_parser('list'); sub.add_parser('pending'); sub.add_parser('check')
+    sy = sub.add_parser('synced'); sy.add_argument('id'); sy.add_argument('url')
+    a = p.parse_args()
+    repo = repo_dir(); path = plan_path(repo)
+    if a.cmd == 'add': cmd_add(a, repo, path)
+    elif a.cmd == 'list': cmd_list(repo, path)
+    elif a.cmd in ('pending', 'check'): sys.exit(1 if cmd_list(repo, path, only_pending=True) else 0)
+    elif a.cmd == 'synced': cmd_synced(a, path)
+    else: print(__doc__); sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

@@ -15,6 +15,7 @@ Needs LINEAR_API_KEY (Settings > API > Personal API keys). No other dependency.
   linear comment <IDENTIFIER> "<markdown>"
   linear state <IDENTIFIER> "<state name>"          # e.g. "In Progress", "Done"
   linear project-update <PROJECT_ID> "<markdown>"   # project status update (the resume point / summary)
+  linear project-content <PROJECT_ID> <file.md>     # replace the project content (e.g. PLAN.md after a logged decision)
 
 tickets.json:
   {"project": {"name": "...", "description": "one paragraph", "content": "markdown body (the plan)"},
@@ -204,9 +205,15 @@ def cmd_project_update(a):
     gql('mutation($i:ProjectUpdateCreateInput!){projectUpdateCreate(input:$i){success}}', {'i': {'projectId': a[0], 'body': a[1]}}); print('ok')
 
 
+def cmd_project_content(a):
+    body = open(a[1]).read()
+    gql('mutation($id:String!,$i:ProjectUpdateInput!){projectUpdate(id:$id,input:$i){success}}', {'id': a[0], 'i': {'content': body}}); print('ok')
+
+
 if __name__ == '__main__':
     a = sys.argv[1:]
     cmds = {'teams': cmd_teams, 'projects': cmd_projects, 'states': cmd_states, 'issues': cmd_issues, 'issue': cmd_issue,
-            'import': cmd_import, 'comment': cmd_comment, 'state': cmd_state, 'project-update': cmd_project_update}
+            'import': cmd_import, 'comment': cmd_comment, 'state': cmd_state, 'project-update': cmd_project_update,
+            'project-content': cmd_project_content}
     if not a or a[0] not in cmds: print(__doc__); sys.exit(1)
     cmds[a[0]](a[1:])

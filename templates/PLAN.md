@@ -44,6 +44,14 @@ Each KPI is measurable at the deadline with the command or number in the "How me
 ## Open human decisions
 - <decision, safe default shipped meanwhile, who decides>
 
+## Decision log
+Every change of plan after the first draft, with its source: an answer of the user, a pre-mortem reason, a plan or code
+review finding, a re-plan signal, a quota limit, a safe default for an open human decision. Written with `bin/decision add`
+before the change is acted on, then mirrored in Linear. A change of plan without a row here is a defect.
+
+| # | Date | Change (before -> after) | Why | Source | Decided by | Affects | Linear |
+|---|---|---|---|---|---|---|---|
+
 ## Approval
 - Pre-mortem reviewed by: <models> on <date>
 - Plan approved by: <owner> on <date>

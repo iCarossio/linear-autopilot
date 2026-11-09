@@ -53,7 +53,7 @@ Then run `/autopilot-init` in your harness. Requirements: Python 3.9+, git, and 
 
 ```
 skills/      the four SKILL.md files
-bin/         shared runtime (run-model, review, premortem, harness, linear, state, tokens, ...)
+bin/         shared runtime (run-model, review, premortem, decision, harness, linear, state, tokens, ...)
 harnesses/   one JSON adapter per CLI: how to call it, where its accounts live, how to read its usage
 prompts/     briefs for implementers, reviewers and the pre-mortem
 templates/   example roster, state, plan and ticket

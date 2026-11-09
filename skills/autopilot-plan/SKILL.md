@@ -9,6 +9,19 @@ You are the **master planner**. The user is present for this phase: ask what you
 
 `bin/<x>` below means the `bin` directory next to this SKILL.md (`~/.claude/skills/autopilot-plan/bin/<x>` after `install.sh`, `${CLAUDE_PLUGIN_ROOT}/skills/autopilot-plan/bin/<x>` as a plugin); templates are in `templates/` of the same repo. The roster comes from `/autopilot-init` (`~/.config/linear-autopilot/models.json`).
 
+## Every change of plan is sourced
+
+From the first draft of `PLAN.md` on, any change to it is a decision: a KPI, scope or non-goal edited, a ticket added, split, merged, dropped or reordered, an architecture choice reversed, a guardrail or rule added or rejected, an open human decision settled. Whatever causes it (an answer to one of your questions, a pre-mortem reason, a reviewer, your own re-reading of the repo), record it before or together with the edit, never later:
+
+```
+bin/decision add --change "<before -> after>" --source <kind>:<reference> --by <owner | your roster key> --why "<one sentence>" --affects "<K1, PM-3, slugs>"
+```
+
+- The source names where the decision comes from, precisely enough for someone who was not there to check it: `user:"<the user's answer, quoted verbatim>"`, `premortem:PM-4`, `plan-review:...`, `coordinator:<the command or file that proves it>`. `bin/decision` refuses an entry without one.
+- A rejected proposal is a decision too (a pre-mortem reason rejected, a user suggestion declined with their agreement): log it with the evidence.
+- Before the Linear project exists, entries are `pre-linear`: step 7 puts the whole `PLAN.md`, log included, in the project content. After it exists (a late change during step 7 or 8), mirror each entry in Linear as described in step 7 and mark it with `bin/decision synced`.
+- The intake answers of step 0 are the baseline, not decisions: they go verbatim in their sections. A later answer that changes them is a decision.
+
 ## 0. Intake gate (no plan without expectations)
 
 Ask for, and do not proceed without:
@@ -51,11 +64,11 @@ For every accepted reason, add a guardrail with a home, so it is enforced and no
 - a **check command** on a ticket's `CHECKS:` line (the cheapest guardrail: a check that fails when the shortcut is taken),
 - a **dedicated ticket** (e.g. real-data fixtures, an integration ticket, a load test) with `blocks` on what depends on it,
 - or a **rule** in `PLAN.md` "Rules for implementers and reviewers" (copied into every ticket file by the run skill).
-Fill the `Pre-mortem` table of `PLAN.md` with the reason, its guardrail and where it lives, and add the early signals to a "Watch for" list the run skill checks on each heartbeat. Rejected reasons stay listed as rejected, with the evidence.
+Fill the `Pre-mortem` table of `PLAN.md` with the reason, its guardrail and where it lives, and add the early signals to a "Watch for" list the run skill checks on each heartbeat. Rejected reasons stay listed as rejected, with the evidence. Every plan change a reason causes (a new ticket, a new check, a moved KPI, a reason rejected) gets its `bin/decision add --source premortem:PM-<n>` entry.
 
 ## 5. User review loop
 
-Show the updated plan (goal, KPIs, ticket table, pre-mortem table, open decisions). Iterate until the user says it is approved. Record "Plan approved by <owner> on <date>" and "Pre-mortem reviewed by <models>" in the Approval section. If the user changes the scope materially after the pre-mortem, rerun step 2 on the changed parts (`--only-pass 1` is enough for a small delta).
+Show the updated plan (goal, KPIs, ticket table, pre-mortem table, open decisions). Iterate until the user says it is approved. Each change the user asks for, or agrees to after one of your questions, is logged with `--source user:"<their words>"` and `--by <owner>` in the same step as the edit; show the new Decision log rows with the updated plan, so the user sees what was recorded in their name. Record "Plan approved by <owner> on <date>" and "Pre-mortem reviewed by <models>" in the Approval section. If the user changes the scope materially after the pre-mortem, rerun step 2 on the changed parts (`--only-pass 1` is enough for a small delta).
 
 ## 6. Ticket breakdown file
 
@@ -66,7 +79,9 @@ Write `.autopilot/plan/tickets.json` (format in `bin/linear --help`): project na
 Only after approval. Create the project, milestones, issues and `blocks` relations:
 - With this harness's Linear tools (MCP): create the project with `PLAN.md` as its content, the milestones, then the issues in dependency order and the relations. Checkpoint after EVERY creation in `.autopilot/plan/tickets.created.json`: `{"project_id", "project_url", "milestones": {name: id}, "tickets": {slug: {"id", "identifier", "url"}}, "relations": ["blocker-slug->blocked-slug"]}` (the same file `bin/linear import` writes). Before each creation, check the checkpoint; after a failure or a timeout, search Linear for the title in the project before creating again (a lost response is not a missing issue). A resumed session continues from the checkpoint, never from scratch.
 - Without Linear tools: `LINEAR_API_KEY=... bin/linear import .autopilot/plan/tickets.json --team <KEY>` (idempotent; `--dry-run` first).
-Then post a project update with the KPI table and the top pre-mortem reasons, so the humans who follow the project in Linear see what the autopilot is guarding against.
+Then post a project update with the KPI table, the top pre-mortem reasons and the Decision log, so the humans who follow the project in Linear see what the autopilot is guarding against and why the plan looks the way it does.
+
+From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the project content (`bin/linear project-content <project-id> PLAN.md`, or the MCP project update), update the description of every affected issue (or create / cancel the issue, with its relations), comment on each affected issue with the entry (`D-<n>: change, why, source`), and `bin/decision synced D-<n> <comment url>`. `bin/decision check` must pass before the handoff.
 
 ## 8. Handoff
 
@@ -79,4 +94,5 @@ Then post a project update with the KPI table and the top pre-mortem reasons, so
 - You plan; you never implement during this phase. Reading the repo is allowed, editing code is not.
 - Pre-mortem reviewers are read-only; `premortem` restores the tree if one of them changes it.
 - Keep each reviewer's full output on disk (`.autopilot/plan/premortem-<key>-<pass>.md`) and never paraphrase a reason into something weaker than the reviewer wrote.
+- No decision unsourced: a `PLAN.md` change without its Decision log row, or a row still `pending` in Linear, is a defect to fix before anything else.
 - Budget: the pre-mortem is the one place where high-tier models are spent on purpose. One reviewer, two passes, once per plan (plus one rerun on a material change). Never pay for extra credits to run it: wait for a reset instead (`bin/run-model wait premortem`).

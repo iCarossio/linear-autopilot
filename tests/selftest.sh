@@ -261,4 +261,18 @@ check "bgrun: busy run hits --timeout" "$($H/bin/bgrun --timeout 6 --name to --l
 check "bgrun: a changing --watch path counts as progress" "$($H/bin/bgrun --idle 6 --watch $BG/w.txt --name w --log $BG/w.log -- 'for i in 1 2 3 4 5 6 7 8 9 10; do date >> '$BG'/w.txt; sleep 1; done' | tail -1 | sed 's/ in .*//')" "bgrun w: ok rc=0"
 check "bgrun: a new working process counts as progress" "$($H/bin/bgrun --idle 6 --name sp --log $BG/sp.log -- 'for i in 1 2 3 4 5; do python3 -c "import time; time.sleep(3)"; done' | tail -1 | sed 's/ in .*//')" "bgrun sp: ok rc=0"
 check "bgrun: a silent sleep loop still stalls" "$($H/bin/bgrun --idle 6 --name sl --log $BG/sl.log -- 'while :; do sleep 1; done' | tail -1 | grep -c '^bgrun sl: STALL')" "1"
+# decision: every change of plan is sourced in PLAN.md, and tracked until mirrored in Linear.
+DR=$SCR/dec; mkdir -p $DR/.autopilot && cp $H/templates/PLAN.md $DR/PLAN.md && echo '{"project_id": "<Linear project id>"}' > $DR/.autopilot/state.json
+D() { AUTOPILOT_REPO=$DR $H/bin/decision "$@"; }
+check "decision: refuses an unsourced change" "$(D add --change "a -> b" --source "because" --by me >/dev/null 2>&1; echo $?)" "1"
+check "decision: refuses an unknown source kind" "$(D add --change "a -> b" --source "vibes:x" --by me >/dev/null 2>&1; echo $?)" "1"
+check "decision: a user source must quote the user" "$(D add --change "a -> b" --source "user:agreed" --by me >/dev/null 2>&1; echo $?)" "1"
+check "decision: pre-linear before the project exists" "$(D add --change "K2 p95 200 ms -> 300 ms" --source 'user:"300 is fine for v1"' --by owner --why "a|b")" "D-1"
+check "decision: pipe escaped, row has 8 cells" "$(grep -c '^| D-1 | .*a\\|b.* | pre-linear |$' $DR/PLAN.md)" "1"
+echo '{"project_id": "p-123"}' > $DR/.autopilot/state.json
+check "decision: pending once the project exists" "$(D add --change "split ENG-4 into ENG-4a/4b" --source "replan:REPLAN: 2 single-item stages" --by fk-a | cut -d' ' -f1)" "D-2"
+check "decision: check fails while pending" "$(D check >/dev/null; echo $?)" "1"
+D synced D-2 https://linear.app/x/issue/ENG-4#comment-1 >/dev/null
+check "decision: check passes once synced" "$(D check >/dev/null; echo $?)" "0"
+check "decision: log sits before Approval" "$(awk '/^## Decision log/{d=NR} /^## Approval/{a=NR} END{print (d && d<a)}' $DR/PLAN.md)" "1"
 echo "=== $PASS passed, $FAIL failed"
