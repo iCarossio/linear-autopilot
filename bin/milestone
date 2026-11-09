@@ -7,7 +7,8 @@ state.json `milestones` is an ordered list of
 and state.json `blockers` ({issue: [issues that block it]}) is the one source of the dependency order: `recompute`
 rebuilds `stages`, `critical_path` and `queue` from the milestone issue lists and the blockers. Blockers may cross
 milestones. A state without `milestones` is one implicit milestone (the whole queue) and `bin/eta` prints its single
-line as before.
+line as before. Ideas (state.json `ideas`, `bin/idea`) are never scheduled: their issues stay out of every scope here
+and their Linear milestone never gets a target date.
 
   milestone list [--json]               id, name, done/total, ETA (from `bin/eta --json`)
   milestone seed <tickets.json>         after the plan's `bin/linear import`: one milestone per tickets.json milestone,
@@ -30,17 +31,22 @@ add: extends a running project with a milestone, in this order, never skipping a
   f. Linear: the projectMilestone, the issues and the blocks relations in the existing project (`bin/linear import`,
      checkpointed in .../tickets.created.json: a rerun never duplicates);
   g. the milestone section appended to PLAN.md, state.json updated (milestones, blockers, sizes, then recompute);
+  g2. a spec with "from_ideas" (written by `bin/idea promote`): each idea is commented, linked as a duplicate of its
+     new ticket (the tickets carrying its "from_idea", else the first ticket), moved to the Duplicate (else Canceled)
+     state, struck through in the PLAN.md idea backlog and removed from state.json `ideas.issues`;
   h. `sync` with the decision, PLAN.md pushed as project content, the decision marked synced.
   Each step is recorded in .../status.json: rerunning the same command resumes after the last completed step.
   --dry-run validates and prints the stages and per-milestone ETAs the project would have, with no external call.
   --skip-premortem / --skip-review take the reason, which is written into status.json and the decision.
+  A KPI or plan still marked TODO (a promoted idea's skeleton) is only a warning in --dry-run and refused otherwise.
 
 spec.json:
   {"id": "whitebox", "name": "Whitebox + PR agents", "description": "one paragraph", "why": "one sentence",
    "kpis": [{"id": "K1", "kpi": "...", "target": "...", "measure": "command / query / count"}],
    "plan": "markdown: goal, architecture, rules and guardrails of this milestone",
    "tickets": [{"slug": "api", "title": "...", "description": "markdown", "estimate": 2 | "M", "priority": 2,
-                "blocked_by": ["other-slug", "ENG-12", "slug-of-an-existing-ticket"], "labels": []}]}
+                "blocked_by": ["other-slug", "ENG-12", "slug-of-an-existing-ticket"], "labels": [], "from_idea": "ENG-40"}],
+   "from_ideas": ["ENG-40"]}   (optional: ideas promoted into this milestone, see g2)
 
 adopt: groups tickets that already exist (a project planned before milestones, or a second plan already imported)
 into a milestone: decision logged, then the Linear milestone linked (--linear-id), or created with the issues moved
@@ -57,7 +63,7 @@ Linear access: LINEAR_API_KEY, else the file named by state.json `linear_key_fil
 Exit: 0 ok; 1 invalid input or a failed step (rerun resumes); 2 a review step gave nothing usable (retry later);
 3 needs approval.
 """
-import argparse, datetime as dt, importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile
+import argparse, datetime as dt, importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile, uuid
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import autopilot_lib as lib
@@ -109,12 +115,17 @@ def run(repo, cmd, extra_env=None, capture=True):
 
 # ---------- schedule: stages, critical path, queue from milestone issue lists + blockers ----------
 
+def idea_issues(st):
+    return set((st.get('ideas') or {}).get('issues') or [])
+
+
 def scope_of(st):
     ms = st.get('milestones') or []
     items = [t for m in ms for t in m.get('issues', [])] + list(st.get('queue', [])) + list(st.get('inflight', {}))
     if not ms:
         items = list(st.get('done', [])) + items
-    return list(dict.fromkeys(items))
+    ideas = idea_issues(st)  # never scheduled, whatever list they slipped into
+    return [t for t in dict.fromkeys(items) if t not in ideas]
 
 
 def find_cycle(nodes, deps):
@@ -233,9 +244,24 @@ def known_slugs(repo, skip=None):
     return out
 
 
+def placeholders(spec):
+    """Fields still marked TODO (the skeleton `bin/idea promote` writes): a plan cannot be approved with them."""
+    out = [f'KPI {k.get("id") or "?"} {f}' for k in spec.get('kpis') or [] for f in ('kpi', 'target', 'measure')
+           if str(k.get(f) or '').strip().upper().startswith('TODO')]
+    if str(spec.get('plan') or '').strip().upper().startswith('TODO'): out.append('plan')
+    out += [f'ticket {t.get("slug")} description' for t in spec.get('tickets') or []
+            if str(t.get('description') or '').strip().upper().startswith('TODO')]
+    return out
+
+
 def validate(spec, st, repo, mid):
     """(errors, blocked_by resolved per slug: new slugs stay slugs, existing tickets become identifiers)."""
     errs, resolved = [], {}
+    ideas = idea_issues(st)
+    from_ideas = spec.get('from_ideas') or []
+    errs += [f'from_ideas {t!r} is not an idea of this project (bin/idea list)' for t in from_ideas if t not in ideas]
+    errs += [f'{t.get("slug")}: from_idea {t["from_idea"]!r} is not in from_ideas' for t in spec.get('tickets') or []
+             if t.get('from_idea') and t['from_idea'] not in from_ideas]
     if not (spec.get('name') or '').strip(): errs.append('name is required')
     if not SLUG.match(mid): errs.append(f'id {mid!r} must be a lowercase slug')
     if any(m.get('id') == mid for m in st.get('milestones') or []): errs.append(f'milestone id {mid!r} already exists')
@@ -368,6 +394,7 @@ def cmd_add(a):
         except ValueError as ex: die(str(ex))
         print(f'valid: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets, '
               f'{sum(units(t.get("estimate", 1)) for t in spec["tickets"]):g} size units (new tickets shown as +slug)')
+        for x in placeholders(spec): print(f'  warning: {x} is still TODO: fill it before the real add')
         show_schedule(w['stages'], w['critical_path'])
         for x in warnings: print(f'  warning: {x}')
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
@@ -379,6 +406,8 @@ def cmd_add(a):
         print('dry run: no pre-mortem, review, decision, Linear, PLAN.md or state change')
         return
     if a.approved and not (a.by and a.source): die('--approved needs --by <who> and --source <kind:ref>')
+    todo = [] if applied else placeholders(spec)
+    if todo: die(f'still TODO in {a.spec}: {", ".join(todo)}. Fill them (measurable KPIs, the plan, ticket instructions) first')
     os.makedirs(d, exist_ok=True)
     digest = lib.digest_text(json.dumps(spec, sort_keys=True))
     section = render_section(spec, mid)
@@ -457,7 +486,7 @@ def cmd_add(a):
         why = '; '.join([spec.get('why') or (spec.get('description') or '').split('. ')[0]] + skipped).strip('; ')
         rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', f'milestone {spec["name"]} added: {len(spec["tickets"])} tickets',
                                   '--source', a.source, '--by', a.by, '--why', why,
-                                  '--affects', ', '.join([mid] + [t['slug'] for t in spec['tickets']])])
+                                  '--affects', ', '.join([mid] + [t['slug'] for t in spec['tickets']] + list(spec.get('from_ideas') or []))])
         if rc != 0: die(f'decision refused: {err.strip() or out.strip()}')
         status['decision'] = out.split()[0]; status['approved'] = {'by': a.by, 'source': a.source, 'digest': digest}; save()
     # f. Linear
@@ -502,11 +531,39 @@ def cmd_add(a):
 
         for x in lib.update_state(repo, fn): print(f'warning: {x}')
         status['state'] = True; save()
+    # g2. promoted ideas leave the backlog, closed as duplicates of the new tickets
+    for idea in spec.get('from_ideas') or []:
+        if idea in status.setdefault('ideas_closed', []): continue
+        rid = status.setdefault('idea_relations', {}).setdefault(idea, str(uuid.uuid4())); save()
+        close_idea(repo, idea, spec, ids, plan_path, status['decision'], rid)
+        status['ideas_closed'].append(idea); save()
     # h. Linear content + milestone bars + decision mirrored
     lin = linear(repo)
     lin.cmd_project_content([st['project_id'], plan_path])
     status['synced'] = do_sync(repo, [status['decision']]); save()
     print(f'milestone {mid} added: {", ".join(ids[t["slug"]] for t in spec["tickets"])} ({status["decision"]}, {status["synced"]})')
+
+
+def close_idea(repo, idea, spec, ids, plan_path, decision, rid):
+    """Idea `idea`, promoted into the milestone of `spec`: duplicate relation to its first new ticket (client id `rid`,
+    checkpointed by the caller), state Duplicate (else the team's first canceled state), a comment, struck through in
+    PLAN.md, out of state.json `ideas.issues`. A rerun after a crash repeats at most the comment."""
+    lin = linear(repo)
+    targets = [ids[t['slug']] for t in spec['tickets'] if t.get('from_idea') == idea] or [ids[spec['tickets'][0]['slug']]]
+    i = lin.issue(idea)
+    lin.retry(lin.relate, i['id'], lin.issue(targets[0])['id'], 'duplicate', rid)
+    lin.retry(lin.update_issue, i['id'], {'stateId': lin.state_id(i['team']['id'], 'Duplicate', 'canceled')})
+    lin.comment(i['id'], f'Promoted into milestone **{spec["name"]}** ({decision}): {", ".join(targets)}. '
+                         'Closed as a duplicate; the work is tracked there.')
+    loader = importlib.machinery.SourceFileLoader('idea_cli', os.path.join(BIN, 'idea'))
+    idea_mod = importlib.util.module_from_spec(importlib.util.spec_from_loader('idea_cli', loader)); loader.exec_module(idea_mod)
+    write_text(plan_path, idea_mod.mark_promoted(open(plan_path).read(), idea, f'promoted to {spec["name"]} ({", ".join(targets)})'))
+
+    def fn(s):
+        lst = (s.get('ideas') or {}).get('issues') or []
+        if idea in lst: lst.remove(idea)
+    lib.update_state(repo, fn)
+    print(f'idea {idea} closed as a duplicate of {targets[0]}')
 
 
 def cmd_seed(a):
@@ -554,6 +611,9 @@ def cmd_adopt(a):
     taken = {t: m['id'] for m in st.get('milestones') or [] for t in m.get('issues', [])}
     errs += [f'{t} already belongs to milestone {taken[t]}' for t in issues if t in taken]
     errs += [f'{t} is not an issue identifier' for t in issues if not IDENT.match(t)]
+    errs += [f'{t} is an idea: promote it (bin/idea promote), then bin/milestone add' for t in issues if t in idea_issues(st)]
+    if a.linear_id and a.linear_id == (st.get('ideas') or {}).get('linear_milestone_id'):
+        errs.append('--linear-id is the Ideas milestone: ideas are never scheduled')
     if not issues: errs.append('no issues')
     if a.linear_id and a.create_linear: errs.append('--linear-id and --create-linear are exclusive')
     if errs:
@@ -576,7 +636,7 @@ def cmd_adopt(a):
     if a.create_linear:
         lin = linear(repo); pid = st.get('project_id') or die('state.json has no project_id')
         if not ck.get('linear_id'):
-            ck['linear_id'] = ck.get('pending') or str(__import__('uuid').uuid4()); ck['pending'] = ck['linear_id']; lib.write_json_atomic(cp, ck)
+            ck['linear_id'] = ck.get('pending') or str(uuid.uuid4()); ck['pending'] = ck['linear_id']; lib.write_json_atomic(cp, ck)
             lin.create_milestone(pid, a.name, a.description or '', ck['linear_id'])
         lid = ck['linear_id']
         for t in issues:
@@ -644,10 +704,13 @@ def do_sync(repo, decisions=(), dry=False):
     targets = {}
     for r in e['milestones'] or []:
         m = ms.get(r['id'])
-        if m and m.get('linear_id') and r['end']:
+        if m and m.get('linear_id') and r['end'] and m['linear_id'] != (st.get('ideas') or {}).get('linear_milestone_id'):
             date = dt.datetime.fromisoformat(r['end']).date().isoformat()
             if m.get('target_date') != date: targets[r['id']] = date
     body = sync_body(e, decisions, repo)
+    n_ideas = len((st.get('ideas') or {}).get('issues') or [])
+    if n_ideas:
+        body += f'\n{(st.get("ideas") or {}).get("name") or "Ideas (unscheduled)"}: {n_ideas} ideas, not scheduled (`bin/idea list`)\n'
     prev = st.get('milestone_update') or {}
     fresh = prev.get('id') and (lib.now() - lib.parse_time(prev['at'])).total_seconds() < 24 * 3600
     if dry:

@@ -25,9 +25,12 @@ tickets.json:
                 "estimate": 2, "priority": 2, "blocked_by": ["other-slug"], "labels": ["autopilot"]}]}
   A `blocked_by` entry that is not a slug of the file but an issue identifier (ENG-12) names an existing issue: the
   relation is created against it (used by `bin/milestone add` to extend a running project).
+  A label that does not exist is skipped with a WARNING on stderr (create it first; `bin/idea` creates its own).
+Helpers used by bin/milestone and bin/idea: retry() (backoff while Linear answers "Entity not found" right after a
+creation), ensure_label(), state_id(), update_issue(), relate(), comment(), issue_view().
 LINEAR_API_URL overrides the endpoint (tests point it at a local fake).
 """
-import json, os, re, sys, urllib.request, uuid
+import json, os, re, sys, time, urllib.request, uuid
 
 API = os.environ.get('LINEAR_API_URL') or 'https://api.linear.app/graphql'
 IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+$')
@@ -106,6 +109,74 @@ def issue_links(identifier):
             {'id': identifier})['issue']
     return {'blockers': [r['issue']['identifier'] for r in i['inverseRelations']['nodes'] if r['type'] == 'blocks'],
             'estimate': i.get('estimate'), 'state': (i.get('state') or {}).get('type')}
+
+
+def retry(fn, *args, tries=5):
+    """fn(*args), retried with a short backoff while Linear answers "Entity not found": an entity created a moment ago
+    (an issue, a label, a milestone) is not always visible to the next request (eventual consistency).
+    LINEAR_RETRY_SLEEP scales the backoff (tests set 0)."""
+    scale = float(os.environ.get('LINEAR_RETRY_SLEEP', '1'))
+    for n in range(tries):
+        try:
+            return fn(*args)
+        except SystemExit as ex:
+            if n == tries - 1 or 'not found' not in str(ex.code).lower(): raise
+            print(f'linear: {str(ex.code)[:120]}; retry {n + 1}/{tries - 1}', file=sys.stderr)
+            time.sleep(scale * 0.5 * 2 ** n)
+
+
+def labels():
+    """Every issue label visible to the key: {'id', 'name', 'team': {'id'} | None (workspace label)}."""
+    return paginate('query($after:String){issueLabels(first:100,after:$after){nodes{id name team{id}} pageInfo{hasNextPage endCursor}}}', 'issueLabels')
+
+
+def ensure_label(team_id, name, color='#95a2b3'):
+    """The id of the label `name` usable on the team (a team label or a workspace one), created on the team if missing."""
+    for l in labels():
+        if l['name'].lower() == name.lower() and (not l.get('team') or l['team']['id'] == team_id): return l['id']
+    r = gql('mutation($i:IssueLabelCreateInput!){issueLabelCreate(input:$i){issueLabel{id}}}',
+            {'i': {'name': name, 'teamId': team_id, 'color': color}})
+    return r['issueLabelCreate']['issueLabel']['id']
+
+
+def state_id(team_id, name, kind=None):
+    """The id of the team's workflow state named `name`, else the first one of type `kind`."""
+    states = states_of(team_id)
+    s = next((s for s in states if s['name'].lower() == name.lower()), None) \
+        or next((s for s in sorted(states, key=lambda s: s.get('position') or 0) if kind and s['type'] == kind), None)
+    if not s: sys.exit(f'linear: no state {name!r} in team {team_id}')
+    return s['id']
+
+
+def update_issue(issue_id, fields):
+    gql('mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}', {'id': issue_id, 'i': fields})
+
+
+def relate(issue_id, related_id, kind, cid=None):
+    """issueRelationCreate: `issue_id` <kind> `related_id` (blocks, related, duplicate). Idempotent on `cid`."""
+    if cid:
+        try:
+            if gql('query($id:String!){issueRelation(id:$id){id}}', {'id': cid})['issueRelation']: return
+        except SystemExit:
+            pass
+    inp = {'issueId': issue_id, 'relatedIssueId': related_id, 'type': kind}
+    if cid: inp['id'] = cid
+    gql('mutation($i:IssueRelationCreateInput!){issueRelationCreate(input:$i){success}}', {'i': inp})
+
+
+def comment(issue_id, body):
+    gql('mutation($i:CommentCreateInput!){commentCreate(input:$i){success}}', {'i': {'issueId': issue_id, 'body': body}})
+
+
+def issue_view(identifier):
+    """One issue with its milestone, labels and related issues (both directions), for `bin/idea`."""
+    i = gql('query($id:String!){issue(id:$id){id identifier title description url state{name type} team{id key} '
+            'project{id} projectMilestone{id name} labels{nodes{id name}} '
+            'relations(first:100){nodes{type relatedIssue{identifier}}} inverseRelations(first:100){nodes{type issue{identifier}}}}}',
+            {'id': identifier})['issue']
+    i['related'] = sorted({r['relatedIssue']['identifier'] for r in i['relations']['nodes'] if r['type'] == 'related'}
+                          | {r['issue']['identifier'] for r in i['inverseRelations']['nodes'] if r['type'] == 'related'})
+    return i
 
 
 def upsert_project_update(project_id, body, update_id=None):
@@ -206,9 +277,12 @@ def cmd_import(a):
             gql('mutation($i:ProjectMilestoneCreateInput!){projectMilestoneCreate(input:$i){projectMilestone{id}}}',
                 {'i': {'id': cid, 'name': m['name'], 'description': m.get('description', ''), 'projectId': pid}})
         created['milestones'][m['name']] = cid; persist()
-    labels = {}
+    known = {}
     if any(tk.get('labels') for tk in spec['tickets']) and not dry:
-        labels = {l['name']: l['id'] for l in paginate('query($after:String){issueLabels(first:100,after:$after){nodes{id name} pageInfo{hasNextPage endCursor}}}', 'issueLabels')}
+        known = {l['name']: l['id'] for l in labels()}
+        missing = sorted({l for tk in spec['tickets'] for l in tk.get('labels', []) if l not in known})
+        if missing:  # never silently: the issues are created without them
+            print(f"linear import: WARNING labels {missing} do not exist and are skipped (create them first)", file=sys.stderr)
     for tk in spec['tickets']:
         if tk['slug'] in created['tickets']: continue
         print(f"create issue [{tk['slug']}] {tk['title']}")
@@ -221,7 +295,7 @@ def cmd_import(a):
             if tk.get('milestone'): inp['projectMilestoneId'] = created['milestones'][tk['milestone']]
             if tk.get('estimate') is not None: inp['estimate'] = tk['estimate']
             if tk.get('priority') is not None: inp['priority'] = tk['priority']
-            ids = [labels[l] for l in tk.get('labels', []) if l in labels]
+            ids = [known[l] for l in tk.get('labels', []) if l in known]
             if ids: inp['labelIds'] = ids
             found = gql('mutation($i:IssueCreateInput!){issueCreate(input:$i){issue{id identifier url}}}', {'i': inp})['issueCreate']['issue']
         created['tickets'][tk['slug']] = found; persist()

@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""idea: the owner's quick ideas, captured without planning in one Linear milestone of the project, kept out of every
+schedule until one or several are promoted into a real milestone (`bin/milestone add`: pre-mortem, plan review, approval).
+
+An idea is not work: no pre-mortem, no review, not in `queue`, `stages` or `milestones`, not in any ETA, and
+`bin/milestone sync` never dates its milestone. state.json keeps them apart:
+  "ideas": {"linear_milestone_id": "<projectMilestone id>", "name": "Ideas (unscheduled)", "issues": ["ENG-40", ...]}
+
+  idea add "<title>" --words "<the owner's words, verbatim>" [--note "<one or two lines of scope>"]
+           [--related ENG-12,...] [--by <owner>] [--dry-run]
+  idea list [--json]                     identifier, state, title, related ideas (read from Linear)
+  idea adopt ENG-1,ENG-2,... --source <kind:ref> [--by <owner>] [--dry-run]
+                                         existing issues (ideas collected before this command) moved into the Ideas
+                                         milestone, label `idea`, state Backlog
+  idea promote ENG-1[,ENG-2...] --id <milestone-id> --name "<name>" [--force]
+                                         writes the `bin/milestone add` spec skeleton .autopilot/plan/specs/<id>.json
+
+add, in order, each step checkpointed in .autopilot/ideas/created.json (a rerun with the same title resumes and never
+creates a second issue):
+  1. the Ideas milestone (a projectMilestone named "Ideas (unscheduled)", or IDEAS_MILESTONE; no target date) and the
+     team label `idea` exist: found by name, else created;
+  2. the issue: in the project and the Ideas milestone, the owner's words quoted verbatim, the note, the related ideas,
+     how to promote it; then label `idea` and state Backlog (retried while Linear answers "Entity not found": a
+     fresh issue is not always visible at once), and `related` links to --related;
+  3. a row in the "Idea backlog (unscheduled)" section of PLAN.md (created at the end if absent);
+  4. `bin/decision add --source user:"<words>"`, PLAN.md pushed as project content, the decision marked synced.
+
+promote: the spec carries the ideas quoted in its description, one placeholder ticket per idea ("from_idea"), KPIs and
+plan marked TODO (`bin/milestone add --dry-run` shows the schedule; the real add refuses a TODO), and
+"from_ideas": [...]. When `bin/milestone add --approved` creates the milestone, each promoted idea is commented, linked
+as a duplicate of its new ticket, moved to the Duplicate (else Canceled) state and removed from `ideas.issues`.
+
+Linear access: LINEAR_API_KEY, else the file named by state.json `linear_key_file`. Exit: 0 ok; 1 invalid input or a
+failed step (rerun resumes).
+"""
+import argparse, datetime as dt, importlib.machinery, importlib.util, json, os, re, subprocess, sys, uuid
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+BIN = lib.HERE
+IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+$')
+LABEL = 'idea'
+HEAD = '## Idea backlog (unscheduled)'
+INTRO = ('Ideas collected from the owner. Not in the autopilot queue and not in any ETA. One or several become a '
+         'milestone through `/autopilot-idea promote` then `bin/milestone add` (pre-mortem and adversarial review) when '
+         'the owner schedules them. Linear: milestone "{name}", label `idea`, state Backlog.')
+TODO = 'TODO'
+
+
+def die(msg, code=1):
+    print(f'idea: {msg}', file=sys.stderr); sys.exit(code)
+
+
+def env(repo):
+    e = dict(os.environ, AUTOPILOT_REPO=repo)
+    key_file = lib.load_state(repo).get('linear_key_file')
+    if not e.get('LINEAR_API_KEY') and key_file and os.path.exists(os.path.expanduser(key_file)):
+        e['LINEAR_API_KEY'] = open(os.path.expanduser(key_file)).read().strip()
+    return e
+
+
+def linear(repo):
+    """bin/linear as a module (its GraphQL helpers), with the API key resolved."""
+    os.environ.update({k: v for k, v in env(repo).items() if k == 'LINEAR_API_KEY'})
+    loader = importlib.machinery.SourceFileLoader('linear_cli', os.path.join(BIN, 'linear'))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader('linear_cli', loader))
+    loader.exec_module(mod)
+    return mod
+
+
+def run(repo, cmd):
+    p = subprocess.run(cmd, capture_output=True, text=True, env=env(repo), cwd=repo)
+    return p.returncode, p.stdout or '', p.stderr or ''
+
+
+def idents(s):
+    out = [i.strip() for i in (s or '').split(',') if i.strip()]
+    bad = [i for i in out if not IDENT.match(i)]
+    if bad: die(f'not issue identifiers: {bad}')
+    return list(dict.fromkeys(out))
+
+
+def slug(title):
+    return re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')[:60] or 'idea'
+
+
+def cell(s):
+    return ' '.join(str(s or '').split()).replace('|', '\\|') or '-'
+
+
+def plan_path(repo):
+    p = os.environ.get('AUTOPILOT_PLAN') or os.path.join(repo, 'PLAN.md')
+    if not os.path.exists(p): die(f'{p} not found: the idea backlog and its decision go there')
+    return p
+
+
+def write_text(path, text):
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f: f.write(text)
+    os.replace(tmp, path)
+
+
+def add_rows(text, rows, name):
+    """PLAN.md with a row per (identifier, idea) in the Idea backlog section; rows already there are kept as they are."""
+    if HEAD not in text:
+        text = text.rstrip('\n') + f'\n\n{HEAD}\n\n{INTRO.format(name=name)}\n\n| Issue | Idea |\n|---|---|\n'
+    lines = text.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.strip() == HEAD)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
+    have = {m.group(1) for l in lines[start:end] for m in [re.match(r'^\|\s*([A-Z][A-Z0-9]*-\d+)\s*\|', l)] if m}
+    new = [f'| {i} | {cell(t)} |' for i, t in rows if i not in have]
+    if new:
+        last = max((k for k in range(start, end) if lines[k].startswith('|')), default=None)
+        if last is None: new = ['', '| Issue | Idea |', '|---|---|'] + new; last = end - 1
+        lines[last + 1:last + 1] = new
+    return '\n'.join(lines) + '\n'
+
+
+def mark_promoted(text, identifier, note):
+    """The idea's row in the backlog table, struck through with where it went."""
+    out = []
+    for l in text.splitlines():
+        m = re.match(r'^\|\s*(%s)\s*\|\s*(.*?)\s*\|\s*$' % re.escape(identifier), l)
+        if m and not m.group(2).startswith('~~'): l = f'| {identifier} | ~~{m.group(2)}~~ {cell(note)} |'
+        out.append(l)
+    return '\n'.join(out) + '\n'
+
+
+class Ckpt:
+    """.autopilot/ideas/created.json: {"milestone": {...}, "label_id", "ideas": {slug: {...}}, "adopt": {...}}."""
+
+    def __init__(self, repo):
+        self.path = os.path.join(repo, '.autopilot', 'ideas', 'created.json')
+        self.d = lib.read_json(self.path) if os.path.exists(self.path) else {}
+        for k in ('milestone', 'ideas', 'adopt'): self.d.setdefault(k, {})
+
+    def save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True); lib.write_json_atomic(self.path, self.d)
+
+
+def project(st):
+    if not st.get('project_id') or st['project_id'].startswith('<') or not st.get('team'):
+        die('state.json has no project_id/team: ideas live in an existing Linear project')
+    return st['project_id']
+
+
+def ensure_home(repo, st, lin, ck):
+    """(milestone id, label id, team id): the Ideas milestone and the `idea` label, found or created, checkpointed."""
+    pid = project(st)
+    team = lin.team(st['team'])
+    name = (st.get('ideas') or {}).get('name') or os.environ.get('IDEAS_MILESTONE') or 'Ideas (unscheduled)'
+    mid = (st.get('ideas') or {}).get('linear_milestone_id') or ck.d['milestone'].get('id')
+    if not mid:
+        found = next((m for m in lin.project_milestones(pid) if m['name'] == name), None)
+        if found:
+            mid = found['id']
+        else:
+            cid = ck.d['milestone'].get('pending') or str(uuid.uuid4())
+            ck.d['milestone']['pending'] = cid; ck.save()
+            mid = lin.create_milestone(pid, name, 'Owner ideas, not scheduled: no ETA, no target date. Promote with '
+                                       '/autopilot-idea promote, then bin/milestone add.', cid)
+            print(f'created milestone {name!r}')
+        ck.d['milestone']['id'] = mid; ck.save()
+
+    def fn(s):
+        i = s.setdefault('ideas', {})
+        i.setdefault('issues', []); i['linear_milestone_id'] = mid; i['name'] = name
+    lib.update_state(repo, fn)
+    if not ck.d.get('label_id'):
+        ck.d['label_id'] = lin.ensure_label(team['id'], LABEL); ck.save()
+    return mid, ck.d['label_id'], team['id'], name
+
+
+def describe(words, note, related, today):
+    quote = '\n'.join('> ' + l if l.strip() else '>' for l in words.strip().splitlines())
+    parts = [f'Owner idea ({today}), not scheduled: not in the autopilot queue and in no ETA.', '', quote]
+    if note: parts += ['', note.strip()]
+    if related: parts += ['', 'Related: ' + ', '.join(related)]
+    parts += ['', 'Promote with `/autopilot-idea promote` (writes a `bin/milestone add` spec: pre-mortem and adversarial '
+                  'plan review before anything is scheduled).']
+    return '\n'.join(parts)
+
+
+def log_decision(repo, change, source, by, why, affects):
+    """The Decision log row (PLAN.md). Returns D-n."""
+    rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', change, '--source', source, '--by', by,
+                              '--why', why, '--affects', ', '.join(affects)])
+    if rc != 0: die(f'decision refused: {err.strip() or out.strip()}')
+    return out.split()[0]
+
+
+def sync_plan(repo, lin, pid, dn, url):
+    """PLAN.md pushed as project content, then decision `dn` marked synced with `url`."""
+    lin.cmd_project_content([pid, plan_path(repo)])
+    rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'synced', dn, url])
+    if rc != 0: die(f'decision synced {dn} failed: {err.strip()}')
+
+
+# ---------- commands ----------
+
+def cmd_add(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    title = ' '.join(a.title.split())
+    if not title: die('the title is empty')
+    if not a.words.strip(): die('--words: the owner\'s words, verbatim, are required')
+    related = idents(a.related)
+    by = a.by or st.get('owner') or 'owner'
+    key = slug(title)
+    today = dt.date.today().isoformat()
+    if a.dry_run:
+        project(st); plan_path(repo)
+        print(f'would capture idea {title!r} in milestone "{(st.get("ideas") or {}).get("name") or "Ideas (unscheduled)"}" '
+              f'(label idea, state Backlog){", related " + ", ".join(related) if related else ""}')
+        print(describe(a.words, a.note, related, today))
+        print('dry run: no Linear call, no PLAN.md, decision or state change')
+        return
+    ck = Ckpt(repo)
+    rec = ck.d['ideas'].setdefault(key, {'title': title})
+    if rec.get('synced'):
+        print(f'{rec["identifier"]}  already captured ({rec["decision"]})'); return
+    lin = linear(repo); pid = project(st)
+    mid, label, team_id, name = ensure_home(repo, st, lin, ck)
+    # 2. the issue, created once under a client id checkpointed before the request
+    if not rec.get('identifier'):
+        rec.setdefault('cid', str(uuid.uuid4())); ck.save()
+        try: found = lin.gql('query($id:String!){issue(id:$id){id identifier url}}', {'id': rec['cid']})['issue']
+        except SystemExit: found = None
+        if not found:
+            inp = {'id': rec['cid'], 'teamId': team_id, 'projectId': pid, 'projectMilestoneId': mid, 'title': title,
+                   'description': describe(a.words, a.note, related, today), 'priority': 0}
+            found = lin.retry(lambda: lin.gql('mutation($i:IssueCreateInput!){issueCreate(input:$i){issue{id identifier url}}}',
+                                              {'i': inp})['issueCreate']['issue'])
+        rec.update(id=found['id'], identifier=found['identifier'], url=found.get('url')); ck.save()
+    ident = rec['identifier']
+    if not rec.get('labelled'):
+        backlog = lin.state_id(team_id, 'Backlog', 'backlog')
+        lin.retry(lin.update_issue, rec['id'], {'stateId': backlog, 'addedLabelIds': [label]})
+        rec['labelled'] = True; ck.save()
+    for r in related:
+        if r in rec.setdefault('related', []): continue
+        cid = rec.setdefault('relation_ids', {}).setdefault(r, str(uuid.uuid4())); ck.save()
+        lin.retry(lin.relate, rec['id'], lin.issue(r)['id'], 'related', cid)
+        rec['related'].append(r); ck.save()
+
+    def fn(s):
+        i = s.setdefault('ideas', {}).setdefault('issues', [])
+        if ident not in i: i.append(ident)
+    lib.update_state(repo, fn)
+    # 3. PLAN.md
+    path = plan_path(repo)
+    write_text(path, add_rows(open(path).read(), [(ident, title + (f' ({a.note.strip()})' if a.note else ''))], name))
+    # 4. decision, project content, synced
+    if not rec.get('decision'):
+        rec['decision'] = log_decision(repo, f'idea captured: {ident} {title} (milestone {name}, label idea, Backlog; not scheduled)',
+                                       'user:"%s"' % ' '.join(a.words.split()), by,
+                                       'an owner idea is captured for a future milestone; not in the queue or any ETA',
+                                       [ident] + related)
+        ck.save()
+    sync_plan(repo, lin, pid, rec['decision'], rec.get('url') or ident)
+    rec['synced'] = True; ck.save()
+    print(ident)
+
+
+def cmd_list(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    issues = (st.get('ideas') or {}).get('issues') or []
+    lin = linear(repo) if issues else None
+    rows = []
+    for t in issues:
+        i = lin.issue_view(t)
+        rows.append({'identifier': t, 'title': i['title'], 'state': i['state']['name'], 'related': i['related'], 'url': i.get('url')})
+    if a.json: print(json.dumps(rows, indent=1)); return
+    if not rows: print('no ideas (bin/idea add)'); return
+    for r in rows:
+        print(f"{r['identifier']:<10} {r['state']:<10} {r['title']}" + (f"  related: {', '.join(r['related'])}" if r['related'] else ''))
+
+
+def cmd_adopt(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    issues = idents(a.issues)
+    if not issues: die('no issues')
+    scheduled = {t for m in st.get('milestones') or [] for t in m.get('issues', [])} | set(st.get('queue', [])) \
+        | set(st.get('inflight', {})) | set(st.get('done', []))
+    bad = [t for t in issues if t in scheduled]
+    if bad: die(f'{bad} are scheduled work (a milestone, the queue, in flight or done), not ideas')
+    if a.dry_run:
+        project(st)
+        print(f'would move {", ".join(issues)} into milestone "{(st.get("ideas") or {}).get("name") or "Ideas (unscheduled)"}" '
+              '(label idea, state Backlog), add them to the PLAN.md idea backlog and log one decision')
+        return
+    by = a.by or st.get('owner') or 'owner'
+    ck = Ckpt(repo); lin = linear(repo); pid = project(st)
+    mid, label, team_id, name = ensure_home(repo, st, lin, ck)
+    backlog = lin.state_id(team_id, 'Backlog', 'backlog')
+    batch = ck.d['adopt'].setdefault(','.join(issues), {'moved': {}})
+    for t in issues:
+        if t in batch['moved']: continue
+        i = lin.issue(t)
+        lin.retry(lin.update_issue, i['id'], {'projectId': pid, 'projectMilestoneId': mid, 'stateId': backlog, 'addedLabelIds': [label]})
+        batch['moved'][t] = i['title']; ck.save()
+        print(f'moved {t} into {name}')
+
+    def fn(s):
+        lst = s.setdefault('ideas', {}).setdefault('issues', [])
+        for t in issues:
+            if t not in lst: lst.append(t)
+    lib.update_state(repo, fn)
+    path = plan_path(repo)
+    write_text(path, add_rows(open(path).read(), [(t, re.sub(r'^Idea:\s*', '', batch['moved'][t])) for t in issues], name))
+    if not batch.get('decision'):
+        batch['decision'] = log_decision(repo, f'ideas {", ".join(issues)} moved into milestone {name} (label idea, Backlog; not scheduled)',
+                                         a.source, by, 'ideas collected before /autopilot-idea get the same home: out of the queue and every ETA',
+                                         issues)
+        ck.save()
+    if not batch.get('synced'):
+        sync_plan(repo, lin, pid, batch['decision'], lin.issue(issues[0]).get('url') or issues[0])
+        batch['synced'] = True; ck.save()
+    print(f'{len(issues)} ideas in {name} ({batch["decision"]})')
+
+
+def cmd_promote(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    issues = idents(a.issues)
+    ideas = (st.get('ideas') or {}).get('issues') or []
+    unknown = [t for t in issues if t not in ideas]
+    if not issues or unknown: die(f'{unknown or "no issues"}: not ideas of this project (bin/idea list)')
+    if not re.match(r'^[a-z0-9][a-z0-9-]*$', a.id): die(f'--id {a.id!r} must be a lowercase slug')
+    out = os.path.join(repo, '.autopilot', 'plan', 'specs', f'{a.id}.json')
+    if os.path.exists(out) and not a.force: die(f'{out} exists (the planner may have edited it): --force to overwrite')
+    lin = linear(repo)
+    tickets, quotes = [], []
+    for t in issues:
+        i = lin.issue_view(t)
+        title = re.sub(r'^Idea:\s*', '', i['title'])
+        quotes.append(f'### {t}: {title}\n\n{(i.get("description") or "").strip()}')
+        s = slug(title)[:40].strip('-')
+        while any(x['slug'] == s for x in tickets): s += '-2'
+        tickets.append({'slug': s, 'title': title, 'estimate': 'M', 'blocked_by': [], 'from_idea': t,
+                        'description': f'{TODO}: split into tickets a cheap implementer can do in one commit (instructions, '
+                                       f'CHECKS:, **Acceptance**, guardrails). Source: idea {t}.'})
+    spec = {'id': a.id, 'name': a.name,
+            'description': f'Promoted from the idea backlog: {", ".join(issues)}.\n\n' + '\n\n'.join(quotes),
+            'why': f'the owner schedules ideas {", ".join(issues)}',
+            'kpis': [{'id': 'K1', 'kpi': f'{TODO}: the measurable outcome of this milestone', 'target': TODO, 'measure': TODO}],
+            'plan': f'{TODO}: goal, architecture, rules and guardrails of this milestone.',
+            'tickets': tickets, 'from_ideas': issues}
+    os.makedirs(os.path.dirname(out), exist_ok=True); lib.write_json_atomic(out, spec)
+    print(out)
+    print(f'Next: fill every {TODO} (KPIs with target and measurement, plan, tickets; keep "from_ideas"), then\n'
+          f'  bin/milestone add {out} --dry-run\n'
+          f'  bin/milestone add {out}          # pre-mortem + plan review, stops for approval (exit 3)\n'
+          f'  bin/milestone add {out} --approved --by <owner> --source user:"<their approval>"\n'
+          'On approval the ideas are closed as duplicates of the new tickets and leave the backlog.')
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'): print(__doc__); sys.exit(0 if len(sys.argv) > 1 else 1)
+    p = argparse.ArgumentParser(prog='idea'); sub = p.add_subparsers(dest='cmd')
+    ad = sub.add_parser('add'); ad.add_argument('title'); ad.add_argument('--words', required=True); ad.add_argument('--note')
+    ad.add_argument('--related'); ad.add_argument('--by'); ad.add_argument('--dry-run', action='store_true')
+    li = sub.add_parser('list'); li.add_argument('--json', action='store_true')
+    ao = sub.add_parser('adopt'); ao.add_argument('issues'); ao.add_argument('--source', required=True); ao.add_argument('--by')
+    ao.add_argument('--dry-run', action='store_true')
+    pr = sub.add_parser('promote'); pr.add_argument('issues'); pr.add_argument('--id', required=True); pr.add_argument('--name', required=True)
+    pr.add_argument('--force', action='store_true')
+    a = p.parse_args()
+    {'add': cmd_add, 'list': cmd_list, 'adopt': cmd_adopt, 'promote': cmd_promote}[a.cmd](a)
+
+
+if __name__ == '__main__':
+    main()

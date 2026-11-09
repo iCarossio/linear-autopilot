@@ -26,7 +26,7 @@ the overall line. A ticket also ends no earlier than its open `blockers` (state.
 own duration, so a milestone never finishes before the tickets it waits on in other milestones; when that pushes a
 date past the stage schedule, a REPLAN line says `stages` is out of step (run `bin/milestone recompute`). Without
 `milestones` the output is the single overall line, as before. Tickets of a milestone missing from `queue`, `inflight`
-and `done` count as queued.
+and `done` count as queued. Ideas (state.json `ideas`, see `bin/idea`) never count: not queued, no bar, no ETA.
 
   eta [-v] [--json]      --json: one JSON object (overall + per milestone + replan) instead of the text lines
 ETA_STATE=<file> reads that state instead (a what-if schedule: `bin/milestone add --dry-run`); no history is written.
@@ -62,8 +62,12 @@ def size(t):
 
 
 inflight, done = S.get('inflight', {}), S.get('done', [])
-milestones = S.get('milestones') or []
-raw_queue = list(S.get('queue', [])) + [t for m in milestones for t in m.get('issues', [])]
+# Ideas (`bin/idea`) are never scheduled: their milestone and issues stay out of every bar and ETA.
+ideas = S.get('ideas') or {}
+idea_set = set(ideas.get('issues') or [])
+milestones = [dict(m, issues=[t for t in m.get('issues', []) if t not in idea_set]) for m in S.get('milestones') or []
+              if not (m.get('linear_id') and m.get('linear_id') == ideas.get('linear_milestone_id'))]
+raw_queue = [t for t in list(S.get('queue', [])) + [t for m in milestones for t in m.get('issues', [])] if t not in idea_set]
 queue = [t for i, t in enumerate(raw_queue) if t not in inflight and t not in done and t not in raw_queue[:i]]
 now = dt.datetime.now(dt.timezone.utc)
 

@@ -376,6 +376,45 @@ AUTOPILOT_REPO=$MR $H/bin/state push queue '"ENG-60"' >/dev/null
 MS adopt --id dup --name Dup --issues ENG-1 --by owner --source 'user:"x"' >/dev/null 2>&1; check "adopt: a ticket of another milestone refused" "$?" "1"
 MS adopt --id later --name Later --issues ENG-60 --create-linear --by owner --source 'user:"group it"' >/dev/null
 check "adopt --create-linear: milestone created, issue moved, state updated" "$(NCALLS projectMilestoneCreate) $(J $SCR/linear.json "[i for i in d['issues'] if i['identifier']=='ENG-60'][0].get('projectMilestoneId') is not None") $(J $MR/.autopilot/state.json "d['milestones'][-1]['issues']")" "3 True ['ENG-60']"
+# ideas: captured in their own Linear milestone, never scheduled, promoted later through bin/milestone add.
+IDEA() { AUTOPILOT_REPO=$MR LINEAR_RETRY_SLEEP=0 ETA_LOAD=0 $H/bin/idea "$@"; }
+EJ() { ETA --json | python3 -c "import json,sys;e=json.load(sys.stdin);print(e['todo'], e['minutes'], [m['id'] for m in e['milestones']])"; }
+E0=$(EJ); Q0=$(J $MR/.autopilot/state.json "d['queue']")
+N=$(NCALLS); IDEA add "Idea dry" --words "x" --dry-run >/dev/null; check "idea add --dry-run: no Linear call, no state" "$(NCALLS) $(J $MR/.autopilot/state.json "'ideas' in d")" "$N False"
+python3 -c "import json;p='$SCR/linear.json';s=json.load(open(p));s['fail']={'issueUpdate': 2};json.dump(s,open(p,'w'))"
+OUT=$(IDEA add "RBAC like Claude Cowork" --words 'RBAC: like Claude Cowork, assign "agents" to projects' --note "roles: global, per project" --by owner 2>&1); RC=$?
+check "idea add: prints the new identifier" "$RC $(echo "$OUT" | tail -1)" "0 ENG-61"
+check "idea add: transient 'Entity not found' retried" "$(echo "$OUT" | grep -c 'Entity not found.*retry')" "2"
+ID_MS=$(J $MR/.autopilot/state.json "d['ideas']['linear_milestone_id']")
+check "idea add: Ideas milestone (no target date) + label created, issue in it, label idea, Backlog" "$(NCALLS projectMilestoneCreate) $(NCALLS issueLabelCreate) $(J $SCR/linear.json "[(m['name'], m['targetDate']) for m in d['milestones'] if m['id']=='$ID_MS'], [(i['projectMilestoneId']=='$ID_MS', [l['name'] for l in d['labels'] if l['id'] in i['labelIds']], i['stateId']) for i in d['issues'] if i['identifier']=='ENG-61']")" "4 1 [('Ideas (unscheduled)', None)] [(True, ['idea'], 'st-backlog')]"
+check "idea add: the owner's words quoted verbatim, note, how to promote" "$(J $SCR/linear.json "[i['description'] for i in d['issues'] if i['identifier']=='ENG-61'][0]" | grep -cE '^> RBAC: like Claude Cowork, assign "agents" to projects$|^roles: global, per project$|/autopilot-idea promote')" "3"
+check "idea add: PLAN.md backlog row, decision sourced with the words and synced, content pushed" "$(grep -c '^| ENG-61 | RBAC like Claude Cowork (roles: global, per project) |$' $MR/PLAN.md) $(AUTOPILOT_REPO=$MR $H/bin/decision list | grep 'idea captured: ENG-61 .*<- user:"RBAC: like Claude Cowork' | grep -vc '\[pending\]') $(J $SCR/linear.json "'| ENG-61 |' in d['content']")" "1 1 True"
+IDEA add "Password manager like Grok Bot" --words "a password manager like Grok Bot, with Bitwarden import" --related ENG-61 >/dev/null 2>&1
+check "idea add: second idea reuses milestone and label, related link" "$(NCALLS projectMilestoneCreate) $(NCALLS issueLabelCreate) $(J $SCR/linear.json "[(r['type'], r['relatedIssueId']) for r in d['relations'] if r['issueId']==[i['id'] for i in d['issues'] if i['identifier']=='ENG-62'][0]]")" "4 1 [('related', $(J $SCR/linear.json "repr([i['id'] for i in d['issues'] if i['identifier']=='ENG-61'][0])"))]"
+N=$(NCALLS); OUT=$(IDEA add "RBAC like Claude Cowork" --words "again" 2>&1)
+check "idea add: rerun of the same idea is a no-op" "$(echo "$OUT" | grep -c 'ENG-61  already captured') $(NCALLS) $(J $MR/.autopilot/state.json "d['ideas']['issues']")" "1 $N ['ENG-61', 'ENG-62']"
+check "ideas: eta unchanged (no queue, no bar, no ETA)" "$(EJ) $(J $MR/.autopilot/state.json "d['queue']")" "$E0 $Q0"
+MS recompute >/dev/null; E1=$(EJ); AUTOPILOT_REPO=$MR $H/bin/state push queue '"ENG-61"' >/dev/null; MS recompute >/dev/null
+check "ideas: recompute drops an idea that slipped into the queue" "$(J $MR/.autopilot/state.json "'ENG-61' in d['queue'] or any('ENG-61' in s for s in d['stages'])") $(EJ)" "False $E1"
+MS sync >/dev/null
+check "ideas: sync never dates the Ideas milestone, update counts the ideas" "$(J $SCR/linear.json "[m['targetDate'] for m in d['milestones'] if m['id']=='$ID_MS']") $(J $SCR/linear.json "d['updates'][-1]['body']" | grep -c '^Ideas (unscheduled): 2 ideas, not scheduled')" "[None] 1"
+check "idea list --json: state, related" "$(IDEA list --json | python3 -c "import json,sys;print([(r['identifier'], r['state'], r['related']) for r in json.load(sys.stdin)])")" "[('ENG-61', 'Backlog', ['ENG-62']), ('ENG-62', 'Backlog', ['ENG-61'])]"
+python3 -c "import json;p='$SCR/linear.json';s=json.load(open(p));s['issues'].append({'id':'i70','identifier':'ENG-70','title':'Idea: private locations','projectId':'proj-1','labelIds':['old']});json.dump(s,open(p,'w'))"
+IDEA adopt ENG-1 --source 'user:"x"' >/dev/null 2>&1; check "idea adopt: scheduled work refused" "$?" "1"
+IDEA adopt ENG-70 --source 'user:"move the old ideas"' >/dev/null 2>&1
+check "idea adopt: moved into the Ideas milestone, label added, Backlog, backlog row" "$(J $SCR/linear.json "[(i['projectMilestoneId']=='$ID_MS', i['labelIds'], i['stateId']) for i in d['issues'] if i['identifier']=='ENG-70']") $(J $MR/.autopilot/state.json "d['ideas']['issues']") $(grep -c '^| ENG-70 | private locations |$' $MR/PLAN.md)" "[(True, ['old', 'lbl-1'], 'st-backlog')] ['ENG-61', 'ENG-62', 'ENG-70'] 1"
+MS adopt --id idm --name I --issues ENG-70 --by owner --source 'user:"x"' >/dev/null 2>&1; check "milestone adopt: an idea refused" "$?" "1"
+IDEA promote ENG-61,ENG-99 --id rbac --name "RBAC and vault" >/dev/null 2>&1; check "idea promote: a non-idea refused" "$?" "1"
+SPEC=$(IDEA promote ENG-61,ENG-62 --id rbac --name "RBAC and vault" | head -1)
+check "idea promote: spec skeleton with from_ideas and one ticket per idea" "$(J $SPEC "d['from_ideas'], [(t['slug'], t['from_idea']) for t in d['tickets']], 'assign \"agents\"' in d['description']")" "['ENG-61', 'ENG-62'] [('rbac-like-claude-cowork', 'ENG-61'), ('password-manager-like-grok-bot', 'ENG-62')] True"
+OUT=$(MS add $SPEC --dry-run 2>&1); check "promote spec: milestone add --dry-run accepts it, TODOs flagged" "$? $(echo "$OUT" | grep -c 'warning: .* is still TODO')" "0 6"
+MS add $SPEC --skip-premortem t --skip-review t --approved --by owner --source 'user:"go"' >/dev/null 2>&1; check "promote spec: a real add refused while TODO" "$?" "1"
+python3 -c "import json;p='$SPEC';s=json.load(open(p));s['kpis']=[{'id':'R1','kpi':'roles enforced','target':'0 cross-project reads','measure':'pytest tests/rbac'}];s['plan']='Roles, then the vault.';[t.update(description='do it') for t in s['tickets']];json.dump(s,open(p,'w'))"
+OUT=$(MS add $SPEC --skip-premortem "ideas already discussed" --skip-review "test" --approved --by owner --source 'user:"go"' 2>&1); RC=$?
+check "promote: milestone added with the promoted tickets" "$RC $(J $MR/.autopilot/state.json "d['milestones'][-1]['id'], d['milestones'][-1]['issues']")" "0 rbac ['ENG-71', 'ENG-72']"
+check "promote hook: ideas closed as duplicates of their tickets, commented, out of the backlog" "$(J $SCR/linear.json "[(i['identifier'], i.get('stateId')) for i in d['issues'] if i['identifier'] in ('ENG-61','ENG-62')], sorted((r['issueId'], r['relatedIssueId']) for r in d['relations'] if r['type']=='duplicate'), len(d.get('comments', []))") $(J $MR/.autopilot/state.json "d['ideas']['issues']")" "[('ENG-61', 'st-duplicate'), ('ENG-62', 'st-duplicate')] [('$(J $SCR/linear.json "[i['id'] for i in d['issues'] if i['identifier']=='ENG-61'][0]")', '$(J $SCR/linear.json "[i['id'] for i in d['issues'] if i['identifier']=='ENG-71'][0]")'), ('$(J $SCR/linear.json "[i['id'] for i in d['issues'] if i['identifier']=='ENG-62'][0]")', '$(J $SCR/linear.json "[i['id'] for i in d['issues'] if i['identifier']=='ENG-72'][0]")')] 2 ['ENG-70']"
+check "promote hook: backlog rows struck through with the new tickets" "$(grep -c '^| ENG-61 | ~~RBAC like Claude Cowork (roles: global, per project)~~ promoted to RBAC and vault (ENG-71) |$' $MR/PLAN.md)" "1"
+N=$(NCALLS); MS add $SPEC --approved --by owner --source 'user:"go"' >/dev/null 2>&1; check "promote: rerun after completion is a no-op" "$? $(NCALLS)" "0 $N"
 SD=$SCR/seed-repo; mkdir -p $SD/.autopilot/plan && echo '{"branch": "x", "queue": [], "done": []}' > $SD/.autopilot/state.json
 cat > $SD/.autopilot/plan/tickets.json <<'EOF'
 {"project": {"name": "P"}, "milestones": [{"name": "M1 Base"}, {"name": "M2 More"}],
