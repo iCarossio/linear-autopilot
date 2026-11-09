@@ -18,7 +18,18 @@ The ETA is a schedule, not a throughput extrapolation:
 - Update `est` whenever a round starts or ends (a review that sends a ticket back adds a round, ~30-40
   min for a fix round); keep `stages` in step with the real dependency order.
 
-Progress = size-weighted done / (done + remaining), sizes from `sizes` (default 1.0).
+Progress = size-weighted done / (done + remaining), sizes from `sizes` (default 1.0; "S"/"M"/"L" count 1/2/3).
+
+Milestones (`milestones` in state.json, an ordered list of {"id", "name", "issues": [...]}, see `bin/milestone`): one
+line per milestone first (bar, done/total, its ETA = the end of the last stage holding one of its open tickets), then
+the overall line. A ticket also ends no earlier than its open `blockers` (state.json {ticket: [ticket, ...]}) plus its
+own duration, so a milestone never finishes before the tickets it waits on in other milestones; when that pushes a
+date past the stage schedule, a REPLAN line says `stages` is out of step (run `bin/milestone recompute`). Without
+`milestones` the output is the single overall line, as before. Tickets of a milestone missing from `queue`, `inflight`
+and `done` count as queued.
+
+  eta [-v] [--json]      --json: one JSON object (overall + per milestone + replan) instead of the text lines
+ETA_STATE=<file> reads that state instead (a what-if schedule: `bin/milestone add --dry-run`); no history is written.
 """
 import datetime as dt, json, os, re, subprocess, sys
 
@@ -35,11 +46,25 @@ def find_repo():
 
 
 M = find_repo()
-S = json.load(open(os.path.join(M, '.autopilot', 'state.json')))
+S = json.load(open(os.environ.get('ETA_STATE') or os.path.join(M, '.autopilot', 'state.json')))
 sizes, est = S.get('sizes', {}), S.get('est', {})
-size = lambda t: float(sizes.get(t, 1.0))
+SML = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
+
+
+def size(t):
+    v = sizes.get(t, 1.0)
+    if isinstance(v, str) and v.strip().upper() in SML:
+        return SML[v.strip().upper()]
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        sys.exit(f'eta: size of {t} is {v!r}: use a number or S/M/L')
+
+
 inflight, done = S.get('inflight', {}), S.get('done', [])
-queue = [t for i, t in enumerate(S.get('queue', [])) if t not in inflight and t not in done and t not in S.get('queue', [])[:i]]
+milestones = S.get('milestones') or []
+raw_queue = list(S.get('queue', [])) + [t for m in milestones for t in m.get('issues', [])]
+queue = [t for i, t in enumerate(raw_queue) if t not in inflight and t not in done and t not in raw_queue[:i]]
 now = dt.datetime.now(dt.timezone.utc)
 
 # Measured fallback: minutes of wall time per size unit on one lane, over the recent active window.
@@ -85,11 +110,33 @@ if first:
     stages.insert(0, first)
 stages += [[t] for t in queue if t not in seen]
 total, plan = 0.0, []
+item_end = {}  # minutes from now at which each open ticket ends on the stage schedule
 for st in stages:
     d = max(minutes(t) for t in st)
     total += d
     plan.append((st, d))
-end = (now + dt.timedelta(minutes=total)).astimezone()
+    for t in st:
+        item_end.setdefault(t, total)
+# Blockers: a ticket cannot end before its open blockers end plus its own duration (hand-edited stages can disagree).
+blockers = S.get('blockers', {})
+pushed = []
+
+
+def finish(t, seen=()):
+    if t in seen or t not in item_end:
+        return item_end.get(t, 0.0)
+    after = [finish(b, seen + (t,)) for b in blockers.get(t, []) if b in item_end]
+    floor = max(after) + minutes(t) if after else 0.0
+    if floor > item_end[t] + 1:
+        item_end[t] = floor
+        pushed.append(t)
+    return item_end[t]
+
+
+for t in list(item_end):
+    finish(t)
+total_end = max([total] + list(item_end.values()))
+end = (now + dt.timedelta(minutes=total_end)).astimezone()
 
 # Re-plan signals. They print after the ETA line, so `bin/eta | head -1` hides them: run it in full.
 replan = []
@@ -107,7 +154,7 @@ if past:
     if slip > 30:
         replan.append(f"ETA slipped {slip:+.0f} min since {dt.datetime.fromisoformat(ref['at']).astimezone():%H:%M}: "
                       "find what added time, then look for work to start in parallel")
-if not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300:
+if not os.environ.get('ETA_STATE') and (not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300):
     try:
         with open(hist_path, 'a') as f:
             f.write(json.dumps({'at': now.isoformat(), 'end': end.astimezone(dt.timezone.utc).isoformat(),
@@ -120,6 +167,9 @@ for st, _ in plan:
     run = run + [st[0]] if len(st) == 1 else []
     if len(run) > len(worst):
         worst = run
+if pushed:
+    replan.append(f"stages out of step with blockers ({', '.join(sorted(set(pushed))[:5])} end after a later stage): "
+                  "run bin/milestone recompute")
 if len(worst) >= 2:
     replan.append(f"{len(worst)} single-item stages in a row ({' -> '.join(worst)}): "
                   "check each real dependency; move ordering-only items into an earlier stage")
@@ -136,13 +186,57 @@ elif queue and len(inflight) < target:
     replan.append(f"{len(inflight)} in flight, target {target}, {len(queue)} queued: "
                   "start an independent ticket, or the independent part of one")
 
-remaining_units = sum(size(t) * (float(inflight[t].get('remaining', 0.5)) if t in inflight else 1.0)
-                      for st in stages for t in st)
-done_units = sum(size(t) for t in done) + sum(size(t) * (1 - float(inflight[t].get('remaining', 0.5))) for t in inflight)
-pct = done_units / (done_units + remaining_units) if done_units + remaining_units else 1.0
-bar = '█' * round(pct * 30) + '░' * (30 - round(pct * 30))
-print(f"[{bar}] {pct:.0%}  {len(done)} done, {len(inflight)} in flight, {len(queue)} to do  |  "
-      f"ETA {end:%a %H:%M %Z} (±{max(10, round(total * 0.2))} min)")
+
+
+def progress(items):
+    """(pct, done, inflight, todo) over tickets, size-weighted; in-flight tickets count their done part."""
+    d = [t for t in items if t in done]
+    f = [t for t in items if t in inflight]
+    q = [t for t in items if t not in done and t not in inflight]
+    rem = sum(size(t) * float(inflight[t].get('remaining', 0.5)) for t in f) + sum(size(t) for t in q)
+    got = sum(size(t) for t in d) + sum(size(t) * (1 - float(inflight[t].get('remaining', 0.5))) for t in f)
+    return (got / (got + rem) if got + rem else 1.0), d, f, q
+
+
+def bar(pct, width=30):
+    return '█' * round(pct * width) + '░' * (width - round(pct * width))
+
+
+def spread(m):
+    return max(10, round(m * 0.2))
+
+
+rows = []
+if milestones:
+    groups = [(m.get('id') or m.get('name'), m.get('name') or m.get('id'), m.get('linear_id'), list(dict.fromkeys(m.get('issues', []))))
+              for m in milestones]
+    claimed = {t for g in groups for t in g[3]}
+    other = [t for t in list(dict.fromkeys(list(done) + list(inflight) + queue)) if t not in claimed]
+    if other:
+        groups.append(('other', '(no milestone)', None, other))
+    for mid, name, lid, items in groups:
+        pct, d, f, q = progress(items)
+        open_ = [t for t in items if t in item_end]
+        m_end = max([item_end[t] for t in open_] or [0.0])
+        rows.append({'id': mid, 'name': name, 'linear_id': lid, 'pct': round(pct, 4), 'total': len(items), 'done': len(d),
+                     'inflight': len(f), 'todo': len(q), 'status': 'open' if open_ else 'done',
+                     'minutes': round(m_end), 'spread_min': spread(m_end) if open_ else 0,
+                     'end': (now + dt.timedelta(minutes=m_end)).astimezone() if open_ else None})
+pct = progress(list(dict.fromkeys(list(done) + list(inflight) + queue)))[0]
+if '--json' in sys.argv:
+    print(json.dumps({'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
+                      'spread_min': spread(total_end), 'pct': round(pct, 4), 'done': len(done), 'inflight': len(inflight),
+                      'todo': len(queue), 'milestones': [dict(r, end=r['end'] and r['end'].isoformat()) for r in rows],
+                      'replan': replan}, indent=1))
+    sys.exit(0)
+if rows:
+    w = max(len(r['name']) for r in rows)
+    for r in rows:
+        when = f"ETA {r['end']:%a %H:%M %Z} (±{r['spread_min']} min)" if r['end'] else 'done'
+        print(f"{r['name']:<{w}}  [{bar(r['pct'], 20)}] {r['pct']:.0%}  {r['done']}/{r['total']} done, "
+              f"{r['inflight']} in flight  |  {when}")
+print(f"[{bar(pct)}] {pct:.0%}  {len(done)} done, {len(inflight)} in flight, {len(queue)} to do  |  "
+      f"ETA {end:%a %H:%M %Z} (±{spread(total_end)} min)")
 for r in replan:
     print(f"REPLAN: {r}")
 if '-v' in sys.argv:

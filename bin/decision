@@ -110,6 +110,13 @@ def cmd_add(a, repo, path):
     row = '| ' + ' | '.join([f'D-{n}', today, cell(a.change), cell(a.why), cell(a.source), cell(a.by), cell(a.affects), cell(linear)]) + ' |'
     write(path, insert_row(text, row))
     print(f'D-{n}' + ('' if linear != 'pending' else '  (mirror it in Linear, then: decision synced D-%d <url>)' % n))
+    try:
+        has_ms = bool(lib.load_state(repo).get('milestones'))
+    except Exception:
+        has_ms = False
+    if has_ms:  # stderr: stdout stays "D-<n>" for scripts
+        print(f'  tickets added, dropped or moved? update the milestone issues / blockers in state.json, then: '
+              f'bin/milestone recompute && bin/milestone sync --decision D-{n}', file=sys.stderr)
 
 
 def cmd_list(repo, path, only_pending=False):

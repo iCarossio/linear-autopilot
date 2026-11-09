@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""premortem <PLAN.md> --planner <KEY> [--repo DIR] [--k 1] [--exclude-vendor V[,V]] [--exclude KEY[,KEY]] [--allow-mid] [--only-pass 1|2] [--dry-run]
+"""premortem <PLAN.md> --planner <KEY> [--repo DIR] [--k 1] [--exclude-vendor V[,V]] [--exclude KEY[,KEY]] [--allow-mid] [--only-pass 1|2] [--out-dir DIR] [--dry-run]
 
 Adversarial pre-mortem of a project plan by k high-tier models from k different vendors (default k=1: one
 reviewer, outside the planner's vendor), before any Linear ticket exists. Each reviewer is told: "we are at the
@@ -19,6 +19,9 @@ Hard rules (fail closed):
 - reviewers come from the `premortem` and `plan_review` pools only, cost `high` only (--allow-mid adds `mid`), k
   distinct vendors; when fewer are available the run is degraded, never filled with a second model of the same vendor;
 - a reviewer that modified the tree, or whose output does not parse, does not count.
+
+--out-dir DIR writes every file above to DIR instead of <repo>/.autopilot/plan/ (`bin/milestone add` uses it to keep a
+milestone's pre-mortem apart from the project's).
 
 Exit 0 = every reviewer completed both passes; 1 = degraded (fewer reviewers, or a pass-2 missing: the table says
 which); 2 = no usable result. --dry-run prints who would review and exits 0 (k found) or 1.
@@ -75,7 +78,7 @@ if '--dry-run' in args:
     sys.exit(0 if len(pick) >= k else 1)
 if not pick:
     print('NO_REVIEWER: no healthy high-tier model outside the excluded vendors (run-model health / usage; --allow-mid; or wait: run-model wait premortem)'); sys.exit(2)
-out_dir = os.path.join(repo, '.autopilot', 'plan'); os.makedirs(out_dir, exist_ok=True)
+out_dir = os.path.abspath(opt(args, '--out-dir', os.path.join(repo, '.autopilot', 'plan'))); os.makedirs(out_dir, exist_ok=True)
 plan = open(plan_path).read()
 plan_digest = lib.digest_text(plan)
 run_id = lib.now().strftime('%Y%m%dT%H%M%S')

@@ -16,16 +16,21 @@ Needs LINEAR_API_KEY (Settings > API > Personal API keys). No other dependency.
   linear state <IDENTIFIER> "<state name>"          # e.g. "In Progress", "Done"
   linear project-update <PROJECT_ID> "<markdown>"   # project status update (the resume point / summary)
   linear project-content <PROJECT_ID> <file.md>     # replace the project content (e.g. PLAN.md after a logged decision)
+  linear project-milestones <PROJECT_ID>            # milestones of a project: id, target date, name (bin/milestone links them)
 
 tickets.json:
   {"project": {"name": "...", "description": "one paragraph", "content": "markdown body (the plan)"},
    "milestones": [{"name": "M1 ...", "description": "..."}],
    "tickets": [{"slug": "scaffold", "title": "...", "description": "markdown", "milestone": "M1 ...",
                 "estimate": 2, "priority": 2, "blocked_by": ["other-slug"], "labels": ["autopilot"]}]}
+  A `blocked_by` entry that is not a slug of the file but an issue identifier (ENG-12) names an existing issue: the
+  relation is created against it (used by `bin/milestone add` to extend a running project).
+LINEAR_API_URL overrides the endpoint (tests point it at a local fake).
 """
-import json, os, sys, urllib.request, uuid
+import json, os, re, sys, urllib.request, uuid
 
-API = 'https://api.linear.app/graphql'
+API = os.environ.get('LINEAR_API_URL') or 'https://api.linear.app/graphql'
+IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+$')
 
 
 def gql(query, variables=None):
@@ -69,6 +74,51 @@ def issue(identifier):
                'inverseRelations(first:100){nodes{type issue{identifier}}}}}', {'id': identifier})['issue']
 
 
+def project_milestones(project_id):
+    return paginate('query($id:String!,$after:String){project(id:$id){projectMilestones(first:100,after:$after){nodes{id name targetDate} pageInfo{hasNextPage endCursor}}}}',
+                    'project.projectMilestones', {'id': project_id})
+
+
+def set_target_date(milestone_id, date):
+    gql('mutation($id:String!,$i:ProjectMilestoneUpdateInput!){projectMilestoneUpdate(id:$id,input:$i){success}}',
+        {'id': milestone_id, 'i': {'targetDate': date}})
+
+
+def create_milestone(project_id, name, description, cid):
+    """Idempotent on the client id `cid` (checkpoint it before calling): returns the existing milestone if it was created."""
+    try: found = gql('query($id:String!){projectMilestone(id:$id){id}}', {'id': cid})['projectMilestone']
+    except SystemExit: found = None
+    if not found:
+        gql('mutation($i:ProjectMilestoneCreateInput!){projectMilestoneCreate(input:$i){projectMilestone{id}}}',
+            {'i': {'id': cid, 'name': name, 'description': description or '', 'projectId': project_id}})
+    return cid
+
+
+def move_issue(identifier, project_id, milestone_id):
+    i = issue(identifier)
+    gql('mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}',
+        {'id': i['id'], 'i': {'projectId': project_id, 'projectMilestoneId': milestone_id}})
+
+
+def issue_links(identifier):
+    """{'blockers': [identifiers that block it], 'estimate': number or None, 'state': type of its workflow state}."""
+    i = gql('query($id:String!){issue(id:$id){identifier estimate state{type} inverseRelations(first:100){nodes{type issue{identifier}}}}}',
+            {'id': identifier})['issue']
+    return {'blockers': [r['issue']['identifier'] for r in i['inverseRelations']['nodes'] if r['type'] == 'blocks'],
+            'estimate': i.get('estimate'), 'state': (i.get('state') or {}).get('type')}
+
+
+def upsert_project_update(project_id, body, update_id=None):
+    """Edit the project update `update_id` in place, or post a new one. Returns {'id', 'url'}."""
+    if update_id:
+        r = gql('mutation($id:String!,$i:ProjectUpdateUpdateInput!){projectUpdateUpdate(id:$id,input:$i){success projectUpdate{id url}}}',
+                {'id': update_id, 'i': {'body': body}})['projectUpdateUpdate']
+    else:
+        r = gql('mutation($i:ProjectUpdateCreateInput!){projectUpdateCreate(input:$i){success projectUpdate{id url}}}',
+                {'i': {'projectId': project_id, 'body': body}})['projectUpdateCreate']
+    return r['projectUpdate']
+
+
 def cmd_teams(a):
     for t in all_teams(): print(f"{t['id']}  {t['key']:<8} {t['name']}")
 
@@ -107,12 +157,12 @@ def cmd_import(a):
     mnames = {m['name'] for m in spec.get('milestones', [])}
     bad_m = [tk['slug'] for tk in spec['tickets'] if tk.get('milestone') and tk['milestone'] not in mnames]
     if bad_m: sys.exit(f'linear import: tickets with an unknown milestone: {bad_m}')
-    bad_d = [(tk['slug'], b) for tk in spec['tickets'] for b in tk.get('blocked_by', []) if b not in slugs]
+    bad_d = [(tk['slug'], b) for tk in spec['tickets'] for b in tk.get('blocked_by', []) if b not in slugs and not IDENT.match(b)]
     if bad_d: sys.exit(f'linear import: unresolved blocked_by references: {bad_d}')
     t = team(a[a.index('--team') + 1])
     created_path = path.rsplit('.', 1)[0] + '.created.json'
     created = json.load(open(created_path)) if os.path.exists(created_path) else {}
-    for k, v in (('project_id', None), ('milestones', {}), ('tickets', {}), ('relations', []), ('pending', {})):
+    for k, v in (('project_id', None), ('milestones', {}), ('tickets', {}), ('relations', []), ('pending', {}), ('external', {})):
         created.setdefault(k, v)
 
     def persist():
@@ -181,10 +231,14 @@ def cmd_import(a):
             if rel in created['relations']: continue
             print(f"relation {b} blocks {tk['slug']}")
             if dry: continue
+            if b in created['tickets']: blocker = created['tickets'][b]['id']
+            else:  # an existing issue of the project, by identifier
+                if b not in created['external']: created['external'][b] = issue(b)['id']; persist()
+                blocker = created['external'][b]
             cid = reserve('relation', rel)
             if not exists('relation', cid):
                 gql('mutation($i:IssueRelationCreateInput!){issueRelationCreate(input:$i){success}}',
-                    {'i': {'id': cid, 'issueId': created['tickets'][b]['id'], 'relatedIssueId': created['tickets'][tk['slug']]['id'], 'type': 'blocks'}})
+                    {'i': {'id': cid, 'issueId': blocker, 'relatedIssueId': created['tickets'][tk['slug']]['id'], 'type': 'blocks'}})
             created['relations'].append(rel); persist()
     print(json.dumps({'project_id': pid, 'project_url': created.get('project_url'), 'tickets': {s: v['identifier'] for s, v in created['tickets'].items()}}, indent=1))
 
@@ -205,6 +259,10 @@ def cmd_project_update(a):
     gql('mutation($i:ProjectUpdateCreateInput!){projectUpdateCreate(input:$i){success}}', {'i': {'projectId': a[0], 'body': a[1]}}); print('ok')
 
 
+def cmd_project_milestones(a):
+    for m in project_milestones(a[0]): print(f"{m['id']}  {m.get('targetDate') or '-':<10} {m['name']}")
+
+
 def cmd_project_content(a):
     body = open(a[1]).read()
     gql('mutation($id:String!,$i:ProjectUpdateInput!){projectUpdate(id:$id,input:$i){success}}', {'id': a[0], 'i': {'content': body}}); print('ok')
@@ -214,6 +272,6 @@ if __name__ == '__main__':
     a = sys.argv[1:]
     cmds = {'teams': cmd_teams, 'projects': cmd_projects, 'states': cmd_states, 'issues': cmd_issues, 'issue': cmd_issue,
             'import': cmd_import, 'comment': cmd_comment, 'state': cmd_state, 'project-update': cmd_project_update,
-            'project-content': cmd_project_content}
+            'project-content': cmd_project_content, 'project-milestones': cmd_project_milestones}
     if not a or a[0] not in cmds: print(__doc__); sys.exit(1)
     cmds[a[0]](a[1:])

@@ -3,7 +3,7 @@
 # spent, the user's config is never touched (everything happens in a temporary directory). Run: tests/selftest.sh
 set -u
 H="$(cd "$(dirname "$0")/.." && pwd)"
-SCR=$(mktemp -d -t autopilot-selftest); trap 'rm -rf "$SCR"' EXIT
+SCR=$(mktemp -d -t autopilot-selftest); LPID=""; trap '[ -n "$LPID" ] && kill $LPID 2>/dev/null; rm -rf "$SCR"' EXIT
 export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; mkdir -p "$SCR/fake"
 PASS=0; FAIL=0
 check() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok   $1"; else FAIL=$((FAIL+1)); echo "FAIL $1: got '$2' want '$3'"; fi; }
@@ -19,6 +19,7 @@ case "${FAKE_BEHAVIOUR:-approve}" in
   commit) echo "sneaky" >> tracked.txt; git add -A; git -c user.email=r@r -c user.name=r commit -qm "reviewer commit"; echo '```json'; echo '{"verdict":"approve","unmet_criteria":[],"findings":[],"summary":"fine"}'; echo '```';;
   premortem) echo '```json'; echo "{\"verdict\":\"premortem\",\"pass\":1,\"reasons\":[{\"id\":\"r-$MODEL_TAG\",\"title\":\"reason from $MODEL_TAG\",\"probability\":0.7,\"impact\":\"severe\",\"why\":\"w\",\"early_signal\":\"e\",\"guardrail\":\"g\",\"kpi_link\":\"K1\"},{\"id\":\"shared\",\"title\":\"shared reason about deadline\",\"probability\":0.5,\"impact\":\"fatal\",\"why\":\"w\",\"early_signal\":\"e\",\"guardrail\":\"g\",\"kpi_link\":\"K1\"},{\"id\":\"bad\",\"title\":\"bad prob\",\"probability\":\"likely\",\"impact\":\"fatal\"}],\"summary\":\"s\"}"; echo '```';;
   implement) echo "impl" >> tracked.txt; echo "STATUS: done";;
+  auto) case "$2" in *premortem-brief*) FAKE_BEHAVIOUR=premortem MODEL_TAG=m exec "$0" "$@";; *) FAKE_BEHAVIOUR=approve exec "$0" "$@";; esac;;
 esac
 EOF
 chmod +x "$SCR/fake/fakecli"; export PATH="$SCR/fake:$PATH"; export SCR
@@ -275,4 +276,115 @@ check "decision: check fails while pending" "$(D check >/dev/null; echo $?)" "1"
 D synced D-2 https://linear.app/x/issue/ENG-4#comment-1 >/dev/null
 check "decision: check passes once synced" "$(D check >/dev/null; echo $?)" "0"
 check "decision: log sits before Approval" "$(awk '/^## Decision log/{d=NR} /^## Approval/{a=NR} END{print (d && d<a)}' $DR/PLAN.md)" "1"
+# milestones: per-milestone ETA bars, stages recomputed from blockers, a milestone added a posteriori with its
+# pre-mortem, plan review, approval stop, decision, Linear creation (a local fake GraphQL server: no network) and sync.
+MR=$SCR/ms-repo; mkdir -p $MR/.autopilot && (cd $MR && git init -q && cp $H/templates/PLAN.md PLAN.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm init) && echo ".autopilot/" >> $MR/.git/info/exclude
+MB=$(git -C $MR branch --show-current)
+MS() { AUTOPILOT_REPO=$MR ETA_LOAD=0 $H/bin/milestone "$@"; }
+ETA() { AUTOPILOT_REPO=$MR ETA_LOAD=0 $H/bin/eta "$@"; }
+J() { python3 -c "import json,sys; d=json.load(open('$1')); print($2)"; }
+cat > $MR/.autopilot/state.json <<EOF
+{"branch": "$MB", "project": "P", "project_id": "proj-1", "team": "ENG", "coordinator": "fk-a", "per_unit_min": 60,
+ "parallel_target": 0, "queue": ["ENG-1", "ENG-2", "ENG-3", "ENG-4", "ENG-5"], "inflight": {}, "done": [],
+ "sizes": {"ENG-1": "S", "ENG-2": "M", "ENG-3": "L", "ENG-4": 1, "ENG-5": 2},
+ "stages": [["ENG-1", "ENG-2", "ENG-3", "ENG-4", "ENG-5"]]}
+EOF
+check "eta: S/M/L sizes, no milestones -> the single overall line" "$(ETA | grep -v '^REPLAN' | grep -cE '^\[[█░]{30}\] 0%  0 done, 0 in flight, 5 to do  \|  ETA ')" "1"
+check "eta --json: L=3 units x 60 min" "$(ETA --json | python3 -c "import json,sys;print(json.load(sys.stdin)['minutes'])")" "180"
+MS recompute >/dev/null 2>&1; check "recompute refused without blockers (would flatten stages)" "$?" "1"
+python3 - <<EOF
+import json; p='$MR/.autopilot/state.json'; s=json.load(open(p))
+s['milestones'] = [{'id': 'm1', 'name': 'Foundation', 'issues': ['ENG-1', 'ENG-2']}, {'id': 'm2', 'name': 'Core', 'issues': ['ENG-3']},
+                   {'id': 'm3', 'name': 'Polish', 'issues': ['ENG-4', 'ENG-5']}]
+s['blockers'] = {'ENG-2': ['ENG-1'], 'ENG-3': ['ENG-2'], 'ENG-5': ['ENG-3']}
+json.dump(s, open(p, 'w'))
+EOF
+check "eta: hand-edited stages that ignore a blocker are flagged" "$(ETA | grep -c 'REPLAN: stages out of step with blockers')" "1"
+check "eta: a blocker outranks a stage that ignores it (ENG-2 after ENG-1, Polish after Core)" "$(ETA --json | python3 -c "import json,sys;print(*[m['minutes'] for m in json.load(sys.stdin)['milestones']])")" "300 480 600"
+MS recompute >/dev/null
+check "recompute: stages match the hand-computed fixture" "$(J $MR/.autopilot/state.json "json.dumps(d['stages'])")" '[["ENG-1", "ENG-4"], ["ENG-2"], ["ENG-3"], ["ENG-5"]]'
+check "recompute: size-weighted critical path" "$(J $MR/.autopilot/state.json "' '.join(d['critical_path'])")" "ENG-1 ENG-2 ENG-3 ENG-5"
+check "recompute: queue in stage order" "$(J $MR/.autopilot/state.json "' '.join(d['queue'])")" "ENG-1 ENG-4 ENG-2 ENG-3 ENG-5"
+EO=$(ETA)
+check "eta: 3 milestones -> 3 bars then the overall line" "$(echo "$EO" | grep -v '^REPLAN' | cut -c1-10 | tr '\n' '|')" "Foundation|Core      |Polish    |[░░░░░░░░░|"
+check "eta: no out-of-step signal once recomputed" "$(echo "$EO" | grep -c 'out of step')" "0"
+check "eta --json: per-milestone ETAs, cross-milestone dependency" "$(ETA --json | python3 -c "import json,sys;print(*[(m['id'], m['minutes'], m['total']) for m in json.load(sys.stdin)['milestones']])")" "('m1', 180, 2) ('m2', 360, 1) ('m3', 480, 2)"
+# Fake Linear: ENG-1..5 exist, with the same blocks relations as the state.
+python3 - <<EOF
+import json
+iss = [{'id': 'i%d' % n, 'identifier': 'ENG-%d' % n, 'title': 't%d' % n, 'projectId': 'proj-1', 'estimate': 1} for n in range(1, 6)]
+rel = [{'issueId': 'i%d' % a, 'relatedIssueId': 'i%d' % b, 'type': 'blocks'} for a, b in ((1, 2), (2, 3), (3, 5))]
+json.dump({'team': 'ENG', 'project_id': 'proj-1', 'milestones': [{'id': 'lm1', 'name': 'Foundation', 'projectId': 'proj-1', 'targetDate': None}],
+           'issues': iss, 'relations': rel, 'updates': []}, open('$SCR/linear.json', 'w'))
+EOF
+python3 $H/tests/fake_linear.py $SCR/linear.json $SCR/linear.port & LPID=$!
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -s $SCR/linear.port ] && break; sleep 0.3; done
+export LINEAR_API_URL=http://127.0.0.1:$(cat $SCR/linear.port)/graphql LINEAR_API_KEY=fake-key
+NCALLS() { [ -f $SCR/linear.json.log ] && grep -c "${1:-.}" $SCR/linear.json.log || echo 0; }
+python3 -c "import json;p='$MR/.autopilot/state.json';s=json.load(open(p));s.pop('blockers');s['stages']=[];s['milestones'][0]['linear_id']='lm1';json.dump(s,open(p,'w'))"
+MS recompute --from-linear >/dev/null
+check "recompute --from-linear: blockers reloaded, same stages" "$(J $MR/.autopilot/state.json "json.dumps(d['stages'])")" '[["ENG-1", "ENG-4"], ["ENG-2"], ["ENG-3"], ["ENG-5"]]'
+# milestone add: validation, dry run, approval stop, then the approved run.
+cat > $SCR/ext.json <<'EOF'
+{"id": "ext", "name": "Extension", "description": "Adds the API and its UI.", "why": "the owner extends the project",
+ "kpis": [{"id": "X1", "kpi": "API answers", "target": "200 on /health", "measure": "curl -f localhost:8000/health"}],
+ "tickets": [{"slug": "api", "title": "API", "estimate": "M", "blocked_by": ["ENG-3"]},
+             {"slug": "ui", "title": "UI", "estimate": 1, "blocked_by": ["api", "ENG-4"]}]}
+EOF
+BAD() { python3 -c "import json;s=json.load(open('$SCR/ext.json'));$1;json.dump(s,open('$SCR/bad.json','w'))"; MS add $SCR/bad.json --dry-run 2>&1 | grep -c "$2"; }
+check "add: unknown dependency refused" "$(BAD "s['tickets'][0]['blocked_by']=['ENG-99']" "INVALID: api: blocked_by 'ENG-99'")" "1"
+check "add: cycle refused" "$(BAD "s['tickets'][0]['blocked_by']=['ui']" 'INVALID: dependency cycle')" "1"
+check "add: duplicate slug refused" "$(BAD "s['tickets'][1]['slug']='api'" 'INVALID: duplicate slugs')" "1"
+check "add: a KPI without measurement refused" "$(BAD "s['kpis'][0]['measure']=''" 'INVALID: KPI X1 lacks measure')" "1"
+DRY=$(MS add $SCR/ext.json --dry-run); RC=$?
+check "add --dry-run: valid, exit 0" "$RC" "0"
+check "add --dry-run: new tickets scheduled after their blockers" "$(echo "$DRY" | grep -E '^  stage (4|5):' | tr '\n' '|')" "  stage 4: ENG-5, +api|  stage 5: +ui|"
+check "add --dry-run: ETA bar for the new milestone" "$(echo "$DRY" | grep -c '^  Extension  *\[░*\]   0%  0/2 done  |  ETA ')" "1"
+check "add --dry-run: no external call, nothing written" "$(NCALLS) $([ -d $MR/.autopilot/plan/milestones ] && echo dir || echo none)" "0 none"
+OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/ext.json --review-k 1 2>&1); RC=$?
+check "add: pre-mortem + plan review, then stops for approval (exit 3)" "$RC" "3"
+check "add: findings printed for approval" "$(echo "$OUT" | grep -cE '^(NEEDS APPROVAL|--- premortem: .*premortem.md|--- review: .*plan-review.md)')" "3"
+check "add: milestone pre-mortem kept apart from the project's" "$(ls $MR/.autopilot/plan/milestones/ext/ | grep -cE '^(premortem.md|premortem.json|plan-review.md)$') $([ -e $MR/.autopilot/plan/premortem.md ] && echo leak || echo apart)" "3 apart"
+check "add: pre-mortem scoped to the milestone, plan as context" "$(grep -c '^# Existing plan (context)' $MR/.autopilot/plan/milestones/ext/premortem-input.md)" "1"
+check "add: nothing applied before approval" "$(NCALLS) $(J $MR/.autopilot/state.json "len(d['milestones'])")" "0 3"
+OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/ext.json --review-k 1 2>&1); check "add: rerun without --approved still stops (no review rerun)" "$? $(echo "$OUT" | grep -c 'pre-mortem of milestone')" "3 0"
+OUT=$(MS add $SCR/ext.json --approved --by owner --source 'user:"ship it"' 2>&1); RC=$?
+check "add --approved: applied" "$RC" "0"
+check "add: Linear milestone, 2 issues, 3 relations (2 on existing issues)" "$(NCALLS projectMilestoneCreate) $(NCALLS issueCreate) $(NCALLS issueRelationCreate)" "1 2 3"
+check "add: issues assigned to the Linear milestone" "$(J $SCR/linear.json "sorted(i['identifier'] for i in d['issues'] if i.get('projectMilestoneId') == [m for m in d['milestones'] if m['name'] == 'Extension'][0]['id'])")" "['ENG-6', 'ENG-7']"
+check "add: state milestones, blockers, recomputed stages" "$(J $MR/.autopilot/state.json "' '.join(m['id'] for m in d['milestones']) + ' ' + json.dumps(d['blockers']['ENG-7']) + ' ' + json.dumps(d['stages'][-2:])")" 'm1 m2 m3 ext ["ENG-6", "ENG-4"] [["ENG-5", "ENG-6"], ["ENG-7"]]'
+check "add: milestone section appended in the Milestones section of PLAN.md" "$(awk '/<!-- milestone:ext -->/{m=NR} /^## Milestones/{s=NR} /^## Pre-mortem/{p=NR} END{print (s<m && m<p)}' $MR/PLAN.md) $(grep -c '| ui | ENG-7 | UI | 1 | ENG-6, ENG-4 |' $MR/PLAN.md)" "1 1"
+check "add: decision logged and mirrored (decision check passes)" "$(AUTOPILOT_REPO=$MR $H/bin/decision list | grep -c 'milestone Extension added: 2 tickets  <- user:"ship it"') $(AUTOPILOT_REPO=$MR $H/bin/decision check >/dev/null; echo $?)" "1 0"
+check "add: Linear target dates and one project update with every bar" "$(J $SCR/linear.json "sum(1 for m in d['milestones'] if m['targetDate'])") $(J $SCR/linear.json "len(d['updates'])") $(J $SCR/linear.json "d['updates'][0]['body'].count('done  |'), d['updates'][0]['body'].count('Overall')")" "2 1 4 1"
+check "add: PLAN.md pushed as project content" "$(J $SCR/linear.json "'milestone:ext' in (d.get('content') or '')")" "True"
+N=$(NCALLS)
+OUT=$(MS add $SCR/ext.json --approved --by owner --source 'user:"ship it"' 2>&1); RC=$?
+check "add: rerun after completion is a no-op" "$RC $(echo "$OUT" | grep -c 'already added') $(NCALLS)" "0 1 $N"
+AUTOPILOT_REPO=$MR $H/bin/linear import $MR/.autopilot/plan/milestones/ext/tickets.json --team ENG --project-id proj-1 >/dev/null
+check "linear import: rerun on the checkpoint creates nothing" "$(NCALLS projectMilestoneCreate) $(NCALLS issueCreate) $(NCALLS issueRelationCreate)" "1 2 3"
+MS sync >/dev/null
+check "sync: edits the recent project update instead of posting another" "$(NCALLS projectUpdateUpdate) $(J $SCR/linear.json "len(d['updates'])")" "1 1"
+cat > $SCR/ext2.json <<'EOF'
+{"name": "Docs", "description": "Docs.", "kpis": [{"kpi": "docs build", "target": "0 warnings", "measure": "mkdocs build --strict"}],
+ "tickets": [{"slug": "docs", "title": "Docs", "estimate": "S", "blocked_by": ["ui"]}]}
+EOF
+MS add $SCR/ext2.json --skip-premortem "" >/dev/null 2>&1; check "add: a skip without its reason is refused" "$?" "1"
+OUT=$(MS add $SCR/ext2.json --skip-premortem "one docs ticket" --skip-review "one docs ticket" --approved --by owner --source 'user:"docs too"' 2>&1); RC=$?
+check "add: logged skips, blocker by slug of an earlier milestone" "$RC $(J $MR/.autopilot/state.json "d['blockers']['ENG-8']") $(grep -c 'premortem skipped: one docs ticket' $MR/PLAN.md)" "0 ['ENG-7'] 1"
+python3 -c "import json;p='$SCR/linear.json';s=json.load(open(p));s['issues'].append({'id':'i60','identifier':'ENG-60','title':'orphan','projectId':'proj-1'});json.dump(s,open(p,'w'))"
+AUTOPILOT_REPO=$MR $H/bin/state push queue '"ENG-60"' >/dev/null
+MS adopt --id dup --name Dup --issues ENG-1 --by owner --source 'user:"x"' >/dev/null 2>&1; check "adopt: a ticket of another milestone refused" "$?" "1"
+MS adopt --id later --name Later --issues ENG-60 --create-linear --by owner --source 'user:"group it"' >/dev/null
+check "adopt --create-linear: milestone created, issue moved, state updated" "$(NCALLS projectMilestoneCreate) $(J $SCR/linear.json "[i for i in d['issues'] if i['identifier']=='ENG-60'][0].get('projectMilestoneId') is not None") $(J $MR/.autopilot/state.json "d['milestones'][-1]['issues']")" "3 True ['ENG-60']"
+SD=$SCR/seed-repo; mkdir -p $SD/.autopilot/plan && echo '{"branch": "x", "queue": [], "done": []}' > $SD/.autopilot/state.json
+cat > $SD/.autopilot/plan/tickets.json <<'EOF'
+{"project": {"name": "P"}, "milestones": [{"name": "M1 Base"}, {"name": "M2 More"}],
+ "tickets": [{"slug": "a", "title": "A", "milestone": "M1 Base", "estimate": 1},
+             {"slug": "b", "title": "B", "milestone": "M2 More", "estimate": "L", "blocked_by": ["a"]},
+             {"slug": "c", "title": "C", "milestone": "M1 Base", "estimate": 2}]}
+EOF
+echo '{"milestones": {"M1 Base": "l1", "M2 More": "l2"}, "tickets": {"a": {"identifier": "E-1"}, "b": {"identifier": "E-2"}, "c": {"identifier": "E-3"}}}' > $SD/.autopilot/plan/tickets.created.json
+AUTOPILOT_REPO=$SD $H/bin/milestone seed $SD/.autopilot/plan/tickets.json >/dev/null
+check "seed: milestones from tickets.json, stages from blocked_by" "$(J $SD/.autopilot/state.json "[(m['id'], m['linear_id'], m['issues']) for m in d['milestones']], d['stages'], d['critical_path']")" "[('m1-base', 'l1', ['E-1', 'E-3']), ('m2-more', 'l2', ['E-2'])] [['E-1', 'E-3'], ['E-2']] ['E-1', 'E-2']"
+AUTOPILOT_REPO=$SD $H/bin/milestone seed $SD/.autopilot/plan/tickets.json >/dev/null 2>&1; check "seed: refused once milestones exist" "$?" "1"
 echo "=== $PASS passed, $FAIL failed"
