@@ -9,6 +9,14 @@ You are the **master planner**. The user is present for this phase: ask what you
 
 `bin/<x>` below means the `bin` directory next to this SKILL.md (`~/.claude/skills/autopilot-plan/bin/<x>` after `install.sh`, `${CLAUDE_PLUGIN_ROOT}/skills/autopilot-plan/bin/<x>` as a plugin); templates are in `templates/` of the same repo. The roster comes from `/autopilot-init` (`~/.config/linear-autopilot/models.json`).
 
+| Script | Role |
+|---|---|
+| `bin/premortem` | `premortem <PLAN.md> --planner <key>`: pre-mortem by a high-tier model of another vendor, two passes, `.autopilot/plan/premortem.md`. `--out-dir` for a milestone's own. |
+| `bin/decision` | `decision add|list|check|synced`: the sourced Decision log in `PLAN.md`. |
+| `bin/linear` | `linear import <tickets.json> --team KEY`: project, milestones, issues, relations; idempotent checkpoint. |
+| `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later: pre-mortem, plan review, approval, decision, Linear, PLAN.md, state), `recompute`, `sync` (milestone target dates + bars in a project update), `list`. |
+| `bin/eta` | One progress bar + ETA per milestone, then overall; `--json`. |
+
 ## Every change of plan is sourced
 
 From the first draft of `PLAN.md` on, any change to it is a decision: a KPI, scope or non-goal edited, a ticket added, split, merged, dropped or reordered, an architecture choice reversed, a guardrail or rule added or rejected, an open human decision settled. Whatever causes it (an answer to one of your questions, a pre-mortem reason, a reviewer, your own re-reading of the repo), record it before or together with the edit, never later:
@@ -38,7 +46,8 @@ Before writing, read the repository: conventions, existing checks, generators, d
 
 Then write `PLAN.md` with:
 - Goal, KPIs, non-goals, constraints, architecture decisions (with the rejected alternatives).
-- Milestones and tickets: slug, title, size (S/M/L), blocked-by, checks, guardrails. One ticket is one commit when reasonable (one concern, under ~400 changed lines); split otherwise, group tiny ones. Include the tickets nobody likes to write: scaffold and checks, test data sampled from real inputs, integration after parallel work, docs merge, final QA.
+- Major milestones, in order: one or several from the start, each a shippable outcome with its own KPIs or acceptance (measurable, like the project KPIs) in its section of `PLAN.md`. Each becomes a Linear milestone with its own progress bar and ETA. Blockers may cross milestones.
+- Tickets per milestone: slug, title, size (S/M/L), blocked-by, checks, guardrails. One ticket is one commit when reasonable (one concern, under ~400 changed lines); split otherwise, group tiny ones. Include the tickets nobody likes to write: scaffold and checks, test data sampled from real inputs, integration after parallel work, docs merge, final QA.
 - Rules for implementers and reviewers (forbidden shortcuts, required tests).
 - Open human decisions with a safe default each.
 
@@ -72,7 +81,7 @@ Show the updated plan (goal, KPIs, ticket table, pre-mortem table, open decision
 
 ## 6. Ticket breakdown file
 
-Write `.autopilot/plan/tickets.json` (format in `bin/linear --help`): project name, description (one paragraph) and content (the whole `PLAN.md`), milestones, and every ticket with slug, title, markdown description, milestone, estimate (S=1, M=2, L=3, or the team's scale), priority, `blocked_by` slugs and labels. Each ticket description carries: precise instructions, `CHECKS:` line, `**Acceptance**`, the guardrails that apply (with their PM ids), what not to touch, and the notes it builds on. The run skill rewrites them into ticket files, so write them as instructions for a cheap implementer, not as user stories.
+Write `.autopilot/plan/tickets.json` (format in `bin/linear --help`): project name, description (one paragraph) and content (the whole `PLAN.md`), milestones (name, `id` slug, description with its KPIs), and every ticket with slug, title, markdown description, milestone, estimate (S=1, M=2, L=3, or the team's scale), priority, `blocked_by` slugs and labels. Each ticket description carries: precise instructions, `CHECKS:` line, `**Acceptance**`, the guardrails that apply (with their PM ids), what not to touch, and the notes it builds on. The run skill rewrites them into ticket files, so write them as instructions for a cheap implementer, not as user stories.
 
 ## 7. Create the Linear project
 
@@ -86,8 +95,17 @@ From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the p
 ## 8. Handoff
 
 - Commit `PLAN.md` on a branch `autopilot/<project-slug>` if the user agrees (ask; the user is here). Add `.autopilot/` to `.git/info/exclude`.
-- Seed `<repo>/.autopilot/state.json` from `templates/state.json`: project, project id, team, branch, push, checks, `critical_path` (the longest chain of `blocked_by`), `queue` in milestone order, `sizes`, `stages`.
+- Seed `<repo>/.autopilot/state.json` from `templates/state.json`: project, project id, team, branch, push, checks, coordinator. Then `bin/milestone seed .autopilot/plan/tickets.json`: `milestones`, `blockers`, `sizes`, `queue`, `stages` and `critical_path` from the plan (with MCP tools, write `tickets.created.json` in the same format first). Then `bin/milestone sync`: target dates and the first milestone bars in Linear.
 - Tell the user, in a few lines: the Linear project link, the number of tickets and milestones, the top three failure reasons and their guardrails, and that `/autopilot-run` will execute it.
+
+## Extending a project (a milestone added later)
+
+Adding a major milestone to a running project is normal. It gets the same adversarial treatment as the first plan, scoped to the delta, through `bin/milestone add` (never by hand-editing state, `PLAN.md` or Linear):
+1. Write the spec (`bin/milestone --help`): name, description, KPIs with target and measurement, the plan text, tickets in `tickets.json` format; `blocked_by` may name existing issues (`ENG-12`) or slugs of earlier milestones.
+2. `bin/milestone add <spec> --dry-run`: validation, then the stages and every milestone's ETA with it. No external call.
+3. `bin/milestone add <spec>` (under `bin/bgrun`: the pre-mortem takes 10-40 min): pre-mortem of the delta (existing `PLAN.md` as context) into `.autopilot/plan/milestones/<id>/premortem.md`, then the plan review (`POOL=plan_review`). Exit 3: show both to the owner verbatim, as in step 3; fold each accepted reason into the spec as in step 4.
+4. `bin/milestone add <spec> --approved --by <owner> --source user:"<their approval>"`: Decision log, Linear milestone + issues + relations, the section appended to `PLAN.md`, state and stages recomputed, bars synced to Linear. Rerun the same command after any failure: it resumes.
+A step is skipped only with `--skip-premortem "<why>"` / `--skip-review "<why>"`, written into the decision; only with the owner's consent.
 
 ## Rules
 

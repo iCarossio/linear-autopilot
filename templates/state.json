@@ -9,6 +9,8 @@
   "checks": [],
   "context_files": ["AGENTS.md", "PLAN.md"],
   "coordinator": "claude-opus",
+  "milestones": [],
+  "blockers": {},
   "critical_path": [],
   "queue": [],
   "stages": [],

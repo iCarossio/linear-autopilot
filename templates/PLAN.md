@@ -24,12 +24,30 @@ Each KPI is measurable at the deadline with the command or number in the "How me
 - <decision, alternative rejected, why>
 
 ## Milestones and tickets
-<For each milestone: tickets in order, each with size S/M/L, what it blocks, and its checks. A ticket is one commit when reasonable (< ~400 changed lines, one concern).>
+<One or more major milestones, in order. Each is a shippable outcome with its own KPIs or acceptance (measurable like
+the project KPIs), its own Linear milestone and its own progress bar and ETA (`bin/eta`). Tickets: size S/M/L, what
+blocks them (blockers may cross milestones), checks. A ticket is one commit when reasonable (< ~400 changed lines, one
+concern). A milestone added later goes through `bin/milestone add`, which appends its section here.>
 
 ### M1 <name>
+<What exists when this milestone is done, for whom.>
+
+| # | KPI / acceptance | Target | How measured |
+|---|---|---|---|
+| M1-K1 | <e.g. the thin loop runs end to end> | <1 run green> | `make e2e` -> exit 0 |
+
 | slug | title | size | blocked by | checks | guardrails |
 |---|---|---|---|---|---|
 | scaffold | ... | M | - | `npm test` | PM-3 |
+
+### M2 <name>
+| # | KPI / acceptance | Target | How measured |
+|---|---|---|---|
+| M2-K1 | ... | ... | ... |
+
+| slug | title | size | blocked by | checks | guardrails |
+|---|---|---|---|---|---|
+| api | ... | L | scaffold | `npm test` | PM-1 |
 
 ## Pre-mortem: most probable failure reasons and their guardrails
 <Filled from .autopilot/plan/premortem.md after the adversarial review. Every reason kept has a guardrail with a home: a KPI, a check, a ticket, or a rule in this plan.>
