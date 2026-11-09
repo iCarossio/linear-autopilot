@@ -13,7 +13,8 @@ An idea is not work: no pre-mortem, no review, not in `queue`, `stages` or `mile
                                          existing issues (ideas collected before this command) moved into the Ideas
                                          milestone, label `idea`, state Backlog
   idea promote ENG-1[,ENG-2...] --id <milestone-id> --name "<name>" [--force]
-                                         writes the `bin/milestone add` spec skeleton .autopilot/plan/specs/<id>.json
+                                         writes the `bin/milestone add` spec skeleton
+                                         .autopilot/plan/milestones/<id>/spec.json (where /autopilot-milestone keeps it)
 
 add, in order, each step checkpointed in .autopilot/ideas/created.json (a rerun with the same title resumes and never
 creates a second issue):
@@ -326,7 +327,7 @@ def cmd_promote(a):
     unknown = [t for t in issues if t not in ideas]
     if not issues or unknown: die(f'{unknown or "no issues"}: not ideas of this project (bin/idea list)')
     if not re.match(r'^[a-z0-9][a-z0-9-]*$', a.id): die(f'--id {a.id!r} must be a lowercase slug')
-    out = os.path.join(repo, '.autopilot', 'plan', 'specs', f'{a.id}.json')
+    out = os.path.join(repo, '.autopilot', 'plan', 'milestones', a.id, 'spec.json')
     if os.path.exists(out) and not a.force: die(f'{out} exists (the planner may have edited it): --force to overwrite')
     lin = linear(repo)
     tickets, quotes = [], []
@@ -347,7 +348,8 @@ def cmd_promote(a):
             'tickets': tickets, 'from_ideas': issues}
     os.makedirs(os.path.dirname(out), exist_ok=True); lib.write_json_atomic(out, spec)
     print(out)
-    print(f'Next: fill every {TODO} (KPIs with target and measurement, plan, tickets; keep "from_ideas"), then\n'
+    print(f'Next: /autopilot-milestone on this spec: fill every {TODO} with the owner (KPIs with target and measurement, '
+          'plan, tickets; keep "from_ideas"), then\n'
           f'  bin/milestone add {out} --dry-run\n'
           f'  bin/milestone add {out}          # pre-mortem + plan review, stops for approval (exit 3)\n'
           f'  bin/milestone add {out} --approved --by <owner> --source user:"<their approval>"\n'

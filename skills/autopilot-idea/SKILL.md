@@ -12,7 +12,7 @@ An idea is not work. Capture it immediately, exactly as the owner said it, and g
 | Script | Role |
 |---|---|
 | `bin/idea` | `add "<title>" --words "<verbatim>" [--note] [--related ENG-1,...]`: the Ideas milestone and `idea` label (created if missing), one Backlog issue, PLAN.md backlog row, decision, project content. Idempotent per title. `list [--json]`, `adopt ENG-1,...`, `promote ENG-1,... --id --name`. |
-| `bin/milestone` | `add <spec>`: the promoted spec goes through pre-mortem, plan review and approval; on approval the promoted ideas are closed as duplicates of the new tickets. |
+| `bin/milestone` | `add <spec>` (driven by `/autopilot-milestone`): the promoted spec goes through pre-mortem, plan review and approval; on approval the promoted ideas are closed as duplicates of the new tickets. |
 
 ## Capture (`/autopilot-idea ...`, "idea: ...", "add an idea")
 
@@ -37,7 +37,7 @@ A rerun with the same title prints `already captured` and creates nothing. A fai
 
 - `bin/idea list [--json]`: identifier, state, title, related ideas, read from Linear.
 - `bin/idea adopt ENG-1,ENG-2 --source user:"<words>"`: for ideas collected before this skill existed (an `idea` label, no milestone): moves them into the Ideas milestone, adds the label, sets Backlog, adds their backlog rows, logs one decision. Refuses scheduled work (a ticket of a milestone, queued, in flight or done).
-- `bin/idea promote ENG-1[,ENG-2] --id <slug> --name "<milestone name>"`: when the owner schedules one or several ideas. Writes the `bin/milestone add` spec skeleton `.autopilot/plan/specs/<id>.json`: the ideas quoted in the description, one placeholder ticket per idea (`from_idea`), KPIs, plan and ticket instructions marked TODO, `from_ideas`. Then follow `/autopilot-plan`, "Extending a project": fill every TODO with the owner (measurable KPIs: the intake gate applies), `bin/milestone add <spec> --dry-run`, `bin/milestone add <spec>` (pre-mortem + plan review, exit 3), `--approved --by <owner> --source user:"..."`. The real add refuses a spec that still has a TODO. On approval each promoted idea gets a comment, a duplicate relation to its new ticket, the Duplicate (else Canceled) state, a struck-through backlog row, and leaves `ideas.issues`.
+- `bin/idea promote ENG-1[,ENG-2] --id <slug> --name "<milestone name>"`: when the owner schedules one or several ideas. Writes the `bin/milestone add` spec skeleton `.autopilot/plan/milestones/<id>/spec.json`: the ideas quoted in the description, one placeholder ticket per idea (`from_idea`), KPIs, plan and ticket instructions marked TODO, `from_ideas`. Then run `/autopilot-milestone` on that spec: its intake gate fills every TODO with the owner (measurable KPIs), then `--dry-run`, pre-mortem + plan review (exit 3), findings folded, `--approved --by <owner> --source user:"..."`. The real add refuses a spec that still has a TODO. On approval each promoted idea gets a comment, a duplicate relation to its new ticket, the Duplicate (else Canceled) state, a struck-through backlog row, and leaves `ideas.issues`.
 
 ## Rules
 

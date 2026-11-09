@@ -31,7 +31,7 @@ add: extends a running project with a milestone, in this order, never skipping a
   f. Linear: the projectMilestone, the issues and the blocks relations in the existing project (`bin/linear import`,
      checkpointed in .../tickets.created.json: a rerun never duplicates);
   g. the milestone section appended to PLAN.md, state.json updated (milestones, blockers, sizes, then recompute);
-  g2. a spec with "from_ideas" (written by `bin/idea promote`): each idea is commented, linked as a duplicate of its
+  g2. a spec with "from_ideas" (the skeleton `bin/idea promote` writes into .../milestones/<id>/spec.json): each idea is commented, linked as a duplicate of its
      new ticket (the tickets carrying its "from_idea", else the first ticket), moved to the Duplicate (else Canceled)
      state, struck through in the PLAN.md idea backlog and removed from state.json `ideas.issues`;
   h. `sync` with the decision, PLAN.md pushed as project content, the decision marked synced.

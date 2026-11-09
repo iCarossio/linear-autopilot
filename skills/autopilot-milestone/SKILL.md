@@ -42,6 +42,8 @@ Read the code the milestone touches before writing (conventions, existing checks
 - `blocked_by`: real dependencies only, on new slugs or existing issues (`ENG-12`). An ordering-only dependency on a current milestone is not a blocker: say it in `plan`.
 - Latest stable technologies for anything new, verified on this machine, as in `/autopilot-plan` step 1; existing dependencies keep their versions.
 
+Starting from parked ideas (`/autopilot-idea`): `bin/idea promote <ENG-1,...> --id <id> --name "<name>"` writes this spec as a skeleton (the ideas quoted, one placeholder ticket per idea, KPIs, plan and ticket instructions marked TODO, `from_ideas`). The intake gate of step 1 still applies: fill every TODO (the real add refuses one); keep `from_ideas` and each ticket's `from_idea`, so the approval closes those ideas as duplicates of their new tickets.
+
 Then `bin/milestone add <spec> --dry-run`: fix every validation error, and show the user the stages and the ETA of every milestone with this one added. If it pushes an existing milestone's ETA, say so now.
 
 ## 3. Adversarial review (pre-mortem + plan review)
