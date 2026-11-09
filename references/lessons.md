@@ -115,3 +115,7 @@ To run a fix round beside a long proof, the coordinator symlinked the proof work
 ## A fallback implementer stops on its predecessor's partial work (2026-11-08)
 
 `claude-sonnet` timed out after 80 minutes of correct partial work in a round whose brief demanded a clean site tree. `run-model` fell back to `codex-terra-c`, which saw the dirty tree, followed the brief literally and returned `STATUS: blocked` in 21 seconds. The round looked like a blocker but was an interruption. Fix candidate: when `run-model` falls back after a timeout or idle kill in the same worktree, prepend to the brief "a previous attempt in this round was interrupted: the uncommitted changes are its partial work; verify and continue". Until then, read `tried` in the JSON line before treating a short `blocked` as real, and write clean-tree rules as "sync-managed files" rather than "the whole tree".
+
+## docker-reap removed another run's running container
+
+On 2026-11-08 the reaper removed `purple-postgres`, a running database of another autopilot run on the same machine: it was older than 2 h and no process referenced it by name (compose-managed containers are referenced by no process). "No owning process" does not mean "dead" for a running service container. Fix to make: reap only exited or never-started containers by default, or only containers whose name or compose project matches the current project; until then pass `--keep` with every other project's prefix.
