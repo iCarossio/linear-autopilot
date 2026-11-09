@@ -2,12 +2,13 @@
 
 Plan a software project adversarially, create it in Linear, then let cheap models implement it ticket by ticket, reviewed by other models, unattended, on the AI coding CLIs you already pay for.
 
-Four skills for Claude Code (or any harness that reads `~/.claude/skills`):
+Five skills for Claude Code (or any harness that reads `~/.claude/skills`):
 
 | Skill | When | What it does |
 |---|---|---|
 | `/autopilot-init` | once per machine | finds your CLIs (Codex, Claude Code, opencode, Grok, ...), their accounts and quotas; builds the model roster |
 | `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by one high-tier model of another vendor, guardrails, then the Linear project with all tickets |
+| `/autopilot-milestone` | when the project grows | a new major milestone for an existing project: its KPIs, a pre-mortem and plan review of the delta, your approval, then the Linear milestone, tickets and ETA bar |
 | `/autopilot-run` | per project, for hours | one ticket at a time: plan review, cheap implementation, two-vendor review, one commit, Linear updated; one progress bar and ETA per major milestone, mirrored on the Linear milestones |
 | `/autopilot-usage` | any time | what quota is left on every CLI and account, which pools can run now, and how many tokens went through every harness and account (per day, month, year; terminal chart or HTML page) |
 
@@ -38,7 +39,7 @@ Any other CLI with a non-interactive mode is added with `bin/harness new` (see `
 6. **Subscriptions and free tiers only.** Several logins of one CLI are several quotas. The runtime waits for a reset; it never buys credits.
 7. **One account standard.** Homes are `<default>`, `<default>-b`, `<default>-c` (`~/.codex`, `~/.codex-b`, `~/.codex-c`); roster keys are `<key>`, `<key>-b`, `<key>-c`. Same for every harness.
 8. **The coordinator only orchestrates.** It never implements or reviews, so its own budget lasts the night. State lives on disk and in Linear; a new session resumes from there.
-9. **Milestones grow with the project.** A project has one or more major milestones, each with its KPIs, its Linear milestone and its own ETA bar. Adding one later is normal and goes through the same pre-mortem and plan review, scoped to the delta, before anything is created (`bin/milestone add`).
+9. **Milestones grow with the project.** A project has one or more major milestones, each with its KPIs, its Linear milestone and its own ETA bar. Adding one later is normal and goes through the same pre-mortem and plan review, scoped to the delta, before anything is created (`/autopilot-milestone`, on top of `bin/milestone add`).
 10. **About one ticket per commit.** Small tickets, parallel worktrees, cherry-picked onto one project branch, nothing merged into the default branch without you.
 11. **Nothing personal in the repo.** Accounts, cooldowns and overrides live in `~/.config/linear-autopilot/`; project state in `<repo>/.autopilot/`.
 
@@ -53,7 +54,7 @@ Then run `/autopilot-init` in your harness. Requirements: Python 3.9+, git, and 
 ## Layout
 
 ```
-skills/      the four SKILL.md files
+skills/      the five SKILL.md files
 bin/         shared runtime (run-model, review, premortem, decision, milestone, eta, harness, linear, state, tokens, ...)
 harnesses/   one JSON adapter per CLI: how to call it, where its accounts live, how to read its usage
 prompts/     briefs for implementers, reviewers and the pre-mortem

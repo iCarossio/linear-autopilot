@@ -14,7 +14,7 @@ You are the **master planner**. The user is present for this phase: ask what you
 | `bin/premortem` | `premortem <PLAN.md> --planner <key>`: pre-mortem by a high-tier model of another vendor, two passes, `.autopilot/plan/premortem.md`. `--out-dir` for a milestone's own. |
 | `bin/decision` | `decision add|list|check|synced`: the sourced Decision log in `PLAN.md`. |
 | `bin/linear` | `linear import <tickets.json> --team KEY`: project, milestones, issues, relations; idempotent checkpoint. |
-| `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later: pre-mortem, plan review, approval, decision, Linear, PLAN.md, state), `recompute`, `sync` (milestone target dates + bars in a project update), `list`. |
+| `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later, driven by `/autopilot-milestone`), `recompute`, `sync` (milestone target dates + bars in a project update), `list`. |
 | `bin/eta` | One progress bar + ETA per milestone, then overall; `--json`. |
 
 ## Every change of plan is sourced
@@ -100,12 +100,7 @@ From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the p
 
 ## Extending a project (a milestone added later)
 
-Adding a major milestone to a running project is normal. It gets the same adversarial treatment as the first plan, scoped to the delta, through `bin/milestone add` (never by hand-editing state, `PLAN.md` or Linear):
-1. Write the spec (`bin/milestone --help`): name, description, KPIs with target and measurement, the plan text, tickets in `tickets.json` format; `blocked_by` may name existing issues (`ENG-12`) or slugs of earlier milestones.
-2. `bin/milestone add <spec> --dry-run`: validation, then the stages and every milestone's ETA with it. No external call.
-3. `bin/milestone add <spec>` (under `bin/bgrun`: the pre-mortem takes 10-40 min): pre-mortem of the delta (existing `PLAN.md` as context) into `.autopilot/plan/milestones/<id>/premortem.md`, then the plan review (`POOL=plan_review`). Exit 3: show both to the owner verbatim, as in step 3; fold each accepted reason into the spec as in step 4.
-4. `bin/milestone add <spec> --approved --by <owner> --source user:"<their approval>"`: Decision log, Linear milestone + issues + relations, the section appended to `PLAN.md`, state and stages recomputed, bars synced to Linear. Rerun the same command after any failure: it resumes.
-A step is skipped only with `--skip-premortem "<why>"` / `--skip-review "<why>"`, written into the decision; only with the owner's consent.
+Adding a major milestone to a project that already exists is `/autopilot-milestone`: the same intake gate, pre-mortem, plan review and approval, scoped to the new milestone, through `bin/milestone add`. Never hand-edit state, `PLAN.md` or Linear for it.
 
 ## Rules
 
