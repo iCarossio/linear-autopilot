@@ -16,6 +16,7 @@ You are the **master planner**. The user is present for this phase: ask what you
 | `bin/linear` | `linear import <tickets.json> --team KEY`: project, milestones, issues, relations; idempotent checkpoint. |
 | `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later, driven by `/autopilot-milestone`), `recompute`, `sync` (milestone target dates + bars in a project update), `list`. |
 | `bin/eta` | One progress bar + ETA per milestone, then overall; `--json`. |
+| `bin/idea` | `/autopilot-idea`: owner ideas parked unscheduled in the "Ideas (unscheduled)" milestone; `promote` writes a milestone spec skeleton from ideas for `/autopilot-milestone` (see "Extending a project"). |
 
 ## Every change of plan is sourced
 
@@ -100,7 +101,7 @@ From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the p
 
 ## Extending a project (a milestone added later)
 
-Adding a major milestone to a project that already exists is `/autopilot-milestone`: the same intake gate, pre-mortem, plan review and approval, scoped to the new milestone, through `bin/milestone add`. Never hand-edit state, `PLAN.md` or Linear for it.
+Adding a major milestone to a project that already exists is `/autopilot-milestone`: the same intake gate, pre-mortem, plan review and approval, scoped to the new milestone, through `bin/milestone add`. Never hand-edit state, `PLAN.md` or Linear for it. To start from parked ideas, `bin/idea promote <ENG-1,...> --id <slug> --name "<name>"` writes the spec skeleton (every TODO to fill, `from_ideas`: on approval those ideas are closed as duplicates of the new tickets) for `/autopilot-milestone` to complete.
 
 ## Rules
 
