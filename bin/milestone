@@ -683,7 +683,7 @@ def main():
     p = argparse.ArgumentParser(prog='milestone'); sub = p.add_subparsers(dest='cmd')
     li = sub.add_parser('list'); li.add_argument('--json', action='store_true')
     ad = sub.add_parser('add'); ad.add_argument('spec'); ad.add_argument('--dry-run', action='store_true')
-    ad.add_argument('--planner'); ad.add_argument('--review-k', type=int, default=2); ad.add_argument('--allow-mid', action='store_true')
+    ad.add_argument('--planner'); ad.add_argument('--review-k', type=int, default=1); ad.add_argument('--allow-mid', action='store_true')
     ad.add_argument('--skip-premortem', metavar='WHY'); ad.add_argument('--skip-review', metavar='WHY')
     ad.add_argument('--approved', action='store_true'); ad.add_argument('--by'); ad.add_argument('--source')
     se = sub.add_parser('seed'); se.add_argument('tickets')
