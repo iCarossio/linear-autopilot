@@ -12,6 +12,7 @@ cat > "$SCR/fake/fakecli" <<'EOF'
 if [ "$1" = usage ]; then echo "5h ${FAKE_5H:-10}% resets 2099-01-01T00:00:00+00:00"; [ -n "${FAKE_NO_WEEK:-}" ] || echo "weekly ${FAKE_WEEK:-10}% resets 2099-01-02T00:00:00+00:00"; exit 0; fi
 if [ "$1" = models ]; then for x in ${FAKE_MODELS:-}; do echo "$x"; done; exit 0; fi
 f=${2#Read the file }; f=${f%% and follow*}
+[ -n "${SCR:-}" ] && printf '%s' "$2" > "$SCR/last-prompt"
 if [ -f "$f" ] && grep -q 'Reply with exactly: AUTOPILOT_OK' "$f"; then  # a smoke test: the model id is $4
   case " ${FAKE_BAD_MODELS:-} " in *" $4 "*) echo "model not found"; exit 1;; esac
   if [ -n "${FAKE_GOOD_MODELS:-}" ]; then case " $FAKE_GOOD_MODELS " in *" $4 "*) ;; *) echo "model not found"; exit 1;; esac; fi
@@ -90,6 +91,7 @@ echo "--- implementer recording + identity"
 B=$($H/bin/mkbrief impl T-1 1 .autopilot/tickets/T-1.md)
 R=$(FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B" .autopilot/out/T-1-impl-1.md --cwd "$PWD" --prefer fk-c | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['model'],d['level'])")
 check "implement runs a Tier 3 model and is ok" "$R" "ok fk-c 3"
+check "every model prompt carries the caveman rule" "$(grep -c 'Talk caveman' "$SCR/last-prompt")" "1"
 check "implementer key recorded" "$($H/bin/state get implementers.T-1)" '[
   "fk-c"
 ]'

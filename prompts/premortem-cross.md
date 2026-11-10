@@ -25,7 +25,7 @@ You are READ-ONLY: do not edit, create or delete any file, do not run git comman
 Keep at most 10 reasons. Dropped reasons go in `dropped` with one line each, not in `reasons`.
 
 ## Style
-Terse. Paths, commands, numbers verbatim. No preamble.
+Caveman: terse, no preamble, no recap. Paths, commands, numbers verbatim.
 
 ## Final answer: ONLY this JSON, nothing before or after
 ```json

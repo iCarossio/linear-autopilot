@@ -5,6 +5,8 @@ description: One-time setup of the linear-autopilot runtime on this machine, com
 
 # Autopilot: init
 
+**Caveman, always.** Your first action, before any other tool call: invoke the `caveman` skill (`/caveman`), and keep it for the whole session, including after a resume or a context compaction (invoke it again then). If it is not installed, follow its rules anyway: answer first, no ceremony, commands, paths, numbers and errors verbatim. Every subagent you start talks caveman too: `run-model` adds the rule to every model prompt by itself, and every Agent-tool (subagent) prompt you write starts with "Invoke the `caveman` skill first and answer terse." Persisted text stays plain prose: code, comments, docs, commits, Linear, `PLAN.md`.
+
 Goal: a roster at `~/.config/linear-autopilot/models.json` (`$AUTOPILOT_CONFIG_DIR` overrides) where every entry has a tier (`level`), a `vendor`, a `subscription` and a passed smoke test, and a `bin/harness check` that reports nothing blocking. Nothing personal (accounts, plans, cooldowns, API keys) is ever written into the skill repo.
 
 `bin/<x>` below means the `bin` directory next to this SKILL.md (`~/.claude/skills/autopilot-init/bin/<x>` after `install.sh`, `${CLAUDE_PLUGIN_ROOT}/skills/autopilot-init/bin/<x>` as a plugin).

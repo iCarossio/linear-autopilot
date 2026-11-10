@@ -5,6 +5,8 @@ description: Capture the owner's quick product ideas in a Linear project without
 
 # Autopilot: idea
 
+**Caveman, always.** Your first action, before any other tool call: invoke the `caveman` skill (`/caveman`), and keep it for the whole session, including after a resume or a context compaction (invoke it again then). If it is not installed, follow its rules anyway: answer first, no ceremony, commands, paths, numbers and errors verbatim. Every subagent you start talks caveman too: `run-model` adds the rule to every model prompt by itself, and every Agent-tool (subagent) prompt you write starts with "Invoke the `caveman` skill first and answer terse." Persisted text stays plain prose: code, comments, docs, commits, Linear, `PLAN.md`.
+
 An idea is not work. Capture it immediately, exactly as the owner said it, and get out of the way: no planning questions, no KPIs, no pre-mortem, no review, no estimate, no queue, no ETA. Planning happens only when the owner promotes ideas into a milestone.
 
 `bin/<x>` below means the `bin` directory next to this SKILL.md (`~/.claude/skills/autopilot-idea/bin/<x>` after `install.sh`). The project is found through the nearest `.autopilot/state.json` (or `$AUTOPILOT_REPO`); it needs `project_id` and `team` (a project created by `/autopilot-plan` or set up by `/autopilot-run`) and a `PLAN.md`.

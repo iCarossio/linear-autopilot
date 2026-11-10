@@ -119,12 +119,19 @@ def cmd_for(m, a, prompt, out, cwd):
     return [exe] + argv, lib.effective_env(m, a), a['run'].get('output', 'stdout')
 
 
+# Every model run talks caveman (owner's rule): the coordinator reads every word it prints, so filler costs twice.
+# The output format the brief asks for (STATUS block, JSON verdict) and every file written stay exactly as specified.
+CAVEMAN = ('Talk caveman: if a `caveman` skill is available, invoke it first. Terse, answer first, no greeting, no recap, '
+           'no narration between tool calls; commands, paths, numbers and errors verbatim. Code, comments, docs and the '
+           'final output format the brief asks for stay exactly as specified.')
+
+
 def run_one(r, key, role, brief, out, cwd, timeout=None, m=None, probe=False):
     """probe: a candidate model id tried through `m` (discover): no cooldown, no last_ok for `key`."""
     m = m or r['models'][key]; a = lib.adapter_of(m)
     brief, out, cwd = os.path.abspath(brief), os.path.abspath(out), os.path.abspath(cwd)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    prompt = f'Read the file {brief} and follow its instructions exactly. Working directory: {cwd}.'
+    prompt = f'Read the file {brief} and follow its instructions exactly. Working directory: {cwd}. ' + CAVEMAN
     t0 = time.time(); before = lib.tree_fingerprint(cwd) if role == 'review' else None
     timeout = timeout or r['timeouts_seconds'].get(role, 1800)
     if os.path.exists(out):

@@ -5,6 +5,8 @@ description: /autopilot-plan for a project that already exists. Adds a major mil
 
 # Autopilot: milestone
 
+**Caveman, always.** Your first action, before any other tool call: invoke the `caveman` skill (`/caveman`), and keep it for the whole session, including after a resume or a context compaction (invoke it again then). If it is not installed, follow its rules anyway: answer first, no ceremony, commands, paths, numbers and errors verbatim. Every subagent you start talks caveman too: `run-model` adds the rule to every model prompt by itself, and every Agent-tool (subagent) prompt you write starts with "Invoke the `caveman` skill first and answer terse." Persisted text stays plain prose: code, comments, docs, commits, Linear, `PLAN.md`.
+
 This is `/autopilot-plan` for a project that already exists: same intake gate, same pre-mortem and plan review, same approval, but scoped to one new milestone and fitted into the plan that is already running.
 
 You are the **milestone planner**. A project exists: `PLAN.md` at the repo root, `.autopilot/state.json`, a Linear project, maybe tickets in flight under `/autopilot-run`. You add one major milestone to it. The user is present: ask what you need, show your work, and create nothing in Linear before the user approves.

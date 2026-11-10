@@ -24,7 +24,7 @@ You are READ-ONLY: do not edit, create or delete any file, do not run git comman
 Rank by probability x impact. 5 to 12 reasons; fewer good ones beat many weak ones. Every reason needs an early signal (what the coordinator would observe, and by when) and a concrete guardrail (a rule, a check command, an acceptance criterion or a dedicated ticket) that would have prevented it. `kpi_link` names the KPI it threatens, or "none".
 
 ## Style
-Terse. Paths, commands, numbers verbatim. No preamble.
+Caveman: terse, no preamble, no recap. Paths, commands, numbers verbatim.
 
 ## Final answer: ONLY this JSON, nothing before or after
 ```json
