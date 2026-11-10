@@ -6,25 +6,34 @@ reviewers (default 1) through run-model and validates each verdict, prints one l
 and writes them to .autopilot/out/<ISSUE>-findings-<round>.md (input of the next implementation round).
 
 Exit 0 = MIN_REVIEWS valid approvals and no valid "changes" verdict; 1 = changes required; 2 = not enough valid
-verdicts (no eligible reviewer, invalid output, or a reviewer that modified the tree: retry later); 3 = the tree
-could not be restored after a reviewer modified it (look at the worktree before anything else).
+verdicts after every eligible healthy reviewer was tried (no eligible reviewer, or each one failed: quota, timeout,
+invalid output, modified the tree: retry later); 3 = the tree could not be restored after a reviewer modified it (look
+at the worktree before anything else).
 
 Who reviews (fail closed, whatever the caller says):
-- the role's tier only: a ticket code review is Tier 2 (POOL=review, the default; review_mid / review_high are
-  aliases); POOL=plan_review, premortem or milestone_review is Tier 1. Never Tier 1 or Tier 4 for a code review;
+- the role's tier: a ticket code review is Tier 2 (POOL=review, the default; review_mid / review_high are aliases);
+  POOL=plan_review, premortem or milestone_review is Tier 1. Never Tier 4;
 - never a model that implemented the ticket in any round (state.json `implementers`, written by run-model before each
-  dispatch), on any account or harness; a reviewer of another vendor than every implementer is preferred when one is
-  eligible, not required;
+  dispatch), on any account or harness; among the HEALTHY reviewers (not cooling down, CLI installed, not excluded,
+  credit left) one of another vendor than every implementer is preferred, not required: when none is healthy, any
+  other eligible healthy reviewer takes the round (a vendor an implementer used is fine, its model id never is);
+- backup tier (owner's rule, 2026-11-09, lib.REVIEW_FALLBACK): when no Tier 2 reviewer is eligible and healthy (after
+  escalation every Tier 2 model may have implemented the ticket) or every one failed, a ticket code review draws its
+  reviewer from Tier 1 instead of waiting, with the same rules and never on the coordinator's own account; logged on
+  stderr ("review fallback: Tier 2 exhausted -> Tier 1") and in state.json `review_fallbacks[<ISSUE>]`. Plan reviews
+  have no backup tier;
+- a reviewer that gives no usable verdict (quota, timeout, bad output, invalid verdict, modified tree) is replaced by
+  the next eligible healthy reviewer within the same call, up to every eligible candidate, before INCOMPLETE;
 - k > 1 reviewers come from k different vendors; a plan review excludes the planner's vendor (EXCLUDE_VENDOR=<vendor>,
   or state.json `coordinator`);
 - drawn at random weighted by the credit left on each account (lib.pool), the coordinator's own account never for a
-  Tier 1/2 review unless nothing else exists;
+  Tier 1/2 review unless nothing else exists (never for the Tier 1 backup);
 - a verdict counts only if it parses, uses an allowed verdict, and the reviewer did not modify the tree; "approve"
   with a blocking finding or an unmet criterion counts as changes required.
 
-No eligible reviewer: when one comes back within `review_wait_minutes` (models.json, default 90) this waits for it
-(WAIT=0 disables waiting); otherwise it raises a CRITICAL alert (bin/alert, Linear project update) and exits 2
-`NO_REVIEWER`. It never falls to another tier.
+No eligible healthy reviewer in the role's tier nor its backup tier: when one comes back within `review_wait_minutes`
+(models.json, default 90) this waits for it (WAIT=0 disables waiting); otherwise it raises a CRITICAL alert
+(bin/alert, Linear project update) and exits 2 `NO_REVIEWER`. Never Tier 0 or Tier 4.
 
 EXCLUDE=<key>[,<key>]  extra keys (expanded to every account of the same model id).
 EXCLUDE_VENDOR=<v>[,<v>]  extra vendors.
@@ -65,28 +74,58 @@ if PLAN:
         sys.exit('review: a plan review needs the planner identity: set `coordinator` (roster key) in .autopilot/state.json or EXCLUDE_VENDOR=<vendor>')
 EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, identities=impl_ids, ad=ad)
 impl_vendors = {lib.vendor_of(reg['models'][x], ad.get(reg['models'][x]['cli'])) for x in impl_keys if x in reg['models']}
+FALLBACK = lib.REVIEW_FALLBACK.get(ROLE)
+SCOPE = [ROLE] + ([FALLBACK] if FALLBACK else [])  # the roles a reviewer is drawn from, in order
+TIER1 = set()  # keys drawn from the fallback tier: run with --fallback-tier1, logged
 
 
-def choose(reg):
-    """k reviewers; with k=1, one of another vendor than the implementers when such a reviewer is eligible."""
-    if k == 1 and impl_vendors:
-        other = lib.expand_exclusions(reg, vendors=sorted(impl_vendors), ad=ad)
-        pick, vendors = lib.pick_reviewers(reg, [ROLE], 1, EX | other, ad)
-        if pick:
-            return pick, vendors
-    return lib.pick_reviewers(reg, [ROLE], k, EX, ad)
+def chain(reg):
+    """Every eligible reviewer in the order they are tried. Eligible: a candidate of the role (tier, CLI installed, not
+    excluded by the owner or the project) minus EX (implementers' model ids on any account, excluded vendors), healthy
+    now, in the credit-weighted draw order of lib.pool. With k=1 the vendors no implementer used come first, then the
+    other healthy reviewers (a vendor an implementer used is fine, the model id never is). A ticket code review then
+    falls back to Tier 1 (lib.REVIEW_FALLBACK, never the coordinator's own account) with the same order. Accounts with
+    no credit left count as unhealthy: they come last, after both tiers. The preference never picks a cooling reviewer."""
+    head, spent = [], []
+    for role in SCOPE:
+        order = [x for x in lib.pool(reg, role, ad) if x not in EX and x not in head + spent and lib.healthy(reg, x)
+                 and not (role == FALLBACK and lib.on_coordinator_account(reg, reg['models'][x], ad.get(reg['models'][x]['cli'])))]
+        if role == FALLBACK:
+            TIER1.update(order)
+        if k == 1 and impl_vendors:
+            other = [x for x in order if vendor(reg, x) not in impl_vendors]
+            order = other + [x for x in order if x not in other]
+        dry = [x for x in order if lib.credit_left(reg, lib.account_key(reg['models'][x], ad.get(reg['models'][x]['cli']))) == 0]
+        head += [x for x in order if x not in dry]; spent += dry
+    return head + spent
+
+
+def vendor(reg, x):
+    return lib.vendor_of(reg['models'][x], ad.get(reg['models'][x]['cli']))
+
+
+def take(reg, keys, n, taken_vendors=()):
+    """The first n keys of distinct vendors, none of `taken_vendors`."""
+    pick, seen = [], set(taken_vendors)
+    for x in keys:
+        if len(pick) == n:
+            break
+        if vendor(reg, x) not in seen:
+            seen.add(vendor(reg, x)); pick.append(x)
+    return pick
 
 
 window = float(reg.get('review_wait_minutes', 90)) * 60
-pick, vendors = choose(reg)
+order = chain(reg); pick = take(reg, order, k)
+tiers = '/'.join(str(lv) for r in SCOPE for lv in lib.roles(reg)[r])
 while len(pick) < MIN:
-    ready = lib.vendor_ready_at(reg, [ROLE], max(MIN, 1), EX, ad)
+    ready = lib.vendor_ready_at(reg, SCOPE, max(MIN, 1), EX, ad)
     wait = (ready - lib.now()).total_seconds() if ready else None
     if wait is not None and wait <= window and os.environ.get('WAIT') != '0':
-        print(f'WAITING: no eligible {ROLE} reviewer now (Tier {"/".join(map(str, lib.roles(reg)[ROLE]))}); the next one is back at {ready.astimezone():%H:%M %Z}', flush=True)
-        time.sleep(max(1, wait + 2)); reg = lib.load_reg(warn=False); pick, vendors = choose(reg); continue
+        print(f'WAITING: no eligible {ROLE} reviewer now (Tier {tiers}); the next one is back at {ready.astimezone():%H:%M %Z}', flush=True)
+        time.sleep(max(1, wait + 2)); reg = lib.load_reg(warn=False); order = chain(reg); pick = take(reg, order, k); continue
     why = ('none before %s' % ready.astimezone().strftime('%a %d %b %H:%M %Z')) if ready else 'none in the roster (configuration: bin/harness check)'
-    msg = (f'{ROLE} for {iss} round {n}: {len(pick)} eligible reviewer(s) of Tier {"/".join(map(str, lib.roles(reg)[ROLE]))}, need {MIN}; {why}; '
+    msg = (f'{ROLE} for {iss} round {n}: {len(pick)} eligible reviewer(s) of Tier {tiers}, need {MIN}; {why}; '
            f'excluded {sorted(EX)}')
     lib.raise_alert(M, 'review_blocked', f'{ROLE}-{iss}', f'CRITICAL: no {ROLE} reviewer for {iss}', msg,
                     {'role': ROLE, 'issue': iss, 'round': n, 'excluded': sorted(EX), 'ready': ready.isoformat() if ready else None})
@@ -98,6 +137,7 @@ def run(x):
     out = os.path.join(OUT, f'{iss}-rev-{x}-{n}.md')
     cmd = [RM, 'run', 'review', brief, out, '--cwd', CWD, '--issue', iss, '--model', x, '--role', ROLE]
     if ex_vendors: cmd += ['--exclude-vendor', ','.join(ex_vendors)]
+    if x in TIER1: cmd += ['--fallback-tier1']
     p = subprocess.run(cmd, capture_output=True, text=True)
     try:
         res = json.loads(p.stdout.strip().splitlines()[-1])
@@ -106,36 +146,54 @@ def run(x):
     return x, res, (lib.parse_json_block(out) if res.get('status') == 'ok' else None)
 
 
-snap = lib.snapshot(CWD)
-results = list(cf.ThreadPoolExecutor(len(pick)).map(run, pick))
-restored = lib.restore(CWD, snap, f'reviewer-junk-{iss}-{n}')
-if restored == 'restored':
-    print('TREE RESTORED: a reviewer modified the worktree; its edits were reverted to the pre-review snapshot')
-elif restored == 'history_changed':
-    print('HISTORY CHANGED: a reviewer committed or moved HEAD in the worktree; nothing was rewritten automatically. Inspect `git log` and `git status` there before anything else; no verdict of this round counts'); sys.exit(3)
-elif restored == 'restore_failed':
-    print('TREE RESTORE FAILED: a reviewer modified the worktree and the snapshot could not be re-applied; inspect it (untracked junk in .tmp/)'); sys.exit(3)
-
-blocking, approvals, changes, invalid = [], 0, 0, 0
-for x, res, v in results:
-    if res.get('reviewer_modified_tree'):
-        print(f'{x}: DISCARDED (modified the tree; verdict not counted)'); invalid += 1; continue
-    if not v:
-        print(f"{x}: {res.get('status')} (no verdict)"); invalid += 1; continue
-    status, lines = lib.validate_verdict(v)
-    if status == 'invalid':
-        print(f'{x}: INVALID verdict: {lines[0]}'); invalid += 1; continue
-    print(f"{x}: {v.get('verdict')} -> {status} | {str(v.get('summary', ''))[:200]}")
-    for s in lines:
-        print(f'- [{x}] {s}'); blocking.append(f'- [{x}] {s}')
-    minors = [f for f in v.get('findings', []) if f.get('severity') == 'minor']
-    if minors:
-        print(f'  ({len(minors)} minor)')
-    if status == 'approve': approvals += 1
-    else: changes += 1
+# A reviewer that gives no usable verdict (quota, timeout, bad output, invalid verdict, modified tree) is replaced by
+# the next eligible healthy reviewer of the chain within this call, until MIN approvals, a "changes" verdict, or the
+# chain is exhausted: one failing reviewer must not end the round INCOMPLETE while another one could review.
+blocking, approvals, changes = [], 0, 0
+tried, failed, voted = [], [], []  # voted: vendors with a usable verdict (k > 1 reviewers stay of distinct vendors)
+while pick:
+    for x in [x for x in pick if x in TIER1]:
+        t2 = [y for y in tried if y not in TIER1]
+        print(f'review fallback: Tier 2 exhausted -> Tier 1 ({x}) for {iss} round {n}; Tier 2 ' +
+              (f'tried without a verdict: {", ".join(t2)}' if t2 else 'had no eligible healthy reviewer'), file=sys.stderr, flush=True)
+        lib.update_state(M, lambda st, x=x, t2=t2: st.setdefault('review_fallbacks', {}).setdefault(iss, []).append(
+            {'at': lib.now().isoformat(), 'round': n, 'model': x, 'from': lib.roles(reg)[ROLE], 'to': lib.roles(reg)[FALLBACK], 'tier2_tried': t2}))
+    snap = lib.snapshot(CWD)
+    results = list(cf.ThreadPoolExecutor(len(pick)).map(run, pick))
+    tried += pick
+    restored = lib.restore(CWD, snap, f'reviewer-junk-{iss}-{n}')
+    if restored == 'restored':
+        print('TREE RESTORED: a reviewer modified the worktree; its edits were reverted to the pre-review snapshot')
+    elif restored == 'history_changed':
+        print('HISTORY CHANGED: a reviewer committed or moved HEAD in the worktree; nothing was rewritten automatically. Inspect `git log` and `git status` there before anything else; no verdict of this round counts'); sys.exit(3)
+    elif restored == 'restore_failed':
+        print('TREE RESTORE FAILED: a reviewer modified the worktree and the snapshot could not be re-applied; inspect it (untracked junk in .tmp/)'); sys.exit(3)
+    for x, res, v in results:
+        if res.get('reviewer_modified_tree'):
+            print(f'{x}: DISCARDED (modified the tree; verdict not counted)'); failed.append(x); continue
+        if not v:
+            print(f"{x}: {res.get('status')} (no verdict)"); failed.append(x); continue
+        status, lines = lib.validate_verdict(v)
+        if status == 'invalid':
+            print(f'{x}: INVALID verdict: {lines[0]}'); failed.append(x); continue
+        voted.append(vendor(reg, x))
+        print(f"{x}: {v.get('verdict')} -> {status} | {str(v.get('summary', ''))[:200]}")
+        for s in lines:
+            print(f'- [{x}] {s}'); blocking.append(f'- [{x}] {s}')
+        minors = [f for f in v.get('findings', []) if f.get('severity') == 'minor']
+        if minors:
+            print(f'  ({len(minors)} minor)')
+        if status == 'approve': approvals += 1
+        else: changes += 1
+    if changes or approvals >= MIN:
+        break
+    reg = lib.load_reg(warn=False)
+    pick = take(reg, [x for x in order if x not in tried and x in reg['models'] and lib.healthy(reg, x)], MIN - approvals, voted)
+    if pick:
+        print(f'RETRY: no usable verdict from {", ".join(failed)}; next eligible reviewer(s): {", ".join(pick)}', flush=True)
 open(os.path.join(OUT, f'{iss}-findings-{n}.md'), 'w').write('\n'.join(blocking) or '(none)')
 if changes:
     sys.exit(1)
 if approvals >= MIN:
     sys.exit(0)
-print(f'INCOMPLETE: {approvals} valid approval(s), need {MIN} ({invalid} without a usable verdict); retry the missing reviewer(s)'); sys.exit(2)
+print(f'INCOMPLETE: {approvals} valid approval(s), need {MIN} ({len(failed)} without a usable verdict; tried every eligible healthy reviewer: {", ".join(tried)}); retry later'); sys.exit(2)

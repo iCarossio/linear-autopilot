@@ -41,4 +41,4 @@ Then, per role (README, Tiers): does Tier 3 have a healthy model (implementation
 - A CRITICAL alert (`bin/alert list`, or `CRITICAL:` lines at the top of `bin/eta`) goes first in the report, with what it blocks and the reset times.
 - Never guess a reset time: parse it (`usage`) or ask. A cooldown without a known reset lasts 60 min and is retried.
 - Never spend a model to check whether it works when its CLI already announced a reset time: schedule a `wait` instead.
-- Use every included quota to the max, never pay more: no extra credits, no top-ups, no paid per-token ids. A tier out of quota waits for its reset; it is never replaced by another tier.
+- Use every included quota to the max, never pay more: no extra credits, no top-ups, no paid per-token ids. A tier out of quota waits for its reset; it is never replaced by another tier, except a ticket code review, which `bin/review` falls back to Tier 1 (logged) when no Tier 2 reviewer is eligible.

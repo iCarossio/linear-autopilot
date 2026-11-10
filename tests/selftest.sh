@@ -17,6 +17,8 @@ if [ -f "$f" ] && grep -q 'Reply with exactly: AUTOPILOT_OK' "$f"; then  # a smo
   if [ -n "${FAKE_GOOD_MODELS:-}" ]; then case " $FAKE_GOOD_MODELS " in *" $4 "*) ;; *) echo "model not found"; exit 1;; esac; fi
   echo AUTOPILOT_OK; exit 0
 fi
+case " ${FAKE_QUOTA_MODELS:-} " in *" $4 "*) echo 'You have exhausted your capacity on this model. Upgrade your subscription to increase your limits. Resets in 162h57m57s.","status":"RESOURCE_EXHAUSTED","error_code":429'; exit 1;; esac
+case " ${FAKE_MUTE_MODELS:-} " in *" $4 "*) echo "I could not finish the review."; exit 0;; esac
 case "${FAKE_BEHAVIOUR:-approve}" in
   approve) echo '```json'; echo '{"verdict":"approve","unmet_criteria":[],"findings":[],"summary":"fine"}'; echo '```';;
   approve_major) echo '```json'; echo '{"verdict":"approve","unmet_criteria":[],"findings":[{"severity":"major","file":"a.py","line":1,"problem":"bug","fix":"fix"}],"summary":"approve but major"}'; echo '```';;
@@ -267,13 +269,48 @@ COOL() { python3 -c "
 import json,os,sys,datetime as d;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p))
 for k in sys.argv[2:]: r['health'][k]={'until':(d.datetime.now(d.timezone.utc)+d.timedelta(seconds=float(sys.argv[1]))).isoformat(),'reason':'quota: test','set_at':d.datetime.now(d.timezone.utc).isoformat()}
 json.dump(r,open(p,'w'))" "$@"; }
-COOL 4 fk-d fk-f
+COOL 4 fk-d fk-f fk-b
 OUT=$(FAKE_BEHAVIOUR=approve $H/bin/review T-1 w1 "$RB"); RC=$?
-check "the Tier 2 reviewers are back in 4 s: waits, then reviews" "$RC $(echo "$OUT" | grep -c '^WAITING: no eligible review reviewer')" "0 1"
+check "Tier 2 and the Tier 1 backup are back in 4 s: waits, then reviews" "$RC $(echo "$OUT" | grep -c '^WAITING: no eligible review reviewer')" "0 1"
 COOL 36000 fk-d fk-f
 OUT=$(FAKE_BEHAVIOUR=approve $H/bin/review T-1 w2 "$RB" 2>$SCR/nr.err); RC=$?
-check "no Tier 2 reviewer for 10 h: NO_REVIEWER exit 2, CRITICAL alert, no Tier 1/4 fallback" "$RC $(echo "$OUT" | grep -c '^NO_REVIEWER: review for T-1 round w2: 0 eligible reviewer') $(grep -c '^CRITICAL: review for T-1' $SCR/nr.err) $(ls .autopilot/out/ | grep -cE 'T-1-rev-(fk-a|fk-b|fk-e)-w2')" "2 1 1 0"
+check "no Tier 2 reviewer for 10 h: Tier 1 backup fk-b reviews at once, logged; never the coordinator account (fk-a) nor Tier 4" "$RC $(echo "$OUT" | grep -c '^fk-b: approve') $(grep -c '^review fallback: Tier 2 exhausted -> Tier 1 (fk-b) for T-1 round w2' $SCR/nr.err) $($H/bin/state get review_fallbacks.T-1 | python3 -c "import json,sys;e=json.load(sys.stdin)[-1];print(e['model'],e['round'],e['to'])") $(ls .autopilot/out/ | grep -cE 'T-1-rev-(fk-a|fk-e)-w2')" "0 1 1 fk-b w2 [1] 0"
+COOL 36000 fk-d fk-f fk-b
+OUT=$(FAKE_BEHAVIOUR=approve $H/bin/review T-1 w3 "$RB" 2>$SCR/nr.err); RC=$?
+check "neither Tier 2 nor Tier 1 for 10 h: NO_REVIEWER exit 2, CRITICAL alert, never the coordinator account nor Tier 4" "$RC $(echo "$OUT" | grep -c '^NO_REVIEWER: review for T-1 round w3: 0 eligible reviewer(s) of Tier 2/1') $(grep -c '^CRITICAL: review for T-1' $SCR/nr.err) $(ls .autopilot/out/ | grep -cE 'T-1-rev-(fk-a|fk-e)-w3')" "2 1 1 0"
 python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['health']={};json.dump(r,open(p,'w'))"; $H/bin/alert ack all >/dev/null
+
+echo "--- review fallback within one call (ICA-136: implementers sonnet + luna, gemini the only other vendor)"
+# fk-s plays claude-sonnet (Tier 2, anthropic), fk-l codex-luna (Tier 3, openai): fk-d (google) is preferred, fk-f
+# (openai terra, never an implementer) is the eligible fallback. fk-o is opus on a second Claude login (Tier 1).
+$H/bin/harness add-model fk-s --cli claude --model claude-sonnet-y --level 2 --env CLAUDE_CONFIG_DIR=~/.claude-s --subscription paid >/dev/null
+$H/bin/harness add-model fk-l --cli codex --model gpt-y-luna --level 3 --subscription paid >/dev/null
+$H/bin/harness add-model fk-o --cli claude --model claude-opus-y --level 1 --env CLAUDE_CONFIG_DIR=~/.claude-o --subscription paid >/dev/null
+$H/bin/state implementer T-6 fk-s >/dev/null; $H/bin/state implementer T-6 fk-l >/dev/null
+RB6=$($H/bin/mkbrief review T-6 1 .autopilot/tickets/T-1.md)
+CLEARH() { python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['health']={};json.dump(r,open(p,'w'))"; }
+COOL 36000 fk-d
+OUT=$(FAKE_BEHAVIOUR=approve $H/bin/review T-6 1 "$RB6" 2>/dev/null); RC=$?
+check "preferred vendor (gemini) cooling: terra (fk-f) reviews, no wait, no Tier 1" "$RC $(echo "$OUT" | grep -c '^fk-f: approve') $(echo "$OUT" | grep -cE 'WAITING|fk-d|fk-b|fk-o')" "0 1 0"
+CLEARH
+OUT=$(FAKE_QUOTA_MODELS=gemini-x FAKE_BEHAVIOUR=approve $H/bin/review T-6 2 "$RB6" 2>/dev/null); RC=$?
+check "drawn gemini hits its quota: terra reviews in the same call -> 0" "$RC $(echo "$OUT" | grep -c '^fk-d: all_failed (no verdict)') $(echo "$OUT" | grep -c '^RETRY: no usable verdict from fk-d; next eligible reviewer(s): fk-f') $(echo "$OUT" | grep -c '^fk-f: approve')" "0 1 1 1"
+check "the quota cooldown holds the announced reset (Resets in 162h57m57s), not the 60 min default" "$($H/bin/run-model health | python3 -c "
+import json,sys,datetime as d;h=json.load(sys.stdin)['fk-d'];print((d.datetime.fromisoformat(h['until'])-d.datetime.now(d.timezone.utc)).total_seconds()//3600)")" "162.0"
+CLEARH
+OUT=$(FAKE_MUTE_MODELS=gemini-x FAKE_BEHAVIOUR=approve $H/bin/review T-6 3 "$RB6" 2>/dev/null); RC=$?
+check "drawn gemini gives no verdict (bad output): terra reviews in the same call -> 0" "$RC $(echo "$OUT" | grep -c '^fk-d: all_failed (no verdict)') $(echo "$OUT" | grep -c '^fk-f: approve')" "0 1 1"
+CLEARH
+# Escalation used up Tier 2: terra implemented a later round too.
+$H/bin/state implementer T-6 fk-f >/dev/null; COOL 36000 fk-d
+R=""; for i in 1 2 3 4 5 6; do R="$R $(AUTOPILOT_SEED=$i FAKE_BEHAVIOUR=approve $H/bin/review T-6 f$i "$RB6" 2>>$SCR/fb.err | sed -n 's/^\(fk-[a-z0-9-]*\): approve.*/\1/p')"; done
+check "every Tier 2 implemented or cooling: a Tier 1 backup (fk-b codex, fk-o opus off the coordinator account) reviews, never fk-a" "$(echo $R | tr ' ' '\n' | sort -u | grep -vcE '^fk-(b|o)$') $(echo $R | wc -w | tr -d ' ') $(grep -c '^review fallback: Tier 2 exhausted -> Tier 1 (fk-[bo]) for T-6 round f[1-6]; Tier 2 had no eligible healthy reviewer' $SCR/fb.err)" "0 6 6"
+check "both Tier 1 backups are drawn (credit-weighted, 6 seeds)" "$(echo $R | tr ' ' '\n' | sort -u | tr '\n' ' ')" "fk-b fk-o "
+check "the backup is logged in state.json review_fallbacks" "$($H/bin/state get review_fallbacks.T-6 | python3 -c "import json,sys;e=json.load(sys.stdin);print(len(e),e[0]['from'],e[0]['to'],e[0]['tier2_tried'])")" "6 [2] [1] []"
+check "run-model refuses the coordinator account as a Tier 1 backup, and Tier 1 without --fallback-tier1" "$($H/bin/run-model run review "$RB6" .autopilot/out/x.md --cwd "$PWD" --model fk-a --fallback-tier1 >/dev/null 2>&1; echo $?) $($H/bin/run-model run review "$RB6" .autopilot/out/x.md --cwd "$PWD" --model fk-o >/dev/null 2>&1; echo $?) $($H/bin/run-model run review "$PB" .autopilot/out/x.md --cwd "$PWD" --pool plan_review --model fk-o --fallback-tier1 >/dev/null 2>&1; echo $?)" "4 4 4"
+OUT=$(FAKE_QUOTA_MODELS="gpt-x claude-opus-y" FAKE_BEHAVIOUR=approve $H/bin/review T-6 g1 "$RB6" 2>/dev/null); RC=$?
+check "every eligible reviewer fails: INCOMPLETE after trying them all in one call" "$RC $(echo "$OUT" | grep -cE '^INCOMPLETE: 0 valid approval\(s\), need 1 \(2 without a usable verdict; tried every eligible healthy reviewer: fk-[bo], fk-[bo]\)')" "2 1"
+CLEARH; for k in fk-s fk-l fk-o; do $H/bin/harness remove $k >/dev/null; done; $H/bin/alert ack all >/dev/null
 
 echo "--- watchdog: code in the model's own output is not an input prompt"
 cat > "$SCR/wp.py" <<'EOF'

@@ -4,7 +4,7 @@ model's CLI, stores the full output in a file and prints ONE json line.
 
   run-model run <implement|review> <brief.md> <out.md> [--cwd DIR] [--issue ID | --standalone] [--exclude-vendor V[,V]]
                 [--role ROLE | --pool NAME | --escalate | --no-escalate] [--round N]
-                [--model KEY [--allow-tier0] | --prefer KEY] [--no-fallback]
+                [--model KEY [--allow-tier0] | --prefer KEY] [--no-fallback] [--fallback-tier1]
   run-model pool <ROLE>                 # the draw for a role right now (candidates in draw order)
   run-model whoami [--record]           # the coordinator account detected for this session; --record writes state.json coordinator_account
   run-model smoke <KEY>                 # tiny prompt, checks the model answers
@@ -35,6 +35,8 @@ Hard rules enforced here:
   (a pre-mortem or a repo-level review with its own exclusions); it never uses a recorded implementer, nor any key running
   the same underlying model on another account or harness, nor a vendor given by --exclude-vendor, whatever --model /
   --prefer / fallbacks say (status `excluded`, exit 4);
+- a ticket code review runs a Tier 1 model only with --fallback-tier1 and --model (bin/review's logged backup when no
+  Tier 2 reviewer is eligible, lib.REVIEW_FALLBACK), never on the coordinator's own account;
 - a plan review (role plan_review / premortem / milestone_review, or a brief `<ISSUE>-plan-...`) is a review of the
   planner's work: the planner's vendor and identity are excluded (state.json `coordinator`, or --exclude-vendor);
 - the coordinator's own account (detected from this process: adapter `coordinator_env` + `account_env`, or
@@ -313,6 +315,13 @@ def cmd_run(args):
             print(json.dumps({'status': 'error', 'role': role, 'reason': 'a plan review needs the planner identity: `coordinator` (roster key) in .autopilot/state.json, or --exclude-vendor <vendor>'})); sys.exit(4)
     excluded = lib.expand_exclusions(r, keys=keys_, identities=ids_, vendors=ex_vendors, ad=ad) if kind == 'review' else set()
     levels = lib.roles(r)[role]
+    if '--fallback-tier1' in args:
+        if kind != 'review' or role not in lib.REVIEW_FALLBACK or '--model' not in args:
+            refuse(role, issue, '--fallback-tier1 is only for a ticket code review with --model (bin/review draws the backup reviewer)')
+        levels = levels + lib.roles(r)[lib.REVIEW_FALLBACK[role]]
+        fk = args[args.index('--model') + 1]
+        if fk in r['models'] and lib.on_coordinator_account(r, r['models'][fk], ad.get(r['models'][fk]['cli'])):
+            refuse(role, issue, '%s is on the coordinator account: never a Tier 1 backup reviewer' % fk, model=fk)
     if role == 'escalate':
         if not (issue and repo):
             refuse(role, issue, '--escalate needs a ticket identity (--issue)')

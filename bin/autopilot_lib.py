@@ -516,8 +516,8 @@ def validate_reasons(j):
 # Every roster entry has a `level` (0-4) and a `vendor`. Pools are not hand-ordered lists any more: each role allows
 # some levels (models.json `roles`, bounded by ROLES_ALLOWED) and `pool()` builds the candidates from the roster.
 #   Tier 0 frontier ceiling: never selected automatically (owner opt-in per run: run-model --allow-tier0 --model KEY).
-#   Tier 1 flagship: plan reviews, pre-mortems, milestone adversarial reviews, coordination. Never implements, never
-#          reviews a ticket's code.
+#   Tier 1 flagship: plan reviews, pre-mortems, milestone adversarial reviews, coordination. Never implements; reviews
+#          a ticket's code only as the logged backup when no Tier 2 reviewer is eligible and healthy (REVIEW_FALLBACK).
 #   Tier 2 balanced: ticket code reviews (two reviewers of distinct vendors); `escalate` implements rounds past
 #          `escalate_after_round` (run-model run_role, default 3).
 #   Tier 3 fast and cheap: ticket implementation and fix rounds up to `escalate_after_round`.
@@ -536,6 +536,11 @@ ROLES_ALLOWED = {'implement': {3}, 'fix': {3}, 'review': {2}, 'plan_review': {1}
 PLAN_ROLES = ('plan_review', 'premortem', 'milestone_review')  # review the planner's work: the planner's vendor is excluded
 REVIEW_ROLES = ('review',) + PLAN_ROLES                          # roles a `run-model run review` may take
 CHEAP_ROLES = ('implement', 'fix', 'trivial')                    # the coordinator's own account may take these, last
+# Owner's rule (2026-11-09, ICA-136): after escalation every Tier 2 model may have implemented a ticket. When no Tier 2
+# reviewer is eligible and healthy (or every one failed), bin/review draws the ticket reviewer from this role's tier
+# (Tier 1) instead of waiting: credit-weighted, never the coordinator's own account, never an implementer's model,
+# never an excluded or reserved account; logged in state.json `review_fallbacks` and on stderr. Plan roles have none.
+REVIEW_FALLBACK = {'review': 'plan_review'}
 # Legacy pool names (before 2026-11-09) and the role they now mean. `escalate` = one level above implement, never Tier 1.
 POOL_ROLE = {'implement': 'implement', 'implement_critical': 'implement', 'fix': 'fix', 'fix_mid': 'fix',
              'implement_escalation': 'escalate', 'escalate': 'escalate', 'review': 'review', 'review_mid': 'review',
