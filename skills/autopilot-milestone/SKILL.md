@@ -1,6 +1,6 @@
 ---
 name: autopilot-milestone
-description: /autopilot-plan for a project that already exists. Adds a major milestone to a Linear project planned with /autopilot-plan or running under /autopilot-run, with the same adversarial treatment as the first plan, scoped to the new milestone. Takes new scope from the user, or one or several ideas parked with /autopilot-idea (promoted into the milestone and closed as duplicates of its tickets on approval). Refuses to continue without measurable KPIs for the milestone, reads the current PLAN.md, state and Linear, drafts the milestone spec and its tickets, runs a pre-mortem by a high-tier model of another vendor and an adversarial plan review, shows every failure reason and finding to the user, folds the accepted ones in, and only after the user approves creates the Linear milestone, issues and relations, appends PLAN.md, logs the decision and recomputes the ETAs. Use when the user says "add a milestone", "extend the project", "new phase", "promote idea ENG-40", "schedule these ideas", "/autopilot-milestone [ENG-40,...]", or brings new scope for a project the autopilot already knows.
+description: /autopilot-plan for a project that already exists. Adds a major milestone to a Linear project planned with /autopilot-plan or running under /autopilot-run, with the same adversarial treatment as the first plan, scoped to the new milestone. Takes new scope from the user, or one or several ideas parked with /autopilot-idea (promoted into the milestone and closed as duplicates of its tickets on approval). Refuses to continue without measurable KPIs for the milestone, reads the current PLAN.md, state and Linear, drafts the milestone spec and its tickets, runs a pre-mortem and an adversarial plan review by Tier 1 models of another vendor, shows every failure reason and finding to the user, folds the accepted ones in, and only after the user approves creates the Linear milestone, issues and relations, appends PLAN.md, logs the decision and recomputes the ETAs. Use when the user says "add a milestone", "extend the project", "new phase", "promote idea ENG-40", "schedule these ideas", "/autopilot-milestone [ENG-40,...]", or brings new scope for a project the autopilot already knows.
 ---
 
 # Autopilot: milestone
@@ -47,7 +47,7 @@ Ask for, and do not proceed without the following. For promoted ideas, the owner
 
 Keep the user's answers verbatim: they are the `user:"..."` source of the approval decision. A promoted idea whose answers turn it into something else than its words (narrowed, split, merged with another) is fine: say so in `why`, the idea's words stay quoted in `description`.
 
-## 2. Draft the spec (you, high tier)
+## 2. Draft the spec (you, Tier 1)
 
 Read the code the milestone touches before writing (conventions, existing checks, the notes of the tickets it builds on, `docs/notes/*`). Then write `.autopilot/plan/milestones/<id>/spec.json` (format: `bin/milestone --help`):
 - `id`, `name`, `description`, `why`, `kpis` (ids `<id>-K1`, ...).
@@ -67,10 +67,10 @@ bin/run-model usage --apply
 bin/bgrun --name milestone-<id> --idle 1800 --timeout 5400 --watch .autopilot/plan/milestones/<id> -- bin/milestone add <spec> --planner <your roster key>
 ```
 in the background (10-40 min), while you re-read the spec. It runs:
-- a **pre-mortem** of the milestone by a `cost: high` model of another vendor, two passes (the reasons, then an adversarial self-review against the repo), with the existing plan as context, so it raises how this milestone fails and how it breaks what is already planned; into `.autopilot/plan/milestones/<id>/premortem.md`;
-- a **plan review** by a `cost: high` model of another vendor (`POOL=plan_review`): fit with the existing architecture, tickets and KPIs, real and complete dependencies, measurable KPIs; into `.../plan-review.md`.
+- a **pre-mortem** of the milestone by a Tier 1 model of another vendor (the milestone's adversarial review), two passes (the reasons, then an adversarial self-review against the repo), with the existing plan as context, so it raises how this milestone fails and how it breaks what is already planned; into `.autopilot/plan/milestones/<id>/premortem.md`;
+- a **plan review** by a Tier 1 model of another vendor (`POOL=plan_review`): fit with the existing architecture, tickets and KPIs, real and complete dependencies, measurable KPIs; into `.../plan-review.md`.
 
-Exit 3 is the expected stop (needs approval). Exit 2: a review gave nothing usable; wait for a reset (`bin/run-model wait premortem`) or, with the user's consent, rerun with `--allow-mid` and say so. Your own vendor is never a substitute. `--review-k 2` adds a second plan reviewer of a distinct vendor only when the user asks.
+Exit 3 is the expected stop (needs approval). Exit 2: a review gave nothing usable; wait for a reset (`bin/run-model wait premortem`), and tell the user when it lasts. Neither your own vendor nor a Tier 2 model is ever a substitute (the old `--allow-mid` is gone). `--review-k 2` adds a second plan reviewer of a distinct vendor only when the user asks.
 
 ## 4. Show everything to the user, then fold
 

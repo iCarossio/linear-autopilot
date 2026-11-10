@@ -1,6 +1,6 @@
 ---
 name: autopilot-plan
-description: Adversarial planning before a Linear project exists. Takes the user's plan and expectations, refuses to continue without measurable KPIs, drafts the full plan, sends it to a pre-mortem by one high-tier model of another vendor ("we are at the deadline and we failed, why?"), shows the failure reasons to the user, folds a guardrail for each into the plan, gets the user's approval, then creates the Linear project with milestones, tickets and dependencies ready for /autopilot-run. Use when the user says "plan this project", "pre-mortem", "/autopilot-plan", "create the Linear project for ...", or brings a plan or spec to execute with the autopilot.
+description: Adversarial planning before a Linear project exists. Takes the user's plan and expectations, refuses to continue without measurable KPIs, drafts the full plan, sends it to a pre-mortem by one Tier 1 model of another vendor ("we are at the deadline and we failed, why?"), shows the failure reasons to the user, folds a guardrail for each into the plan, gets the user's approval, then creates the Linear project with milestones, tickets and dependencies ready for /autopilot-run. Use when the user says "plan this project", "pre-mortem", "/autopilot-plan", "create the Linear project for ...", or brings a plan or spec to execute with the autopilot.
 ---
 
 # Autopilot: plan
@@ -11,7 +11,7 @@ You are the **master planner**. The user is present for this phase: ask what you
 
 | Script | Role |
 |---|---|
-| `bin/premortem` | `premortem <PLAN.md> --planner <key>`: pre-mortem by a high-tier model of another vendor, two passes, `.autopilot/plan/premortem.md`. `--out-dir` for a milestone's own. |
+| `bin/premortem` | `premortem <PLAN.md> --planner <key>`: pre-mortem by a Tier 1 model of another vendor, two passes, `.autopilot/plan/premortem.md`. `--out-dir` for a milestone's own. |
 | `bin/decision` | `decision add|list|check|synced`: the sourced Decision log in `PLAN.md`. |
 | `bin/linear` | `linear import <tickets.json> --team KEY`: project, milestones, issues, relations; idempotent checkpoint. |
 | `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later, driven by `/autopilot-milestone`), `recompute`, `sync` (milestone target dates + bars in a project update), `list`. |
@@ -40,7 +40,7 @@ Ask for, and do not proceed without:
 
 Record the answers verbatim in the `Expectations and KPIs` and `Constraints` sections of `PLAN.md` (from `templates/PLAN.md`).
 
-## 1. Draft the plan (you, high tier)
+## 1. Draft the plan (you, Tier 1)
 
 Before writing, read the repository: conventions, existing checks, generators, data, agent docs (AGENTS.md / CLAUDE.md), recent history. A plan that is wrong about the repo is the most common failure cause. 
 **Latest technologies by default.** For a new project or a new dependency, choose the latest stable release of the language, runtime and libraries (e.g. the newest Python, Node LTS or current, framework majors), not a conservative older pin. Verify it before writing it into the plan: install the candidate stack in a scratch directory on this machine (`uv init --python <latest>` + `uv add ...`, `npm view <pkg> version`, etc.) and import or run it once. Pin what passed exactly; write the next-older version as the project-wide fallback (switch the whole project, never work around one library). An existing repo keeps its own versions unless the user asks to upgrade.
@@ -52,16 +52,16 @@ Then write `PLAN.md` with:
 - Rules for implementers and reviewers (forbidden shortcuts, required tests).
 - Open human decisions with a safe default each.
 
-## 2. Pre-mortem (one high-tier model of another vendor)
+## 2. Pre-mortem (one Tier 1 model of another vendor)
 
 ```
-bin/run-model usage --apply            # know which high-tier models are available now
+bin/run-model usage --apply            # know which Tier 1 models are available now
 bin/premortem <repo>/PLAN.md --repo <repo> --planner <your roster key> --dry-run   # who would review (no quota spent)
-bin/premortem <repo>/PLAN.md --repo <repo> --planner <your roster key>             # e.g. --planner claude-opus when you are Claude Opus
+bin/premortem <repo>/PLAN.md --repo <repo> --planner <your roster key>             # the roster key of the model you run as (state.json `coordinator`)
 ```
-`--planner` is mandatory: `premortem` excludes your vendor and your model id on every account (a model must not review its own plan), then picks one healthy `cost: high` model from the `premortem` and `plan_review` pools (`--k 2` adds a second reviewer of a distinct vendor, only when the user asks for it). It runs pass 1 (the pre-mortem) and pass 2 (an adversarial self-review: the reviewer re-checks its own reasons against the repo, drops the generic ones and adds the angles it missed), and ranks by probability x impact, and writes `.autopilot/plan/premortem.md` and `premortem.json` (with each reviewer's status per pass). It takes 10 to 40 minutes: run it in the background and keep working on the ticket breakdown meanwhile. Exit 1 means degraded (no pass 2, or fewer reviewers than `--k`): the table says so; tell the user and offer to rerun later (`bin/run-model wait premortem`) or continue degraded with their consent. Exit 2: nothing usable.
+`--planner` is mandatory: `premortem` excludes your vendor and your model id on every account (a model must not review its own plan), then draws one healthy Tier 1 model (roles `premortem` / `plan_review`, weighted by the credit left on each account) (`--k 2` adds a second reviewer of a distinct vendor, only when the user asks for it). It runs pass 1 (the pre-mortem) and pass 2 (an adversarial self-review: the reviewer re-checks its own reasons against the repo, drops the generic ones and adds the angles it missed), and ranks by probability x impact, and writes `.autopilot/plan/premortem.md` and `premortem.json` (with each reviewer's status per pass). It takes 10 to 40 minutes: run it in the background and keep working on the ticket breakdown meanwhile. Exit 1 means degraded (no pass 2, or fewer reviewers than `--k`): the table says so; tell the user and offer to rerun later (`bin/run-model wait premortem`) or continue degraded with their consent. Exit 2: nothing usable.
 
-If your own vendor is the only high tier available, do not substitute another account of it: wait for a reset (`bin/run-model wait premortem`), or, with the user's consent, `--allow-mid` to accept `cost: mid` models of other vendors (say so in the Approval section).
+Pre-mortems are Tier 1 only (see the README, Tiers). If your own vendor is the only Tier 1 vendor available, do not substitute another account of it and do not fall to Tier 2: wait for a reset (`bin/run-model wait premortem`), and when the wait is long tell the user (a CRITICAL alert says so too). The old `--allow-mid` is refused.
 
 ## 3. Show the failure reasons to the user, explicitly
 
@@ -109,4 +109,4 @@ Adding a major milestone to a project that already exists is `/autopilot-milesto
 - Pre-mortem reviewers are read-only; `premortem` restores the tree if one of them changes it.
 - Keep each reviewer's full output on disk (`.autopilot/plan/premortem-<key>-<pass>.md`) and never paraphrase a reason into something weaker than the reviewer wrote.
 - No decision unsourced: a `PLAN.md` change without its Decision log row, or a row still `pending` in Linear, is a defect to fix before anything else.
-- Budget: the pre-mortem is the one place where high-tier models are spent on purpose. One reviewer, two passes, once per plan (plus one rerun on a material change). Never pay for extra credits to run it: wait for a reset instead (`bin/run-model wait premortem`).
+- Budget: the pre-mortem is one of the few places where Tier 1 models are spent on purpose (with plan reviews, milestone reviews and coordination). One reviewer, two passes, once per plan (plus one rerun on a material change). Never pay for extra credits to run it: wait for a reset instead (`bin/run-model wait premortem`).

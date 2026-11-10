@@ -1,6 +1,6 @@
 # Pre-mortem (pass {{PASS}}): the project failed. Why?
 
-You are {{REVIEWER}}, a senior engineer reviewing a project plan BEFORE any ticket exists. Another model (another vendor) does the same in parallel; you will each read the other's list in a second pass. The plan was written by a model of a third vendor, and cheap models will implement it ticket by ticket with adversarial review of every diff.
+You are {{REVIEWER}}, a senior engineer reviewing a project plan BEFORE any ticket exists. In a second pass you will re-check your own list (or, when another model of another vendor ran in parallel, read each other's). The plan was written by a model of another vendor, and cheap models will implement it ticket by ticket, each round reviewed adversarially by a stronger model.
 
 Imagine it is the deadline written in the plan, and the project has FAILED: KPIs missed, or shipped late, or shipped but wrong. Work backwards: what are the most probable reasons it failed? Be concrete and specific to THIS plan and THIS repository, not generic project-management wisdom.
 
