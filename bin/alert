@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""alert: the CRITICAL alerts the coordinator must report to the owner at once (see the run skill, "Waiting").
+
+`run-model` raises them (run, `usage --apply`, `alerts`): a vendor out of quota on every account once the resets were
+tried (no reset left, reset failed, auto-reset disabled), or plan_review/premortem without an eligible model. Each one
+is also posted as a Linear project update when state.json has a project. They live in <repo>/.autopilot/alerts.jsonl
+(and $AUTOPILOT_CONFIG_DIR/alerts.jsonl for alerts raised outside a project). An alert stays listed until acknowledged,
+even after it resolved, so an outage that ended while the owner was away is still reported.
+
+  alert list [--all] [--json]   # unacknowledged alerts (--all: acknowledged too), one `CRITICAL: ...` line each; nothing = no line
+  alert ack <ID|all>            # acknowledge once the owner has been told (the message to the user, with the reset times)
+Repo: nearest .autopilot/state.json above the current directory, or $AUTOPILOT_REPO (none: machine-level alerts only).
+"""
+import json, os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+
+def main(a):
+    repo = lib.find_repo(required=False)
+    if not a or a[0] not in ('list', 'ack'):
+        print(__doc__); sys.exit(1)
+    if a[0] == 'list':
+        al = lib.alerts(repo, include_acked='--all' in a)
+        if '--json' in a:
+            print(json.dumps([{k: v for k, v in x.items() if k != '_file'} for x in al], indent=1)); return
+        for x in al:
+            print(lib.alert_line(x) + (' [acked %s]' % x['acked_at'][:16] if x.get('acked_at') else ''))
+        return
+    if len(a) < 2:
+        sys.exit('alert ack <ID|all>')
+    want = a[1]; n = 0
+    for path in dict.fromkeys(x['_file'] for x in lib.alerts(repo)):
+        file_repo = repo if path == lib.alerts_path(repo) else None
+
+        def ack(al):
+            c = 0
+            for x in al:
+                if not x.get('acked_at') and want in ('all', x['id']):
+                    x['acked_at'] = lib.now().isoformat(); c += 1
+            return c
+        n += lib.update_alerts(file_repo, ack)
+    if not n:
+        sys.exit('alert: no unacknowledged alert %s' % want)
+    print('acknowledged %d' % n)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

@@ -2,7 +2,7 @@
 # Behavioural self-test of the linear-autopilot runtime with a fake harness adapter: no model CLI is run, no quota is
 # spent, the user's config is never touched (everything happens in a temporary directory). Run: tests/selftest.sh
 set -u
-H="$(cd "$(dirname "$0")/.." && pwd)"
+H="$(cd "$(dirname "$0")/.." && pwd)"; export H
 SCR=$(mktemp -d -t autopilot-selftest); LPID=""; trap '[ -n "$LPID" ] && kill $LPID 2>/dev/null; rm -rf "$SCR"' EXIT
 export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; mkdir -p "$SCR/fake"
 PASS=0; FAIL=0
@@ -23,7 +23,28 @@ case "${FAKE_BEHAVIOUR:-approve}" in
 esac
 EOF
 chmod +x "$SCR/fake/fakecli"; export PATH="$SCR/fake:$PATH"; export SCR
+# Hermetic: no real model CLI, no real Linear, never the real codex-reset. The template roster names real CLIs; stubs
+# shadow them, and the codex adapter is overridden to read no real session log and to call a logging fake reset.
+unset LINEAR_API_KEY LINEAR_API_URL
+for c in codex claude agy opencode grok cursor-agent gemini vibe; do printf '#!/bin/sh\nexit 1\n' > "$SCR/fake/$c"; chmod +x "$SCR/fake/$c"; done
+cat > "$SCR/fake/fake-reset" <<'EOF'
+#!/bin/bash
+echo "$*" >> "$SCR/resets.log"
+case "$(cat "$SCR/reset.mode" 2>/dev/null || echo ok)" in
+  ok) echo "Usage limit resets"; echo "Full reset redeemed"; exit 0;;
+  none) echo "UNEXPECTED SCREEN: the redeem menu did not appear (expected 'Redeem')"; exit 2;;
+  *) echo "UNEXPECTED SCREEN: no redemption confirmation after choosing"; exit 2;;
+esac
+EOF
+chmod +x "$SCR/fake/fake-reset"
 $H/bin/harness init >/dev/null
+python3 - <<'PY'
+import json, os
+a = json.load(open(os.path.join(os.environ['H'], 'harnesses', 'codex.json')))
+a['usage']['path'] = os.path.join(os.environ['SCR'], 'no-codex-sessions'); a['tokens']['path'] = a['usage']['path']
+a['auto_reset']['argv'] = [os.path.join(os.environ['SCR'], 'fake', 'fake-reset'), '--yes', '--account', '{account}']
+json.dump(a, open(os.path.join(os.environ['AUTOPILOT_CONFIG_DIR'], 'harnesses', 'codex.json'), 'w'))
+PY
 $H/bin/harness new fakecli --binary fakecli --vendor by_model --argv '["-p","{prompt}","--model","{model}"]' >/dev/null
 $H/bin/harness add-model fk-a --cli fakecli --model claude-x-5 --cost high --no-implement --vendor anthropic >/dev/null
 $H/bin/harness add-model fk-b --cli fakecli --model gpt-x --cost high --no-implement --vendor openai >/dev/null
@@ -426,4 +447,91 @@ echo '{"milestones": {"M1 Base": "l1", "M2 More": "l2"}, "tickets": {"a": {"iden
 AUTOPILOT_REPO=$SD $H/bin/milestone seed $SD/.autopilot/plan/tickets.json >/dev/null
 check "seed: milestones from tickets.json, stages from blocked_by" "$(J $SD/.autopilot/state.json "[(m['id'], m['linear_id'], m['issues']) for m in d['milestones']], d['stages'], d['critical_path']")" "[('m1-base', 'l1', ['E-1', 'E-3']), ('m2-more', 'l2', ['E-2'])] [['E-1', 'E-3'], ['E-2']] ['E-1', 'E-2']"
 AUTOPILOT_REPO=$SD $H/bin/milestone seed $SD/.autopilot/plan/tickets.json >/dev/null 2>&1; check "seed: refused once milestones exist" "$?" "1"
+# Codex resets and CRITICAL alerts: a roster of its own (two "Codex-like" accounts read from session logs, one xai key),
+# the fake reset script (never the real codex-reset), the fake Linear server still running from the milestone tests.
+echo "--- auto-reset, stale usage, CRITICAL alerts"
+export AUTOPILOT_CONFIG_DIR=$SCR/cfg4; AC=$SCR/acct; mkdir -p $AUTOPILOT_CONFIG_DIR/harnesses $AC/a $AC/b $AC/x
+cat > "$SCR/fake/fakeacct" <<'EOF'
+#!/bin/bash
+[ -f "${FAKE_HOME:-$SCR/acct/a}/down" ] && { echo "usage limit reached"; exit 1; }
+echo AUTOPILOT_OK
+EOF
+chmod +x "$SCR/fake/fakeacct"
+python3 - <<'PY'
+import json, os
+S = os.environ['SCR']; ac = os.path.join(S, 'acct'); cfg = os.environ['AUTOPILOT_CONFIG_DIR']
+json.dump({'name': 'fakeacct', 'binary': 'fakeacct', 'vendor': 'by_model', 'run': {'argv': ['-p', '{prompt}'], 'env': {}, 'output': 'stdout'},
+           'account_env': 'FAKE_HOME', 'account_default': os.path.join(ac, 'a'),
+           'usage': {'kind': 'codex_sessions', 'path': '$FAKE_HOME/sessions', 'windows': {'300min': '5h', '10080min': 'weekly'}},
+           'auto_reset': {'window': 'weekly', 'argv': [os.path.join(S, 'fake', 'fake-reset'), '--yes', '--account', '{account}']},
+           'quota_patterns': ['usage limit']}, open(os.path.join(cfg, 'harnesses', 'fakeacct.json'), 'w'))
+m = lambda model, home, vendor, cost: {'cli': 'fakeacct', 'model': model, 'vendor': vendor, 'cost': cost, 'tier': model, 'family': model,
+                                         **({'env': {'FAKE_HOME': os.path.join(ac, home)}} if home else {})}
+json.dump({'cooldown_minutes': 30, 'timeouts_seconds': {'implement': 60, 'review': 60, 'smoke': 30, 'idle': 60}, 'health': {}, 'changelog': [],
+           'models': {'fa-a': m('gpt-a', None, 'openai', 'high'), 'fa-b': m('gpt-a', 'b', 'openai', 'high'), 'fx': m('grok-y', 'x', 'xai', 'cheap')},
+           'pools': {'plan_review': ['fa-a', 'fa-b'], 'premortem': ['fa-a', 'fa-b'], 'review': ['fa-a', 'fa-b', 'fx'], 'implement': ['fx'],
+                     'implement_escalation': ['fx']}}, open(os.path.join(cfg, 'models.json'), 'w'))
+PY
+# SESS <account> <5h %> <weekly %> <minutes ago>: the newest Codex-style rate_limits record of that account.
+SESS() { mkdir -p $AC/$1/sessions/2026/11/09; python3 -c "
+import json, datetime as d
+t = d.datetime.now(d.timezone.utc) - d.timedelta(minutes=$4)
+rl = {'primary': {'window_minutes': 300, 'used_percent': $2, 'resets_at': 4070908800}, 'secondary': {'window_minutes': 10080, 'used_percent': $3, 'resets_at': 4070995200}}
+print(json.dumps({'timestamp': t.isoformat(), 'type': 'event_msg', 'payload': {'type': 'token_count', 'rate_limits': rl}}))" > $AC/$1/sessions/2026/11/09/r.jsonl; }
+CLEAN() { python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p))
+for k in ('health','resets','last_ok'): r[k]={}
+r['codex_auto_reset']=True; r.update($1);json.dump(r,open(p,'w'))"; rm -f $SCR/resets.log $AC/*/down; }
+NRESET() { [ -f $SCR/resets.log ] && wc -l < $SCR/resets.log | tr -d ' ' || echo 0; }
+HEALTH() { python3 -c "import json,os;print(sorted(json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['health']))"; }
+AR=$SCR/ar-repo; mkdir -p $AR/.autopilot && (cd $AR && git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init)
+echo "{\"branch\": \"$(git -C $AR branch --show-current)\", \"project_id\": \"proj-1\", \"coordinator\": \"fx\", \"queue\": [\"T-1\"], \"inflight\": {}, \"done\": [], \"per_unit_min\": 60}" > $AR/.autopilot/state.json
+cd $AR; export AUTOPILOT_REPO=$AR
+SESS x 10 10 1
+CLEAN '{}'; SESS a 100 50 1; SESS b 10 10 1
+$H/bin/run-model usage --apply >/dev/null 2>&1
+check "auto-reset: a 5-hour limit alone never claims a reset, the account cools down" "$(NRESET) $(HEALTH)" "0 ['fa-a']"
+CLEAN '{}'; SESS a 100 100 1; echo ok > $SCR/reset.mode
+U=$($H/bin/run-model usage --apply 2>$SCR/u.err)
+check "auto-reset: weekly 100% claims the account's reset once, through the adapter (codex-reset --yes --account)" "$(cat $SCR/resets.log)" "--yes --account default"
+check "auto-reset: redeemed, smoke ok, cooldowns cleared, the triggering reading now stale" "$(echo "$U" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['resets'][0]['result'][:30], d['exhausted_until_reset'], [(s['account'], s['window']) for s in d['stale_readings_skipped']])") $(HEALTH)" "redeemed, smoke ok (fa-a), coo [] [('default', '5h'), ('default', 'weekly')] []"
+check "auto-reset: attempt recorded in the roster with the window, time and result" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['resets']['fakeacct/default'];print(r['window'], r['window_reset'][:10], bool(r['at']), r['result'][:8])")" "weekly 2099-01-02 True redeemed"
+CLEAN '{}'; SESS a 100 100 1; touch $AC/a/down
+U=$($H/bin/run-model usage --apply 2>/dev/null); $H/bin/run-model usage --apply >/dev/null 2>&1
+check "auto-reset: once per account per weekly window (smoke failed: cooled, no second claim)" "$(NRESET) $(HEALTH) $(echo "$U" | python3 -c "import json,sys;print(json.load(sys.stdin)['resets'][0]['result'][:22])")" "1 ['fa-a'] redeemed, smoke failed"
+CLEAN '{"codex_auto_reset": False}'; SESS a 100 100 1
+$H/bin/run-model usage --apply >/dev/null 2>&1
+check "auto-reset: disabled by models.json codex_auto_reset=false" "$(NRESET) $(HEALTH)" "0 ['fa-a']"
+CLEAN '{}'; SESS a 100 100 1; touch $AC/a/down; echo x > $SCR/rb.md
+$H/bin/run-model run review $SCR/rb.md $SCR/rb.out --cwd $AR --standalone --exclude-vendor anthropic --model fa-a >/dev/null 2>&1
+check "auto-reset: a run that hits its quota claims the weekly reset too" "$(NRESET) $(cat $SCR/resets.log)" "1 --yes --account default"
+# Stale usage: a reading taken before a successful smoke of the account is not re-applied.
+CLEAN '{"codex_auto_reset": False}'; SESS a 100 100 30
+$H/bin/run-model smoke fa-a >/dev/null
+U=$($H/bin/run-model usage --apply 2>$SCR/u.err)
+check "stale usage: 100% reading older than a successful smoke is skipped, no cooldown" "$(echo "$U" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['exhausted_until_reset'], len(d['stale_readings_skipped']))") $(HEALTH) $(grep -c 'stale reading skipped: fakeacct default weekly' $SCR/u.err)" "[] 2 [] 1"
+SESS a 100 100 0; sleep 1
+check "stale usage: a reading newer than the smoke still applies" "$($H/bin/run-model usage --apply 2>/dev/null >/dev/null; HEALTH)" "['fa-a']"
+# CRITICAL: both accounts of the vendor out, no reset available.
+CLEAN '{}'; SESS a 100 100 1; SESS b 100 100 1; echo none > $SCR/reset.mode
+NU=$(J $SCR/linear.json "len(d['updates'])")
+$H/bin/run-model usage --apply >/dev/null 2>$SCR/u.err
+check "critical: both resets attempted, none available" "$(NRESET) $(HEALTH)" "2 ['fa-a', 'fa-b']"
+check "critical: CRITICAL line on stderr names the vendor and the blocked plan review" "$(grep -c '^CRITICAL: openai out of quota on every account (fakeacct/FAKE_HOME=.*/b, fakeacct/default); blocked pools: plan_review, premortem; earliest reset ' $SCR/u.err)" "1"
+check "critical: alerts.jsonl entry (vendor, accounts, reset results, pools, earliest reset)" "$(python3 -c "
+import json; a=[json.loads(l) for l in open('$AR/.autopilot/alerts.jsonl')]; d=a[0]['details']
+print(len(a), a[0]['level'], d['vendor'], len(d['accounts']), sorted(v[:18] for v in d['resets'].values()), d['blocked_pools'], d['earliest_reset'][:10])")" "1 CRITICAL openai 2 ['no reset available', 'no reset available'] ['plan_review', 'premortem'] 2099-01-02"
+check "critical: one Linear project update titled CRITICAL: openai out of quota" "$(J $SCR/linear.json "len(d['updates']) - $NU, d['updates'][-1]['body'].splitlines()[0]")" "1 CRITICAL: openai out of quota"
+$H/bin/run-model usage --apply >/dev/null 2>&1
+check "critical: rerun keeps one alert, no second Linear update, no second reset" "$(wc -l < $AR/.autopilot/alerts.jsonl | tr -d ' ') $(J $SCR/linear.json "len(d['updates']) - $NU") $(NRESET)" "1 1 2"
+check "critical: bin/alert list shows it" "$($H/bin/alert list | grep -c '^CRITICAL: \[.*-openai\] openai out of quota.*ACTIVE')" "1"
+AID=$(python3 -c "import json;print(json.loads(open('$AR/.autopilot/alerts.jsonl').readline())['id'])")
+check "critical: bin/eta prints it first" "$(ETA_LOAD=0 $H/bin/eta | head -1 | cut -d']' -f1)" "CRITICAL: [$AID"
+check "critical: a run prints CRITICAL on stderr too" "$(echo x > $SCR/rb.md; $H/bin/run-model run review $SCR/rb.md $SCR/rb.out --cwd $AR --standalone --exclude-vendor anthropic --model fx 2>&1 >/dev/null | grep -c '^CRITICAL: openai')" "1"
+python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['health']={};json.dump(r,open(p,'w'))"
+$H/bin/run-model alerts >/dev/null 2>&1
+check "critical: resolved once a key is back, still listed until acknowledged" "$($H/bin/alert list | grep -c 'resolved')" "1"
+$H/bin/alert ack all >/dev/null
+check "critical: acknowledged -> gone from alert list and eta" "$($H/bin/alert list | wc -l | tr -d ' ') $(ETA_LOAD=0 $H/bin/eta | grep -c CRITICAL)" "0 0"
+unset AUTOPILOT_REPO
 echo "=== $PASS passed, $FAIL failed"

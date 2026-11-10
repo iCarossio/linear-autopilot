@@ -2,9 +2,12 @@
 # codex-reset [--yes] [--account default|CODEX_HOME=<path>]  -> redeem one Codex "Full reset (Weekly + 5 hr)" through the
 # interactive TUI (/usage -> 2. Redeem reset -> 1. the reset that expires first) on one account.
 #
-# Only with the user's explicit permission for the current session (record it in state.json notes).
-# Refuses unless `run-model usage` shows that account's Codex WEEKLY window at 100%: a 5-hour limit alone is never
-# a reason to spend a reset. Without --yes it only prints the available resets and exits.
+# Authorized durably by the owner (2026-11-09): `run-model` runs `codex-reset --yes --account <acc>` itself when a fresh
+# reading shows that account's WEEKLY window exhausted, at most once per account per weekly window, unless
+# `"codex_auto_reset": false` in models.json. Running it by hand needs no per-session permission either.
+# Refuses unless `run-model usage` shows that account's Codex WEEKLY window at 100% in a reading newer than the last
+# successful run of the account (session logs keep saying 100% after a reset): a 5-hour limit alone is never a reason
+# to spend a reset. Without --yes it only prints the available resets and exits.
 # Prints the last screen; any unexpected screen after choosing makes it stop with Esc and exit 2 instead of guessing.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -15,9 +18,10 @@ import json, sys
 acc = sys.argv[1]
 u = [e for e in json.load(sys.stdin)['usage'] if e['cli'] == 'codex' and e['account'] == acc]
 w = [x for e in u for x in e['windows'] if x.get('window') == 'weekly' and x.get('used') is not None]
-print(w[0]['used'] if w else -1)" "$ACCOUNT")
+print(-2 if w and w[0].get('stale') else (w[0]['used'] if w else -1))" "$ACCOUNT")
 echo "codex weekly used ($ACCOUNT): ${weekly}%"
 [ "$weekly" = -1 ] && { echo "REFUSED: no weekly reading for account $ACCOUNT (run-model usage)"; exit 3; }
+[ "$weekly" = -2 ] && { echo "REFUSED: the weekly 100% reading for $ACCOUNT is older than a successful run of that account (stale)"; exit 3; }
 if [ "$CHOOSE" = 1 ] && [ "$weekly" -lt 100 ]; then echo "REFUSED: weekly limit not reached"; exit 3; fi
 case "$ACCOUNT" in CODEX_HOME=*) export CODEX_HOME="${ACCOUNT#CODEX_HOME=}"; CODEX_HOME="${CODEX_HOME/#\~/$HOME}";; esac
 command -v expect >/dev/null || { echo "codex-reset: expect is not installed"; exit 1; }

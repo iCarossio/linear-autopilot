@@ -37,6 +37,17 @@
       "10080min": "weekly"
     }
   },
+  "auto_reset": {
+    "_doc": "Redeems a Codex \"Full reset\" when a fresh reading shows the weekly window exhausted (run-model claim_reset). {bin} = the runtime bin/, {account} = the account label (default or CODEX_HOME=<path>).",
+    "window": "weekly",
+    "argv": [
+      "{bin}/codex-reset",
+      "--yes",
+      "--account",
+      "{account}"
+    ],
+    "timeout": 240
+  },
   "quota_patterns": [
     "usage limit",
     "rate limit"

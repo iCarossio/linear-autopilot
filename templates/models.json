@@ -2,6 +2,9 @@
   "_doc": "Template roster for linear-autopilot. `bin/harness init` copies it to $AUTOPILOT_CONFIG_DIR/models.json (never edited in the repo). Order inside each pool = preference. 'family' + 'tier' drive upgrades (bin/run-model discover): a newer version of the same family and tier replaces the entry; tiers are never swapped. 'cost' (high|mid|cheap|free) documents what a model costs on the user's plans; 'no_implement' keeps expensive models out of implementation. Accounts: a model entry with 'env' (e.g. CODEX_HOME) is another account of the same CLI (bin/harness add-account). Model ids below are examples from October 2026: run `bin/harness discover` and `bin/run-model discover --apply` after init.",
   "last_discovery": "2026-10-25",
   "cooldown_minutes": 30,
+  "codex_auto_reset": true,
+  "codex_auto_reset_doc": "Owner's standing authorization (2026-11-09): run-model redeems a Codex usage reset by itself (bin/codex-reset --yes) when a fresh reading shows an account's WEEKLY window at 100%, once per account per weekly window, then smoke-tests the account. false = never; the outage is then a CRITICAL alert.",
+  "alert_min_outage_minutes": 60,
   "timeouts_seconds": {
     "implement": 4800,
     "review": 1800,

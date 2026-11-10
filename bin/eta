@@ -28,10 +28,16 @@ date past the stage schedule, a REPLAN line says `stages` is out of step (run `b
 `milestones` the output is the single overall line, as before. Tickets of a milestone missing from `queue`, `inflight`
 and `done` count as queued. Ideas (state.json `ideas`, see `bin/idea`) never count: not queued, no bar, no ETA.
 
-  eta [-v] [--json]      --json: one JSON object (overall + per milestone + replan) instead of the text lines
+Unacknowledged CRITICAL alerts (`bin/alert`, e.g. a vendor out of quota on every account) print first, one
+`CRITICAL:` line each, so no message that starts with the ETA can leave them out.
+
+  eta [-v] [--json]      --json: one JSON object (overall + per milestone + replan + alerts) instead of the text lines
 ETA_STATE=<file> reads that state instead (a what-if schedule: `bin/milestone add --dry-run`); no history is written.
 """
 import datetime as dt, json, os, re, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
 
 
 def find_repo():
@@ -227,12 +233,15 @@ if milestones:
                      'minutes': round(m_end), 'spread_min': spread(m_end) if open_ else 0,
                      'end': (now + dt.timedelta(minutes=m_end)).astimezone() if open_ else None})
 pct = progress(list(dict.fromkeys(list(done) + list(inflight) + queue)))[0]
+alerts = [] if os.environ.get('ETA_STATE') else lib.alerts(M)
 if '--json' in sys.argv:
-    print(json.dumps({'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
+    print(json.dumps({'alerts': [lib.alert_line(a) for a in alerts], 'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
                       'spread_min': spread(total_end), 'pct': round(pct, 4), 'done': len(done), 'inflight': len(inflight),
                       'todo': len(queue), 'milestones': [dict(r, end=r['end'] and r['end'].isoformat()) for r in rows],
                       'replan': replan}, indent=1))
     sys.exit(0)
+for a in alerts:
+    print(lib.alert_line(a))
 if rows:
     w = max(len(r['name']) for r in rows)
     for r in rows:

@@ -224,6 +224,61 @@ def cool(key, reason, minutes=None, windows=None):
     update_reg(fn)
 
 
+def record_ok(key):
+    """A successful run or smoke of `key`: proof that its quota windows were open at this time. `run-model usage
+    --apply` treats any reading observed before it as stale (see last_ok)."""
+    update_reg(lambda r: r.setdefault('last_ok', {}).__setitem__(key, now().isoformat()))
+
+
+def last_ok(r, keys):
+    """Latest successful run or smoke among `keys`, as a datetime, or None."""
+    ts = [parse_time(r.get('last_ok', {})[k]) for k in keys if k in r.get('last_ok', {})]
+    return max(ts) if ts else None
+
+
+# ---------- critical alerts (the coordinator must tell the owner; see bin/alert) ----------
+# One JSON object per line: id, level, kind (vendor_out | pool_blocked), key (vendor or pool), at, message, details,
+# acked_at, resolved_at. Written to <repo>/.autopilot/alerts.jsonl, or to $AUTOPILOT_CONFIG_DIR/alerts.jsonl when the
+# writer runs outside a project. An alert stays listed until it is acknowledged, even once resolved, so an outage that
+# ended while the owner was away is still reported.
+
+def alerts_path(repo):
+    return os.path.join(repo, '.autopilot', 'alerts.jsonl') if repo else os.path.join(CONFIG_DIR, 'alerts.jsonl')
+
+
+def read_alerts(path):
+    try:
+        with open(path) as f:
+            return [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def update_alerts(repo, fn):
+    """Locked read-modify-write of one alerts file. fn(alerts) mutates the list and may return a value."""
+    path = alerts_path(repo)
+    with locked(path):
+        al = read_alerts(path)
+        out = fn(al)
+        d = os.path.dirname(path)
+        fd, tmp = tempfile.mkstemp(prefix='.alerts.', dir=d)
+        with os.fdopen(fd, 'w') as f:
+            f.write(''.join(json.dumps(a) + '\n' for a in al))
+        os.replace(tmp, path)
+        return out
+
+
+def alerts(repo, include_acked=False):
+    """Alerts of the project and the machine-level ones (written outside a project), unacknowledged unless asked."""
+    paths = list(dict.fromkeys([alerts_path(repo), alerts_path(None)]))
+    return [dict(a, _file=p) for p in paths for a in read_alerts(p) if include_acked or not a.get('acked_at')]
+
+
+def alert_line(a):
+    state = 'resolved %s' % a['resolved_at'][:16] if a.get('resolved_at') else 'ACTIVE'
+    return '%s: [%s] %s (since %s, %s)' % (a.get('level', 'CRITICAL'), a['id'], a['message'], a['at'][:16], state)
+
+
 def issue_from_brief(path):
     mt = re.match(r'(.+?)-(impl|review|plan|diag)-', os.path.basename(path))
     return mt.group(1) if mt else None
