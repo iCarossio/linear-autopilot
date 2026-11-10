@@ -2,6 +2,7 @@
   "name": "grok",
   "binary": "grok",
   "vendor": "xai",
+  "account_env": "GROK_HOME",
   "doc": "xAI Grok CLI on a subscription. Renewal time is shown by /usage in an interactive session.",
   "run": {
     "argv": [
