@@ -37,7 +37,7 @@ Any other CLI with a non-interactive mode is added with `bin/harness new` (see `
 3. **A model never reviews its own work.** The implementer of a ticket, on any account or through any harness, is excluded from its review; the planner's vendor is excluded from the review of its plan. Enforced in code, not by prompt.
 4. **Two reviewers, two vendors.** A review counts only when it parses, the reviewer did not touch the tree, and an "approve" carries no blocking finding. Degraded modes exist but must be asked for.
 5. **High tier thinks, cheap tier types.** Expensive models plan, pre-mortem and review; cheap and free models write the code. The tier actually used follows the quota available right now.
-6. **Subscriptions and free tiers only.** Several logins of one CLI are several quotas. The runtime waits for a reset; it never buys credits.
+6. **Subscriptions and free tiers only.** Several logins of one CLI are several quotas. The runtime waits for a reset, claims the free Codex weekly resets by itself (`codex_auto_reset`), and never buys credits. A vendor out of quota on every account with no reset left is a CRITICAL alert (`bin/alert`, the top of `bin/eta`, a Linear project update) that the coordinator reports to you at once.
 7. **One account standard.** Homes are `<default>`, `<default>-b`, `<default>-c` (`~/.codex`, `~/.codex-b`, `~/.codex-c`); roster keys are `<key>`, `<key>-b`, `<key>-c`. Same for every harness.
 8. **The coordinator only orchestrates.** It never implements or reviews, so its own budget lasts the night. State lives on disk and in Linear; a new session resumes from there.
 9. **Milestones grow with the project.** A project has one or more major milestones, each with its KPIs, its Linear milestone and its own ETA bar. Adding one later is normal and goes through the same pre-mortem and plan review, scoped to the delta, before anything is created (`/autopilot-milestone`, on top of `bin/milestone add`). Ideas are not milestones: `/autopilot-idea` parks them unscheduled until the owner promotes them.
@@ -60,7 +60,7 @@ bin/         shared runtime (run-model, review, premortem, decision, milestone, 
 harnesses/   one JSON adapter per CLI: how to call it, where its accounts live, how to read its usage
 prompts/     briefs for implementers, reviewers and the pre-mortem
 templates/   example roster, state, plan and ticket
-references/  lessons from real runs, by symptom
+references/  lessons from real runs, by symptom (lessons.md; lessons-codex-resets.md: Codex quota outage, automatic resets, stale usage)
 tests/       behavioural suite against a fake harness (no quota spent)
 ```
 

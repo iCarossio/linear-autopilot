@@ -52,7 +52,7 @@ Typical false positives seen: "Go regexp rejects `(?:...)`" (it doesn't), "fails
 
 ## Codex usage limits
 
-Codex models on one ChatGPT account share one usage limit (5 h and weekly windows); `run-model usage` reads them from the session logs of each `CODEX_HOME`. `bin/codex-reset` redeems a "Full reset" through the TUI (`/usage` -> Redeem reset -> the earliest-expiring one), only with the user's per-session permission and only when the weekly window is at 100%.
+Codex models on one ChatGPT account share one usage limit (5 h and weekly windows); `run-model usage` reads them from the session logs of each `CODEX_HOME`. `bin/codex-reset` redeems a "Full reset" through the TUI (`/usage` -> Redeem reset -> the earliest-expiring one), only when the weekly window is at 100%; `run-model` claims it by itself (owner's standing authorization, `codex_auto_reset`). See `lessons-codex-resets.md`.
 
 ## Grok on quota
 

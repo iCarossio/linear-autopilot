@@ -1,5 +1,5 @@
 {
-  "_comment": "Permission rules the autopilot needs to run unattended. Setup step 0 merges them into ~/.claude/settings.json (permissions.allow) with the user's approval, along with any project-specific test/build commands (e.g. npm test, pytest, make). Each harness script is listed under both path spellings (~ and the absolute home; init replaces {HOME} with the user's home, since rules do not expand $HOME), because rules match the start of the command line. Never add rules for actions that need a per-use owner decision: publishing a website, merging to the default branch, opening a PR, deleting branches or worktrees, paying for credits.",
+  "_comment": "Permission rules the autopilot needs to run unattended. Setup step 0 merges them into ~/.claude/settings.json (permissions.allow) with the user's approval, along with any project-specific test/build commands (e.g. npm test, pytest, make). Each harness script is listed under both path spellings (~ and the absolute home; init replaces {HOME} with the user's home, since rules do not expand $HOME), because rules match the start of the command line. Never add rules for actions that need a per-use owner decision: publishing a website, merging to the default branch, opening a PR, deleting branches or worktrees, paying for credits. Redeeming a free Codex usage reset (codex-reset) is not one: the owner authorized it durably (models.json codex_auto_reset), and run-model calls it unattended.",
   "permissions": {
     "allow": [
       "Bash(~/.claude/skills/autopilot-run/bin/run-model *)",
@@ -18,6 +18,10 @@
       "Bash({HOME}/.claude/skills/autopilot-run/bin/eta *)",
       "Bash(~/.claude/skills/autopilot-run/bin/linear *)",
       "Bash({HOME}/.claude/skills/autopilot-run/bin/linear *)",
+      "Bash(~/.claude/skills/autopilot-run/bin/codex-reset *)",
+      "Bash({HOME}/.claude/skills/autopilot-run/bin/codex-reset *)",
+      "Bash(~/.claude/skills/autopilot-run/bin/alert *)",
+      "Bash({HOME}/.claude/skills/autopilot-run/bin/alert *)",
       "Bash(~/.claude/skills/autopilot-run/bin/docker-up *)",
       "Bash({HOME}/.claude/skills/autopilot-run/bin/docker-up *)",
       "Bash(~/.claude/skills/autopilot-run/bin/docker-reap *)",
