@@ -7,6 +7,9 @@ A container is dead when ALL of these hold:
   - no live process mentions its name or id in its command line (an owning test, server or script);
   - it is not running, OR it has been running longer than the threshold with no owning process left
     (a server leaked by a test run that died).
+A RUNNING container that is a service (it belongs to a docker compose project, or it has a restart
+policy other than "no") is never touched: a shared stack started with `docker compose up` has no
+owning process by design, and removing it takes the owner's app down (seen: the shared Postgres).
 Containers whose name matches a --keep regex (repeatable) are never touched.
 Without --apply it only prints what it would remove (one line per container). With --apply it runs
 `docker rm -f <name>` on exactly those names. Never restarts or stops the Docker daemon.
@@ -35,10 +38,15 @@ for line in ps.stdout.splitlines():
     name, cid, state = c['Names'], c['ID'], c.get('State', '')
     if any(k.search(name) for k in keep):
         continue
-    insp = subprocess.run(['docker', 'inspect', '-f', '{{.Created}}', cid], capture_output=True, text=True).stdout.strip()
+    insp = subprocess.run(['docker', 'inspect', cid], capture_output=True, text=True).stdout
     try:
-        created = dt.datetime.fromisoformat(re.sub(r'\.(\d{6})\d*', r'.\1', insp).replace('Z', '+00:00'))
-    except ValueError:
+        info = json.loads(insp)[0]
+        created = dt.datetime.fromisoformat(re.sub(r'\.(\d{6})\d*', r'.\1', info['Created']).replace('Z', '+00:00'))
+    except (ValueError, IndexError, KeyError):
+        continue
+    labels = (info.get('Config') or {}).get('Labels') or {}
+    restart = ((info.get('HostConfig') or {}).get('RestartPolicy') or {}).get('Name') or 'no'
+    if state == 'running' and ('com.docker.compose.project' in labels or restart != 'no'):
         continue
     age_h = (now - created).total_seconds() / 3600
     if age_h < min_age:
