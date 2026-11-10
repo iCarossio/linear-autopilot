@@ -555,19 +555,32 @@ SUB_RANK = {'paid': 0, 'paid?': 1, 'free': 2}
 FREE_ID = re.compile(r'(?:[-:/]free)(?:#.*)?$|^openrouter/openrouter/free', re.I)
 # The owner's tier table (Nov 2026), first match wins, matched on the model id. models.json `tier_table` entries come
 # first. It assigns a level to a new entry and re-levels an upgraded id; Tier 4 overrides (Mistral, free) are in code.
+# Grok 4.7 is Tier 2 (owner's rule, 2026-11-09). Speed variants have no row: they are refused (FAST_ID).
 DEFAULT_TIER_TABLE = [
     {'match': r'mythos|fable', 'level': 0}, {'match': r'gpt-[\d.]+-astra', 'level': 0}, {'match': r'gemini-[\d.]+-carbon', 'level': 0},
     {'match': r'claude-opus', 'level': 1}, {'match': r'gpt-[\d.]+-sol', 'level': 1}, {'match': r'gemini-[\d.]+-argon', 'level': 1},
-    {'match': r'grok-4\.7', 'level': 1}, {'match': r'muse-spark', 'level': 1}, {'match': r'kimi-k\d', 'level': 1},
+    {'match': r'muse-spark', 'level': 1}, {'match': r'kimi-k\d', 'level': 1},
     {'match': r'qwen[\d.]+-max', 'level': 1}, {'match': r'deepseek-v[\d.]+-pro', 'level': 1},
     {'match': r'claude-sonnet', 'level': 2}, {'match': r'gpt-[\d.]+-terra', 'level': 2}, {'match': r'gemini-3\.8-flash(?!-lite)', 'level': 2},
-    {'match': r'grok-4\.3', 'level': 2}, {'match': r'qwen[\d.]+-plus', 'level': 2},
+    {'match': r'grok-4\.7', 'level': 2}, {'match': r'grok-4\.3', 'level': 2}, {'match': r'qwen[\d.]+-plus', 'level': 2},
     {'match': r'claude-haiku', 'level': 3}, {'match': r'gpt-[\d.]+-luna', 'level': 3}, {'match': r'gemini-[\d.]+-flash-lite', 'level': 3},
     {'match': r'deepseek-v[\d.]+-flash', 'level': 3}, {'match': r'glm-[\d.]+-flash', 'level': 3}, {'match': r'qwen[\d.]+-flash', 'level': 3},
-    {'match': r'grok-[\d.]+-fast', 'level': 3},
     {'match': r'glm-[\d.]+', 'level': 1},
     {'match': r'gemini-(?:[0-2]\.|3\.[0-4](?!\d))', 'level': 4, 'why': 'old Gemini'},
 ]
+
+
+# Owner's rule (2026-11-09): never a speed variant of a model family ('-fast', 'build-fast', 'Fast', e.g.
+# grok-4.7-build-fast), whatever its tier: it costs more for the same answers. Such an entry is refused (entry_problems:
+# no pool, no --model), `harness add-model`/`init` and `run-model discover` do not add one, unless the owner passes
+# --allow-fast (stored as `allow_fast: true` on the entry). "Flash" / "Flash-Lite" (Gemini, DeepSeek, GLM) are model
+# families, not speed variants: allowed.
+FAST_ID = re.compile(r'(?<![a-z0-9])fast(?![a-z0-9])', re.I)
+FAST_WHY = 'speed variant (-fast): more expensive, no quality gain (owner rule); only with the owner\'s explicit --allow-fast'
+
+
+def is_fast_model(model_id):
+    return bool(FAST_ID.search(str(model_id)))
 
 
 def is_free_model(m):
@@ -615,7 +628,8 @@ def level_of(r, m, a=None):
 
 def entry_problems(r, key, m, ad=None):
     """Why the policy refuses a roster entry ([] = valid): unknown harness, a vendor reached through another vendor's
-    CLI, a declared vendor that contradicts the model id, no level, an unknown subscription."""
+    CLI, a declared vendor that contradicts the model id, a speed variant without `allow_fast`, no level, an unknown
+    subscription."""
     ad = ad if ad is not None else adapters()
     a = ad.get(m.get('cli'))
     if not a:
@@ -629,6 +643,8 @@ def entry_problems(r, key, m, ad=None):
         clis = VENDOR_CLIS.get(vv, OTHER_VENDOR_CLIS)
         if m['cli'] not in clis:
             out.append('%s models run only through %s, not %s' % (vv, ' or '.join(clis), m['cli']))
+    if is_fast_model(m.get('model', '')) and not m.get('allow_fast'):
+        out.append('%s is a %s' % (m.get('model'), FAST_WHY))
     lv = level_of(r, m, a)
     if lv is None:
         out.append('no level (set `level` 0-4, or add the family to the tier table)')

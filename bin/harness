@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """harness: registry of model CLIs ("harnesses"), accounts and the model roster. Used by the autopilot-init skill.
 
-  harness init [--import <models.json>] [--force]      # create $AUTOPILOT_CONFIG_DIR/models.json from templates/models.json (or import an existing roster)
+  harness init [--import <models.json>] [--force] [--allow-fast]
+                                                       # create $AUTOPILOT_CONFIG_DIR/models.json from templates/models.json (or import an existing roster);
+                                                       # speed variants ('-fast' ids) are dropped unless the owner passes --allow-fast
   harness discover                                     # CLIs with a real executable on PATH (a shell alias/function does not count), adapters, accounts on disk
   harness list                                         # roster table: key, cli, model, account, vendor, tier, subscription, roles, health
   harness check                                        # the policy summary: role -> candidates (tier, account, subscription, health), then
                                                        # every missing piece with what to do; exit 1 when something blocks a role or an entry is refused
   harness migrate [--dry-run]                          # convert a pre-2026-11-09 roster: level + vendor per entry, roles, subscription, no pools
   harness add-model <key> --cli <cli> --model <id> [--level 0-4] [--vendor V] [--subscription paid|paid?|free|reserved]
-                    [--plan NAME] [--family PATTERN] [--cost high|mid|cheap|free] [--no-implement] [--env K=V ...] [--note TEXT]
-                                                       # level defaults to the owner's tier table; vendor -> CLI is enforced (refused otherwise)
+                    [--plan NAME] [--family PATTERN] [--cost high|mid|cheap|free] [--no-implement] [--env K=V ...] [--note TEXT] [--allow-fast]
+                                                       # level defaults to the owner's tier table; vendor -> CLI is enforced (refused otherwise);
+                                                       # a speed variant ('-fast', 'build-fast') is refused unless the owner passes --allow-fast
   harness add-account <cli> <letter> [--label TEXT] [--subscription S] [--plan NAME] [--home PATH --nonstandard]
                                                        # the account standard: the default home is the CLI's own (~/.codex), the next accounts are
                                                        # <default>-b, <default>-c, ... and the roster keys are <key>-b, <key>-c. `add-account codex b`
@@ -59,6 +62,11 @@ def cmd_init(args):
     src = os.path.expanduser(opt(args, '--import') or os.path.join(lib.HOME, 'templates', 'models.json'))
     r = lib.read_json(src)
     r.setdefault('health', {}); r.setdefault('changelog', []); r.setdefault('models', {})
+    for k in [k for k, m in r['models'].items() if lib.is_fast_model(m.get('model', '')) and not m.get('allow_fast')]:
+        if '--allow-fast' in args:
+            r['models'][k]['allow_fast'] = True
+        else:
+            print('harness init: dropped %s (%s): %s' % (k, r['models'].pop(k)['model'], lib.FAST_WHY))
     if r.get('pools'):
         print('note: %s has hand-ordered pools (pre-2026-11-09 format): run `bin/harness migrate`' % src)
     r['changelog'].append({'date': today(), 'change': f'roster created from {src}'})
@@ -201,6 +209,7 @@ def cmd_add_model(args):
     m['subscription'] = opt(args, '--subscription') or ('free' if lib.is_free_model(m) else 'paid?')
     if opt(args, '--plan'): m['plan'] = opt(args, '--plan')
     if '--no-implement' in args: m['no_implement'] = True
+    if '--allow-fast' in args and lib.is_fast_model(model): m['allow_fast'] = True
     if envs(args): m['env'] = envs(args)
     if opt(args, '--note'): m['note'] = opt(args, '--note')
     probs = lib.entry_problems(r0, key, m, ad)

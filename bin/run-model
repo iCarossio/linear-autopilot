@@ -8,7 +8,8 @@ model's CLI, stores the full output in a file and prints ONE json line.
   run-model pool <ROLE>                 # the draw for a role right now (candidates in draw order)
   run-model whoami [--record]           # the coordinator account detected for this session; --record writes state.json coordinator_account
   run-model smoke <KEY>                 # tiny prompt, checks the model answers
-  run-model discover [--apply]          # newer ids of every versioned family per CLI; --apply smokes and switches (latest version always)
+  run-model discover [--apply] [--allow-fast]   # newer ids of every versioned family per CLI; --apply smokes and switches (latest version always);
+                                        # speed variants ('-fast' ids) are skipped unless the owner passes --allow-fast
   run-model health                      # show cooldowns
   run-model reset <KEY>                 # clear a cooldown
   run-model wait <ROLE> [EXCLUDE,...] [--vendors N]   # block until the role has N healthy vendors, print the keys
@@ -485,12 +486,13 @@ def probe_smoke(r, key, model_id):
     return res['status'] == 'ok' and 'AUTOPILOT_OK' in open(o, errors='ignore').read()
 
 
-def discover(apply):
+def discover(apply, allow_fast=False):
     """Newer ids of every versioned family (`family` with a `*`) per CLI and account. With apply: smoke the newest
     candidate through the entry's own CLI and account; when it answers, every entry on that CLI with the old id moves
     to the new one, its level follows the owner's tier table when the table names the new id (else it is kept), and
-    models.json `changelog` records it. Returns the report."""
-    r = lib.load_reg(); ad = lib.adapters(); cands = {}; avail = {}
+    models.json `changelog` records it. Speed variants ('-fast' ids, lib.FAST_ID) are never candidates (listed in
+    `skipped_fast`) unless allow_fast or the entry itself has `allow_fast`. Returns the report."""
+    r = lib.load_reg(); ad = lib.adapters(); cands = {}; avail = {}; skipped = set()
     for key, m in r['models'].items():
         a = ad.get(m['cli'])
         if not a or '*' not in m.get('family', '') or not lib.installed(a): continue
@@ -504,11 +506,14 @@ def discover(apply):
             found = [mid for mid in ids if mid and rx.match(mid) and (lib.is_free_model(m) or not lib.FREE_ID.search(mid))]
             found = [mid for mid in found if ver(rx.match(mid).group(1)) > ver(cur.group(1) if cur else '0')]
             found.sort(key=lambda mid: ver(rx.match(mid).group(1)), reverse=True)
+        if not (allow_fast or m.get('allow_fast')):
+            skipped.update(mid for mid in found if lib.is_fast_model(mid))
+            found = [mid for mid in found if not lib.is_fast_model(mid)]
         if found and (m['cli'], m['model']) not in cands:
             cands[(m['cli'], m['model'])] = {'key': key, 'from': m['model'], 'candidates': found, 'kind': kind}
     out = {'available_counts': {f'{c}/{acc}': len(v[0]) for (c, acc), v in avail.items()},
            'upgrades': [dict(c, to=c['candidates'][0]) for c in cands.values() if c['kind'] != 'probe'],
-           'probes': [c for c in cands.values() if c['kind'] == 'probe']}
+           'probes': [c for c in cands.values() if c['kind'] == 'probe'], 'skipped_fast': sorted(skipped)}
     if apply:
         applied = []
         for c in cands.values():
@@ -521,6 +526,7 @@ def discover(apply):
                 for k, m in rr['models'].items():
                     if m['cli'] == rr['models'][c['key']]['cli'] and m['model'] == c['from']:
                         old_lv = m.get('level'); m['model'] = new
+                        if lib.is_fast_model(new): m['allow_fast'] = True  # reached only through the owner's --allow-fast
                         if lv is not None and lv != old_lv and not lib.forced_four(m): m['level'] = lv
                         moved.append('%s%s' % (k, '' if m.get('level') == old_lv else ' (level %s -> %s, tier table)' % (old_lv, m.get('level'))))
                 rr.setdefault('changelog', []).append({'date': str(now().date()), 'change': 'discover: %s -> %s on %s (smoke ok)' % (c['from'], new, ', '.join(moved)),
@@ -533,7 +539,9 @@ def discover(apply):
 
 
 def cmd_discover(args):
-    out = discover('--apply' in args)
+    out = discover('--apply' in args, '--allow-fast' in args)
+    for mid in out['skipped_fast']:
+        print('run-model: discover skipped %s: %s' % (mid, lib.FAST_WHY), file=sys.stderr)
     for x in out.get('applied', []):
         print('run-model: upgraded %s -> %s (%s)' % (x['from'], x['to'], ', '.join(x['keys'])), file=sys.stderr)
     print(json.dumps(out))

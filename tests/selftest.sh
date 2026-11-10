@@ -208,6 +208,31 @@ import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(o
 check "a hand-edited entry breaking vendor -> CLI is refused at load, in pools and by --model" "$(POOL review | grep -c bad5) $($H/bin/run-model pool review 2>&1 >/dev/null | grep -c 'roster: refused bad5: anthropic models run only through claude') $($H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model bad5 >/dev/null 2>&1; echo $?)" "0 1 4"
 $H/bin/harness check >/dev/null 2>&1; check "harness check fails on the refused entry" "$?" "1"
 $H/bin/harness remove bad5 >/dev/null
+echo "--- owner's rule (2026-11-09): Grok 4.7 is Tier 2; speed variants ('-fast') are never used"
+check "tier table: Grok 4.7 is Tier 2, a models.json tier_table override still wins, no row for a fast id" "$(python3 -c "
+import sys; sys.path.insert(0, '$H/bin'); import autopilot_lib as l
+print(l.table_level({}, 'grok-4.7')[0], l.table_level(dict(tier_table=[dict(match=r'grok-4\.7', level=1)]), 'grok-4.7')[0], l.table_level({}, 'grok-4.1-fast')[0])")" "2 1 None"
+$H/bin/harness add-model gk47 --cli grok --model grok-4.7 --subscription paid >/dev/null 2>&1; check "add-model grok-4.7 takes Tier 2 from the table" "$?/$(python3 -c "import json,os;print(json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['models']['gk47']['level'])")" "0/2"
+$H/bin/harness remove gk47 >/dev/null
+$H/bin/harness add-model fast1 --cli grok --model grok-4.7-build-fast --subscription paid 2>$SCR/fast.err >/dev/null; check "add-model refuses a build-fast id with the reason" "$?/$(grep -c 'speed variant (-fast): more expensive, no quality gain' $SCR/fast.err)" "1/1"
+$H/bin/harness add-model fast2 --cli grok --model grok-4.1-fast --level 3 --subscription paid >/dev/null 2>&1; check "add-model refuses a -fast id even with an explicit --level" "$?" "1"
+$H/bin/harness add-model fast3 --cli grok --model grok-4.7-build-fast --level 2 --subscription paid --allow-fast >/dev/null 2>&1; check "the owner's --allow-fast overrides (allow_fast stored)" "$?/$(python3 -c "import json,os;print(json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['models']['fast3'].get('allow_fast'))")" "0/True"
+$H/bin/harness remove fast3 >/dev/null
+$H/bin/harness add-model fl1 --cli opencode --model opencode-go/deepseek-v4.1-flash --subscription paid >/dev/null 2>&1; F1=$?
+$H/bin/harness add-model fl2 --cli agy --model gemini-3.5-flash-lite --subscription paid >/dev/null 2>&1; F2=$?
+check "Flash / Flash-Lite are families, not speed variants: accepted at Tier 3" "$F1 $F2 $(python3 -c "import json,os;m=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['models'];print(m['fl1']['level'], m['fl2']['level'])")" "0 0 3 3"
+$H/bin/harness remove fl1 >/dev/null; $H/bin/harness remove fl2 >/dev/null
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p))
+r['models']['fastx']={'cli':'grok','model':'grok-4.1-fast','level':3,'vendor':'xai','subscription':'paid'};json.dump(r,open(p,'w'))"
+check "a hand-edited -fast entry: refused at load, never in a pool, refused by --model" "$(POOL implement | grep -c fastx) $($H/bin/run-model pool implement 2>&1 >/dev/null | grep -c 'roster: refused fastx: grok-4.1-fast is a speed variant') $($H/bin/run-model run implement "$RB" .autopilot/out/x.md --cwd "$PWD" --model fastx >/dev/null 2>&1; echo $?)" "0 1 4"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['models']['fastx']['allow_fast']=True;json.dump(r,open(p,'w'))"
+check "the same entry with the owner's allow_fast is a Tier 3 candidate" "$(POOL implement | grep -c fastx)" "1"
+$H/bin/harness remove fastx >/dev/null
+python3 -c "
+import json,os;t=json.load(open('$H/templates/models.json'));t['models']['gfast']={'cli':'grok','model':'grok-4.7-build-fast','level':2,'vendor':'xai'};json.dump(t,open('$SCR/imp.json','w'))"
+check "init --import drops a -fast entry (kept only with --allow-fast)" "$(AUTOPILOT_CONFIG_DIR=$SCR/cfgi $H/bin/harness init --import $SCR/imp.json | grep -c 'dropped gfast (grok-4.7-build-fast)') $(python3 -c "import json;print('gfast' in json.load(open('$SCR/cfgi/models.json'))['models'])") $(AUTOPILOT_CONFIG_DIR=$SCR/cfgj $H/bin/harness init --import $SCR/imp.json --allow-fast >/dev/null; python3 -c "import json;print(json.load(open('$SCR/cfgj/models.json'))['models']['gfast'].get('allow_fast'))")" "1 False True"
 python3 -c "
 import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['roles']={'review':[1,2]};json.dump(r,open(p,'w'))"
 check "roles config cannot put Tier 1 in review" "$($H/bin/run-model pool review 2>&1 | grep -c 'roles.review = \[1, 2\] breaks the tier policy')" "1"
@@ -342,6 +367,13 @@ check "a candidate that fails its smoke is not applied, nothing cooled" "$(MID) 
 FAKE_MODELS='gpt-6.1-terra gpt-6.2-terra' FAKE_GOOD_MODELS='gpt-6.2-terra claude-sonnet-5-6' $H/bin/run-model discover --apply 2>$SCR/disc.err >/dev/null
 check "upgrade after a fake smoke: every account moves, level kept; Claude probed to 5-6; changelog; reported" "$(MID) $(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'));print(sum('discover:' in str(c.get('change','')) for c in r['changelog']))") $(grep -c 'upgraded' $SCR/disc.err)" "cx-terra=gpt-6.2-terra/2 cx-terra-b=gpt-6.2-terra/2 cx-luna=gpt-7-luna/2 cl-sonnet=claude-sonnet-5-6/2 3 2"
 check "the tier table re-levels an upgraded id (gpt-7-luna -> Tier 2 by the owner's table)" "$(MID | tr ' ' '\n' | grep cx-luna)" "cx-luna=gpt-7-luna/2"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p))
+r['models']['gx-fast']={'cli':'grok','model':'grok-4.1-fast','family':'grok-*-fast','level':3,'vendor':'xai','subscription':'paid'};json.dump(r,open(p,'w'))"
+DF() { python3 -c "import json,sys;d=json.load(sys.stdin);print([u['to'] for u in d['upgrades'] if u['from']=='grok-4.1-fast'], d['skipped_fast'])"; }
+check "discover skips a newer -fast id (reported), lists it only with the owner's --allow-fast" "$(FAKE_MODELS='grok-4.1-fast grok-4.2-fast' $H/bin/run-model discover 2>/dev/null | DF) $(FAKE_MODELS='grok-4.1-fast grok-4.2-fast' $H/bin/run-model discover --allow-fast 2>/dev/null | DF)" "[] ['grok-4.2-fast'] ['grok-4.2-fast'] []"
+FAKE_MODELS='grok-4.1-fast grok-4.2-fast' $H/bin/run-model discover --apply 2>$SCR/discf.err >/dev/null
+check "discover --apply never switches to a -fast id, says why on stderr" "$(MID | tr ' ' '\n' | grep gx-fast) $(grep -c 'discover skipped grok-4.2-fast: speed variant' $SCR/discf.err)" "gx-fast=grok-4.1-fast/3 1"
 export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; cd "$SCR/repo3"
 
 echo "--- usage aggregation (fake probe via adapter override)"
