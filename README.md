@@ -68,7 +68,8 @@ Any other CLI with a non-interactive mode is added with `bin/harness new` (see `
 8. **The coordinator only orchestrates, and its account is protected.** It never implements or reviews. The account it runs on is detected at run time; models on that account run only as a last resort, for cheap roles, while its quota keeps a reserve, so the coordinator never runs out of credits. State lives on disk and in Linear; a new session resumes from there.
 9. **Milestones grow with the project.** A project has one or more major milestones, each with its KPIs, its Linear milestone and its own ETA bar. Adding one later is normal and goes through the same pre-mortem and plan review, scoped to the delta, before anything is created (`/autopilot-milestone`, on top of `bin/milestone add`). Ideas are not milestones: `/autopilot-idea` parks them unscheduled until the owner promotes them.
 10. **About one ticket per commit.** Small tickets, parallel worktrees, cherry-picked onto one project branch, nothing merged into the default branch without you.
-11. **Nothing personal in the repo.** Accounts, cooldowns and overrides live in `~/.config/linear-autopilot/`; project state in `<repo>/.autopilot/`.
+11. **The coordinator is not the clock.** `bin/pipeline run` moves every in-flight ticket on by itself (implement, rebase, checks, one review, the next fix round) and lists approvals for the coordinator to merge (`bin/pipeline merge`: rebase, squash, finish); `bin/pipeline status` shows each ticket's round, stage, model and the ETA bars.
+12. **Nothing personal in the repo.** Accounts, cooldowns and overrides live in `~/.config/linear-autopilot/`; project state in `<repo>/.autopilot/`.
 
 ## Install
 
@@ -82,7 +83,7 @@ Then run `/autopilot-init` in your harness. Requirements: Python 3.9+, git, and 
 
 ```
 skills/      the six SKILL.md files
-bin/         shared runtime (run-model, review, premortem, decision, milestone, idea, eta, harness, linear, state, tokens, ...)
+bin/         shared runtime (run-model, review, pipeline, premortem, decision, milestone, idea, eta, harness, linear, state, tokens, ...)
 harnesses/   one JSON adapter per CLI: how to call it, where its accounts live, how to read its usage
 prompts/     briefs for implementers, reviewers and the pre-mortem
 templates/   example roster, state, plan and ticket
