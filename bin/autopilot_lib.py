@@ -518,8 +518,9 @@ def validate_reasons(j):
 #   Tier 0 frontier ceiling: never selected automatically (owner opt-in per run: run-model --allow-tier0 --model KEY).
 #   Tier 1 flagship: plan reviews, pre-mortems, milestone adversarial reviews, coordination. Never implements, never
 #          reviews a ticket's code.
-#   Tier 2 balanced: ticket code reviews (two reviewers of distinct vendors); `--escalate` implements a stuck ticket.
-#   Tier 3 fast and cheap: ticket implementation and fix rounds.
+#   Tier 2 balanced: ticket code reviews (two reviewers of distinct vendors); `escalate` implements rounds past
+#          `escalate_after_round` (run-model run_role, default 3).
+#   Tier 3 fast and cheap: ticket implementation and fix rounds up to `escalate_after_round`.
 #   Tier 4 small: every Mistral model, every free model, old Gemini, whatever the tier table says. Trivial tasks only,
 #          never a reviewer.
 # Vendor -> CLI is fixed: a model is only ever reached through its vendor's own CLI (VENDOR_CLIS); any other vendor

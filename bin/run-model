@@ -3,7 +3,8 @@
 model's CLI, stores the full output in a file and prints ONE json line.
 
   run-model run <implement|review> <brief.md> <out.md> [--cwd DIR] [--issue ID | --standalone] [--exclude-vendor V[,V]]
-                [--role ROLE | --pool NAME | --escalate] [--model KEY [--allow-tier0] | --prefer KEY] [--no-fallback]
+                [--role ROLE | --pool NAME | --escalate | --no-escalate] [--round N]
+                [--model KEY [--allow-tier0] | --prefer KEY] [--no-fallback]
   run-model pool <ROLE>                 # the draw for a role right now (candidates in draw order)
   run-model whoami [--record]           # the coordinator account detected for this session; --record writes state.json coordinator_account
   run-model smoke <KEY>                 # tiny prompt, checks the model answers
@@ -19,7 +20,10 @@ model's CLI, stores the full output in a file and prints ONE json line.
 
 Tier policy (owner's rule, 2026-11-09; lib "tier policy"): a run takes a role, and the role allows levels: implement and
 fix Tier 3, --escalate Tier 2 (logged in state.json `escalations`), review Tier 2, plan_review / premortem /
-milestone_review Tier 1, trivial Tier 4. Legacy pool names are role aliases. There is no ordered pool: the candidates
+milestone_review Tier 1, trivial Tier 4. Escalation is automatic (owner's rule, 2026-11-09: at most one implementation
+and two fixes by a cheap model per ticket): an implement or fix run whose round (--round N, else the brief or output
+name `<ISSUE>-impl-<n>.md`) is above models.json `escalate_after_round` (default 3) runs as --escalate; --no-escalate
+keeps the role's own tier for a mechanical merge-only round. Legacy pool names are role aliases. There is no ordered pool: the candidates
 of the role are drawn at random weighted by the credit left on each account (paid before free), the coordinator's own
 account last and quota-guarded. `--model` outside the role's tier is refused (exit 4), Tier 0 only with --allow-tier0,
 an `excluded` or `reserved` entry never runs, an entry that breaks vendor -> CLI is refused.
@@ -235,13 +239,27 @@ def repo_for(brief, cwd):
     return None
 
 
-def run_role(args, kind, brief):
-    """The role a run takes: --role, else --pool (legacy names are aliases), else implement / escalate, else a plan
-    review for a `<ISSUE>-plan-` brief, else a ticket code review."""
-    if '--role' in args: return lib.role_of(args[args.index('--role') + 1])
-    if '--pool' in args: return lib.role_of(args[args.index('--pool') + 1])
-    if kind == 'implement': return 'escalate' if '--escalate' in args else 'implement'
-    return 'plan_review' if re.match(r'.+?-plan-', os.path.basename(brief)) else 'review'
+IMPL_ROUND = re.compile(r'.+?-impl-(\d+)\.md$')
+
+
+def run_role(r, args, kind, brief, out):
+    """(role, round) of a run. The role: --role, else --pool (legacy names are aliases), else implement / escalate, else
+    a plan review for a `<ISSUE>-plan-` brief, else a ticket code review. An implement or fix run past round
+    `escalate_after_round` (models.json, default 3) becomes `escalate` unless --no-escalate (a merge-only round)."""
+    if '--role' in args: role = lib.role_of(args[args.index('--role') + 1])
+    elif '--pool' in args: role = lib.role_of(args[args.index('--pool') + 1])
+    elif kind == 'implement': role = 'escalate' if '--escalate' in args else 'implement'
+    else: return ('plan_review' if re.match(r'.+?-plan-', os.path.basename(brief)) else 'review'), None
+    if '--round' in args:
+        n = args[args.index('--round') + 1]
+        if not n.isdigit() or int(n) < 1: sys.exit('run-model run: --round takes a round number >= 1, got %r' % n)
+        n = int(n)
+    else:
+        mt = IMPL_ROUND.match(os.path.basename(brief)) or IMPL_ROUND.match(os.path.basename(out))
+        n = int(mt.group(1)) if mt else None
+    if role in ('implement', 'fix') and n and n > int(r.get('escalate_after_round', 3)) and '--no-escalate' not in args:
+        role = 'escalate'
+    return role, n
 
 
 def refuse(role, issue, reason, status='refused', **extra):
@@ -276,7 +294,7 @@ def cmd_run(args):
     issue = args[args.index('--issue') + 1] if '--issue' in args else lib.issue_from_brief(brief)
     repo = repo_for(brief, cwd)
     r = lib.load_reg(); ad = lib.adapters()
-    role = run_role(args, kind, brief)
+    role, rnd = run_role(r, args, kind, brief, out)
     if '--allow-mid' in args or os.environ.get('ALLOW_MID') == '1':
         refuse(role, issue, 'ALLOW_MID / --allow-mid was removed by the tier policy: plan reviews and pre-mortems are Tier 1 only. Wait (`run-model wait plan_review`) and tell the owner when it lasts')
     if kind == 'review' and role not in lib.REVIEW_ROLES:
@@ -298,9 +316,10 @@ def cmd_run(args):
     if role == 'escalate':
         if not (issue and repo):
             refuse(role, issue, '--escalate needs a ticket identity (--issue)')
-        print('run-model: escalate %s: Tier %s -> Tier %s (stuck ticket)' % (issue, '/'.join(map(str, lib.roles(r)['implement'])), levels[0]), file=sys.stderr)
+        why = '--escalate' if '--escalate' in args else 'round %s > escalate_after_round %s' % (rnd, r.get('escalate_after_round', 3))
+        print('run-model: escalate %s: Tier %s -> Tier %s (%s)' % (issue, '/'.join(map(str, lib.roles(r)['implement'])), levels[0], why), file=sys.stderr)
         lib.update_state(repo, lambda st: st.setdefault('escalations', {}).setdefault(issue, []).append(
-            {'at': now().isoformat(), 'from': lib.roles(r)['implement'], 'to': levels}))
+            {'at': now().isoformat(), 'from': lib.roles(r)['implement'], 'to': levels, 'round': rnd, 'why': why}))
     if '--model' in args:
         k = args[args.index('--model') + 1]
         m = r['models'].get(k) or refuse(role, issue, 'unknown roster key %s' % k)
@@ -351,6 +370,7 @@ def cmd_run(args):
         lib.update_reg(lambda rr: rr.setdefault('last_used', {}).__setitem__(acct, now().isoformat()))
         res = run_one(r, k, 'implement' if kind == 'implement' else 'review', brief, out, cwd); tried.append(f"{k}:{res['status']}")
         res['level'] = lib.level_of(r, m, a); res['run_role'] = role
+        if rnd: res['round'] = rnd
         if res['status'] == 'quota':
             after_quota(k, repo)
         if res['status'] == 'docker_hung':
