@@ -9,6 +9,14 @@ PASS=0; FAIL=0
 check() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok   $1"; else FAIL=$((FAIL+1)); echo "FAIL $1: got '$2' want '$3'"; fi; }
 cat > "$SCR/fake/fakecli" <<'EOF'
 #!/bin/bash
+if [ "$1" = usage ]; then echo "5h ${FAKE_5H:-10}% resets 2099-01-01T00:00:00+00:00"; [ -n "${FAKE_NO_WEEK:-}" ] || echo "weekly ${FAKE_WEEK:-10}% resets 2099-01-02T00:00:00+00:00"; exit 0; fi
+if [ "$1" = models ]; then for x in ${FAKE_MODELS:-}; do echo "$x"; done; exit 0; fi
+f=${2#Read the file }; f=${f%% and follow*}
+if [ -f "$f" ] && grep -q 'Reply with exactly: AUTOPILOT_OK' "$f"; then  # a smoke test: the model id is $4
+  case " ${FAKE_BAD_MODELS:-} " in *" $4 "*) echo "model not found"; exit 1;; esac
+  if [ -n "${FAKE_GOOD_MODELS:-}" ]; then case " $FAKE_GOOD_MODELS " in *" $4 "*) ;; *) echo "model not found"; exit 1;; esac; fi
+  echo AUTOPILOT_OK; exit 0
+fi
 case "${FAKE_BEHAVIOUR:-approve}" in
   approve) echo '```json'; echo '{"verdict":"approve","unmet_criteria":[],"findings":[],"summary":"fine"}'; echo '```';;
   approve_major) echo '```json'; echo '{"verdict":"approve","unmet_criteria":[],"findings":[{"severity":"major","file":"a.py","line":1,"problem":"bug","fix":"fix"}],"summary":"approve but major"}'; echo '```';;
@@ -23,9 +31,10 @@ case "${FAKE_BEHAVIOUR:-approve}" in
 esac
 EOF
 chmod +x "$SCR/fake/fakecli"; export PATH="$SCR/fake:$PATH"; export SCR
-# Hermetic: no real model CLI, no real Linear, never the real codex-reset. The template roster names real CLIs; stubs
-# shadow them, and the codex adapter is overridden to read no real session log and to call a logging fake reset.
-unset LINEAR_API_KEY LINEAR_API_URL
+# Hermetic: no real model CLI, no real Linear, never the real codex-reset, no daily model discovery. The vendor -> CLI
+# rule means a fake model runs through its vendor's CLI name: the adapters of the real CLIs are overridden in the test
+# config dir to call the fake binary (stubs shadow the real binaries anyway).
+unset LINEAR_API_KEY LINEAR_API_URL CLAUDECODE CLAUDE_CONFIG_DIR CODEX_HOME AUTOPILOT_COORDINATOR AUTOPILOT_SEED; export AUTOPILOT_NO_DISCOVER=1
 for c in codex claude agy opencode grok cursor-agent gemini vibe; do printf '#!/bin/sh\nexit 1\n' > "$SCR/fake/$c"; chmod +x "$SCR/fake/$c"; done
 cat > "$SCR/fake/fake-reset" <<'EOF'
 #!/bin/bash
@@ -37,34 +46,48 @@ case "$(cat "$SCR/reset.mode" 2>/dev/null || echo ok)" in
 esac
 EOF
 chmod +x "$SCR/fake/fake-reset"
+cat > "$SCR/fakeads.py" <<'EOF'
+# fakeads.py <cfg dir> [cli ...]: fake adapters named after the real CLIs (vendor and account fields kept from the repo's).
+import json, os, sys
+cfg = sys.argv[1]; os.makedirs(os.path.join(cfg, 'harnesses'), exist_ok=True)
+for cli in sys.argv[2:] or ['claude', 'codex', 'grok', 'agy', 'opencode', 'cursor', 'vibe']:
+    src = json.load(open(os.path.join(os.environ['H'], 'harnesses', cli + '.json')))
+    a = {'name': cli, 'binary': 'fakecli', 'vendor': src.get('vendor', 'by_model'), 'run': {'argv': ['-p', '{prompt}', '--model', '{model}'], 'env': {}, 'output': 'stdout'},
+         'list_models': {'kind': 'command', 'argv': ['models'], 'regex': r'^(\S+)$'}, 'usage': {'kind': 'none'}, 'quota_patterns': ['usage limit'],
+         'tokens': {'kind': 'none'}}
+    for k in ('account_env', 'account_default', 'account_detect', 'account_login', 'coordinator_env'):
+        if k in src: a[k] = src[k]
+    if cli == 'codex':
+        a['auto_reset'] = dict(src['auto_reset'], argv=[os.path.join(os.environ['SCR'], 'fake', 'fake-reset'), '--yes', '--account', '{account}'])
+    json.dump(a, open(os.path.join(cfg, 'harnesses', cli + '.json'), 'w'))
+EOF
 $H/bin/harness init >/dev/null
-python3 - <<'PY'
-import json, os
-a = json.load(open(os.path.join(os.environ['H'], 'harnesses', 'codex.json')))
-a['usage']['path'] = os.path.join(os.environ['SCR'], 'no-codex-sessions'); a['tokens']['path'] = a['usage']['path']
-a['auto_reset']['argv'] = [os.path.join(os.environ['SCR'], 'fake', 'fake-reset'), '--yes', '--account', '{account}']
-json.dump(a, open(os.path.join(os.environ['AUTOPILOT_CONFIG_DIR'], 'harnesses', 'codex.json'), 'w'))
-PY
+python3 "$SCR/fakeads.py" $AUTOPILOT_CONFIG_DIR
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['models']={};r['codex_auto_reset']=False;json.dump(r,open(p,'w'))"
 $H/bin/harness new fakecli --binary fakecli --vendor by_model --argv '["-p","{prompt}","--model","{model}"]' >/dev/null
-$H/bin/harness add-model fk-a --cli fakecli --model claude-x-5 --cost high --no-implement --vendor anthropic >/dev/null
-$H/bin/harness add-model fk-b --cli fakecli --model gpt-x --cost high --no-implement --vendor openai >/dev/null
-$H/bin/harness add-model fk-c --cli fakecli --model grok-x --cost cheap --vendor xai >/dev/null
-$H/bin/harness add-model fk-c2 --cli fakecli --model grok-x --cost cheap --vendor xai --env FAKE_ACCOUNT=2 >/dev/null
-$H/bin/harness add-model fk-c3 --cli fakecli --model 'openrouter/xai/grok-x:free' --cost free --vendor xai >/dev/null
-$H/bin/harness add-model fk-d --cli fakecli --model gemini-x --cost mid --vendor google >/dev/null
-$H/bin/harness add-model fk-e --cli fakecli --model beam-free --cost free --vendor opencode >/dev/null
-$H/bin/harness pools set review_mid fk-c,fk-c2,fk-c3,fk-d,fk-a,fk-b >/dev/null; $H/bin/harness pools set review_high fk-a,fk-b,fk-d >/dev/null
-$H/bin/harness pools set review fk-e >/dev/null; $H/bin/harness pools set implement fk-c,fk-d >/dev/null; $H/bin/harness pools set implement_escalation fk-d >/dev/null
-$H/bin/harness pools set premortem fk-a,fk-b,fk-d >/dev/null; $H/bin/harness pools set plan_review fk-a,fk-b >/dev/null
+$H/bin/harness add-model fk-a --cli claude --model claude-x-5 --level 1 --no-implement >/dev/null
+$H/bin/harness add-model fk-b --cli codex --model gpt-x --level 1 --no-implement --subscription paid >/dev/null
+$H/bin/harness add-model fk-c --cli grok --model grok-x --level 3 --subscription paid >/dev/null
+$H/bin/harness add-model fk-c2 --cli grok --model grok-x --level 3 --env FAKE_ACCOUNT=2 --subscription paid >/dev/null
+$H/bin/harness add-model fk-c3 --cli cursor --model grok-x --level 3 --subscription free >/dev/null
+$H/bin/harness add-model fk-d --cli agy --model gemini-x --level 2 --subscription free >/dev/null
+$H/bin/harness add-model fk-f --cli codex --model gpt-y-terra --level 2 --subscription paid >/dev/null
+$H/bin/harness add-model fk-e --cli opencode --model beam-free --vendor opencode --level 2 >/dev/null
 mkdir -p "$SCR/repo3" && cd "$SCR/repo3" && git init -q && echo base > tracked.txt && printf '\x00\x01\x02OLD' > bin.dat && cp $H/templates/PLAN.md PLAN.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm init
 echo ".autopilot/" >> .git/info/exclude; mkdir -p .autopilot/tickets && python3 -c "
 import json;s=json.load(open('$H/templates/state.json'));s['branch']=__import__('subprocess').run(['git','branch','--show-current'],capture_output=True,text=True).stdout.strip();s['coordinator']='fk-a';s['worktrees_dir']='$SCR/repo3-wt';json.dump(s,open('.autopilot/state.json','w'))"
 cp $H/templates/ticket.md .autopilot/tickets/T-1.md
+LV() { python3 -c "
+import json,os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as lib
+r=lib.load_reg(warn=False);ad=lib.adapters();ks=json.loads(sys.argv[1]);print(sorted({lib.level_of(r,r['models'][k],ad[r['models'][k]['cli']]) for k in ks}))" "$1"; }
+POOL() { $H/bin/run-model pool "$1" 2>/dev/null; }
+SORTED() { python3 -c "import json,sys;print(sorted(json.load(sys.stdin)))"; }
 
 echo "--- implementer recording + identity"
 B=$($H/bin/mkbrief impl T-1 1 .autopilot/tickets/T-1.md)
-R=$(FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B" .autopilot/out/T-1-impl-1.md --cwd "$PWD" --prefer fk-c | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['model'])")
-check "implement runs and is ok" "$R" "ok fk-c"
+R=$(FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B" .autopilot/out/T-1-impl-1.md --cwd "$PWD" --prefer fk-c | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['model'],d['level'])")
+check "implement runs a Tier 3 model and is ok" "$R" "ok fk-c 3"
 check "implementer key recorded" "$($H/bin/state get implementers.T-1)" '[
   "fk-c"
 ]'
@@ -74,10 +97,10 @@ check "implementer identity recorded" "$($H/bin/state get implementer_ids.T-1)" 
 git checkout -q -- tracked.txt
 RB=$($H/bin/mkbrief review T-1 1 .autopilot/tickets/T-1.md)
 $H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-c2 >/dev/null 2>&1; check "same model, other account refused" "$?" "4"
-$H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-c3 >/dev/null 2>&1; check "same model via another harness (openrouter/xai/grok-x:free) refused" "$?" "4"
-$H/bin/run-model run review "$SCR/custom-review.md" .autopilot/out/x.md --cwd "$PWD" --model fk-c >/dev/null 2>&1; check "custom-named review brief without --issue refused" "$?" "4"
+$H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-c3 >/dev/null 2>&1; check "same model via another harness (cursor grok-x) refused" "$?" "4"
+$H/bin/run-model run review "$SCR/custom-review.md" .autopilot/out/x.md --cwd "$PWD" --model fk-d >/dev/null 2>&1; check "custom-named review brief without --issue refused" "$?" "4"
 echo "custom" > "$SCR/custom-review.md"
-FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$SCR/custom-review.md" .autopilot/out/x.md --cwd "$PWD" --standalone --exclude-vendor xai --model fk-c >/dev/null 2>&1; check "standalone with --exclude-vendor xai refuses fk-c" "$?" "4"
+FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$SCR/custom-review.md" .autopilot/out/x.md --cwd "$PWD" --standalone --exclude-vendor google --model fk-d >/dev/null 2>&1; check "standalone with --exclude-vendor google refuses fk-d" "$?" "4"
 FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$SCR/custom-review.md" .autopilot/out/x.md --cwd "$PWD" --standalone --exclude-vendor xai --model fk-d >/dev/null 2>&1; check "standalone with other vendor runs" "$?" "0"
 # roster change: upgrade fk-c's model id; identity must still exclude a key with the old model
 $H/bin/harness remove fk-c >/dev/null
@@ -86,14 +109,14 @@ $H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-c2
 echo "--- plan-review purpose enforced in the runner"
 PB=$($H/bin/mkbrief plan T-1 1 .autopilot/tickets/T-1.md)
 FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-a >/dev/null 2>&1; check "runner refuses the coordinator (fk-a) for its own plan review" "$?" "4"
-FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-d >/dev/null 2>&1; check "runner refuses a mid model for a plan review" "$?" "4"
-FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --allow-mid --model fk-d >/dev/null 2>&1; check "runner accepts mid with --allow-mid" "$?" "0"
-FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-b >/dev/null 2>&1; check "runner accepts a high model of another vendor" "$?" "0"
+FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-d >/dev/null 2>&1; check "runner refuses a Tier 2 model for a plan review" "$?" "4"
+FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --allow-mid --model fk-d >/dev/null 2>&1; check "--allow-mid is refused (tier policy)" "$?" "4"
+FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-b >/dev/null 2>&1; check "runner accepts a Tier 1 model of another vendor" "$?" "0"
 $H/bin/state implementer T-3 fk-a >/dev/null; check "state implementer records identity" "$($H/bin/state get implementer_ids.T-3)" '[
   "claude-x-5"
 ]'
-echo "--- review verdict rules"
-FAKE_BEHAVIOUR=approve $H/bin/review T-1 1 "$RB" >/dev/null; check "two vendors approve -> 0" "$?" "0"
+echo "--- review verdict rules (one Tier 2 reviewer per round)"
+FAKE_BEHAVIOUR=approve $H/bin/review T-1 1 "$RB" >/dev/null; check "one Tier 2 reviewer approves -> 0" "$?" "0"
 FAKE_BEHAVIOUR=approve_major $H/bin/review T-1 2 "$RB" >/dev/null; check "approve with major -> 1" "$?" "1"
 FAKE_BEHAVIOUR=changes_empty $H/bin/review T-1 3 "$RB" >/dev/null; check "changes without findings -> 1" "$?" "1"
 FAKE_BEHAVIOUR=weird $H/bin/review T-1 4 "$RB" >/dev/null; check "unknown verdict -> 2" "$?" "2"
@@ -102,44 +125,171 @@ OUT=$(FAKE_BEHAVIOUR=modify_binary $H/bin/review T-1 6 "$RB"); check "binary rew
 OUT=$(FAKE_BEHAVIOUR=commit $H/bin/review T-1 7 "$RB"); check "reviewer commits -> 3 (history changed)" "$?" "3"; echo "    $OUT" | head -1
 git reset -q --hard HEAD~1 2>/dev/null; git log --oneline | head -1 | grep -q init && echo "    (test cleanup: reviewer commit removed)"
 MIN_REVIEWS=0 $H/bin/review T-1 8 "$RB" >/dev/null 2>&1; check "MIN_REVIEWS=0 refused" "$?" "1"
-POOL=plan_review FAKE_BEHAVIOUR=approve $H/bin/review T-1 p1 "$RB" >/dev/null; check "plan review: coordinator fk-a (anthropic) excluded, fk-b high + no second high vendor -> 2" "$?" "2"
-POOL=plan_review ALLOW_MID=1 FAKE_BEHAVIOUR=approve $H/bin/review T-1 p2 "$RB" >/dev/null; check "plan review ALLOW_MID=1 -> fk-b + fk-d -> 0" "$?" "0"
-POOL=plan_review ALLOW_MID=1 FAKE_BEHAVIOUR=approve $H/bin/review T-1 p3 "$RB" 1 >/dev/null; check "plan review k=1 -> 0" "$?" "0"
+check "k=2 reviewers come from two vendors" "$(FAKE_BEHAVIOUR=approve $H/bin/review T-1 9 "$RB" 2 | grep -cE '^fk-(d|f): approve')" "2"
+POOL=plan_review FAKE_BEHAVIOUR=approve $H/bin/review T-1 p1 "$RB" >/dev/null; check "plan review: coordinator fk-a (anthropic) excluded, one Tier 1 of another vendor (fk-b) -> 0" "$?" "0"
+POOL=plan_review FAKE_BEHAVIOUR=approve $H/bin/review T-1 p2 "$RB" 2 >/dev/null 2>&1; check "plan review k=2 with one other Tier 1 vendor -> 2 (never another tier)" "$?" "2"
+POOL=plan_review ALLOW_MID=1 $H/bin/review T-1 p3 "$RB" >/dev/null 2>&1; check "plan review ALLOW_MID=1 refused" "$?" "1"
+$H/bin/alert ack all >/dev/null 2>&1
 
 echo "--- premortem"
 OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a); RC=$?; check "premortem default k=1: fk-b alone, both passes -> 0" "$RC" "0"
 grep -q "adversarial self-review" .autopilot/plan/premortem-brief-fk-b-2.md && echo "ok   single reviewer gets the self-review pass 2" || { echo "FAIL pass 2 brief is not the self-review"; FAIL=$((FAIL+1)); }
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2); RC=$?; check "premortem --k 2: only fk-b high -> degraded 1" "$RC" "1"
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2); RC=$?; check "premortem --k 2: only fk-b in Tier 1 -> degraded 1" "$RC" "1"
 echo "$OUT" | grep -q "1 dropped" && echo "ok   malformed reason dropped" || { echo "FAIL malformed reason not reported: $OUT"; FAIL=$((FAIL+1)); }
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --allow-mid); check "premortem --allow-mid: fk-b + fk-d both passes -> 0" "$?" "0"
+$H/bin/premortem PLAN.md --planner fk-a --allow-mid >/dev/null 2>&1; check "premortem --allow-mid refused" "$?" "1"
+$H/bin/harness add-model fk-g --cli opencode --model deepseek-x-pro --level 1 --subscription paid >/dev/null
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2); check "premortem --k 2 with a second Tier 1 vendor: fk-b + fk-g both passes -> 0" "$?" "0"
 check "merged reasons (same tag from both reviewers merges to 2)" "$(python3 -c "import json;print(len(json.load(open('.autopilot/plan/premortem.json'))['reasons']))")" "2"
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --allow-mid --only-pass 2); check "only-pass 2 reuses validated pass 1 -> 0" "$?" "0"
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --only-pass 2); check "only-pass 2 reuses validated pass 1 -> 0" "$?" "0"
 $H/bin/premortem PLAN.md >/dev/null 2>&1; check "premortem without --planner refused" "$?" "1"
 echo "edit" >> PLAN.md
-OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --allow-mid --only-pass 2); RC=$?
+OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a --k 2 --only-pass 2); RC=$?
 echo "$OUT" | grep -q "plan changed" && echo "ok   changed plan is not reused for pass 2" || { echo "FAIL changed plan reused: $OUT"; FAIL=$((FAIL+1)); }
 git checkout -q -- PLAN.md
+
+echo "--- tier policy: roles from levels, vendor -> CLI, escalation, Tier 0/4"
+check "implement = Tier 3 only (never 1/2/4)" "$(LV "$(POOL implement)")" "[3]"
+check "fix = Tier 3 only" "$(LV "$(POOL fix_mid)")" "[3]"
+check "review = Tier 2 only (never 1/3/4)" "$(LV "$(POOL review)") $(POOL review_high | SORTED)" "[2] ['fk-d', 'fk-f']"
+check "legacy pool names are aliases of the roles" "$(LV "$(POOL implement_critical)") $(LV "$(POOL review_mid)") $(LV "$(POOL premortem)") $(LV "$(POOL implement_escalation)")" "[3] [2] [1] [2]"
+check "a free model added with --level 2 is Tier 4: never a reviewer" "$(POOL review | grep -c fk-e)" "0"
+check "Tier 4 only in trivial" "$(POOL trivial) $(for p in implement fix review plan_review premortem milestone_review escalate; do POOL $p; done | grep -c fk-e)" '["fk-e"] 0'
+$H/bin/harness add-model fk-m --cli vibe --model mistral-x --level 2 >/dev/null
+check "a Mistral model is Tier 4 whatever its level" "$(POOL trivial | SORTED) $(POOL review | grep -c fk-m)" "['fk-e', 'fk-m'] 0"
+$H/bin/harness add-model fk-z --cli claude --model claude-mythos-x --level 0 >/dev/null
+check "Tier 0 never in a pool" "$(for p in implement fix review plan_review premortem milestone_review escalate trivial coordinate; do POOL $p; done | grep -c fk-z)" "0"
+$H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-z >/dev/null 2>&1; check "Tier 0 by --model without --allow-tier0 refused" "$?" "4"
+B2=$($H/bin/mkbrief impl T-2 1 .autopilot/tickets/T-1.md)
+FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --model fk-f >/dev/null 2>&1; check "implement by a Tier 2 model refused" "$?" "4"
+FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --model fk-e --role trivial >/dev/null 2>&1; check "Tier 4 runs a trivial task" "$?" "0"
+git checkout -q -- tracked.txt
+$H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-e --role trivial >/dev/null 2>&1; check "Tier 4 never reviews (role trivial on a review)" "$?" "4"
+$H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-b >/dev/null 2>&1; check "Tier 1 never reviews ticket code" "$?" "4"
+R=$(FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-2.md --cwd "$PWD" --escalate 2>$SCR/esc.err | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['level'])")
+check "--escalate goes 3 -> 2, never Tier 1, logged" "$R $(grep -c 'escalate T-2: Tier 3 -> Tier 2' $SCR/esc.err) $($H/bin/state get escalations.T-2 | python3 -c "import json,sys;print(json.load(sys.stdin)[0]['to'])")" "ok 2 1 [2]"
+git checkout -q -- tracked.txt
+$H/bin/harness add-model bad1 --cli opencode --model anthropic/claude-x-6 --level 2 >/dev/null 2>&1; check "vendor -> CLI: Claude through opencode refused at add-model" "$?" "1"
+$H/bin/harness add-model bad2 --cli cursor --model claude-x-6 --level 2 >/dev/null 2>&1; check "vendor -> CLI: Claude through cursor refused" "$?" "1"
+$H/bin/harness add-model bad3 --cli agy --model gpt-x-7 --level 2 >/dev/null 2>&1; check "vendor -> CLI: GPT through agy refused" "$?" "1"
+$H/bin/harness add-model bad4 --cli opencode --model kimi-x --vendor anthropic --level 3 >/dev/null 2>&1; check "vendor -> CLI: an anthropic vendor through opencode refused" "$?" "1"
+$H/bin/harness add-model ok5 --cli cursor --model grok-y --level 3 >/dev/null 2>&1; check "vendor -> CLI: xAI through cursor accepted" "$?" "0"; $H/bin/harness remove ok5 >/dev/null
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['models']['bad5']={'cli':'agy','model':'claude-x-9','level':2,'vendor':'anthropic'};json.dump(r,open(p,'w'))"
+check "a hand-edited entry breaking vendor -> CLI is refused at load, in pools and by --model" "$(POOL review | grep -c bad5) $($H/bin/run-model pool review 2>&1 >/dev/null | grep -c 'roster: refused bad5: anthropic models run only through claude') $($H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model bad5 >/dev/null 2>&1; echo $?)" "0 1 4"
+$H/bin/harness check >/dev/null 2>&1; check "harness check fails on the refused entry" "$?" "1"
+$H/bin/harness remove bad5 >/dev/null
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['roles']={'review':[1,2]};json.dump(r,open(p,'w'))"
+check "roles config cannot put Tier 1 in review" "$($H/bin/run-model pool review 2>&1 | grep -c 'roles.review = \[1, 2\] breaks the tier policy')" "1"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r.pop('roles');json.dump(r,open(p,'w'))"
+
+echo "--- subscriptions, credit-weighted draws, coordinator account"
+check "harness pools set refused (no hand-ordered pools)" "$($H/bin/harness pools set review fk-b >/dev/null 2>&1; echo $?)" "1"
+FIRST() { for i in $(seq 1 ${2:-200}); do AUTOPILOT_SEED=$i $H/bin/run-model pool "$1" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)[0])"; done | sort | uniq -c | awk '{print $2"="$1}' | tr '\n' ' '; }
+check "draws are reproducible with AUTOPILOT_SEED" "$(AUTOPILOT_SEED=7 POOL trivial)" "$(AUTOPILOT_SEED=7 POOL trivial)"
+D=$(FIRST implement 120); N3=$(echo "$D" | tr ' ' '\n' | grep '^fk-c3=' | cut -d= -f2)
+check "paid before free: the free fk-c3 is drawn first rarely (<25% of 120 seeds; weight 0.25 vs 1)" "$([ "${N3:-0}" -lt 30 ] && echo yes || echo "no: $D")" "yes"
+python3 -c "
+import json,os,datetime as d;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['usage_seen']={'grok/default':{'used':97,'at':d.datetime.now(d.timezone.utc).isoformat()}};json.dump(r,open(p,'w'))"
+D=$(FIRST implement 120); N3=$(echo "$D" | tr ' ' '\n' | grep '^fk-c3=' | cut -d= -f2)
+check "credit-weighted: an account at 97% is almost never drawn first (fk-c3 first >75%)" "$([ "${N3:-0}" -gt 90 ] && echo yes || echo "no: $D")" "yes"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['usage_seen']={};json.dump(r,open(p,'w'))"
+$H/bin/harness subscription grok default reserved >/dev/null
+check "reserved account never drawn" "$(POOL implement)" '["fk-c3"]'
+$H/bin/harness subscription grok default paid >/dev/null; $H/bin/harness set fk-c3 excluded "owner: not this one" >/dev/null
+check "excluded entry never drawn, reserved lifted" "$(POOL implement | SORTED)" "['fk-c2']"
+$H/bin/harness set fk-c3 excluded "" >/dev/null
+$H/bin/state set exclude '{"grok/default": "kept for another project"}' >/dev/null
+check "project-level exclude of a whole account (state.json exclude)" "$(POOL implement) $($H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-9.md --cwd "$PWD" --model fk-c2 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)['reason'])")" '["fk-c3"] fk-c2 is excluded: project exclude grok/default: kept for another project'
+$H/bin/state set exclude '{}' >/dev/null
+# The coordinator account is detected from the session (Claude Code sets CLAUDECODE; CLAUDE_CONFIG_DIR unset = the
+# default home): fk-a / fk-h / fk-i are on it, fk-i-b on a second login of the same CLI.
+export CLAUDECODE=1
+check "coordinator account detected from the session, recorded in state.json" "$($H/bin/run-model whoami --record | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['cli'],d['account'],d['keys'])") $($H/bin/state get coordinator_account.account)" "claude default ['fk-a', 'fk-z'] \"default\""
+check "started from another login, that one is protected instead (default-account keys stay on the default home)" "$(CLAUDE_CONFIG_DIR=$HOME/.claude-b $H/bin/run-model whoami | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['account'].startswith('CLAUDE_CONFIG_DIR='),d['keys'])")" "True []"
+$H/bin/harness add-model fk-h --cli claude --model claude-haiku-x --level 3 >/dev/null
+$H/bin/harness add-model fk-i --cli claude --model claude-sonnet-x --level 2 >/dev/null
+$H/bin/harness add-model fk-i-b --cli claude --model claude-sonnet-x --level 2 --env CLAUDE_CONFIG_DIR=~/.claude-b --subscription paid >/dev/null
+check "coordinator account last, for a cheap role" "$(for i in 1 2 3 4 5; do AUTOPILOT_SEED=$i POOL implement | python3 -c "import json,sys;print(json.load(sys.stdin)[-1])"; done | sort -u)" "fk-h"
+check "coordinator account never in a Tier 2 role while another candidate exists" "$(POOL review | grep -c '"fk-i"')" "0"
+check "a second account of the coordinator's vendor is a normal paid account" "$(python3 -c "
+import os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as lib
+r=lib.load_reg(warn=False);ad=lib.adapters();print([lib.on_coordinator_account(r,r['models'][k],ad['claude']) for k in ('fk-a','fk-h','fk-i','fk-i-b')])") $(POOL review | grep -c fk-i-b) $($H/bin/harness check 2>/dev/null | grep -E '^ +fk-i-b ' | grep -c ' paid ')" "[True, True, True, False] 1 2"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/harnesses/claude.json';a=json.load(open(p))
+a['usage']={'kind':'command','argv':['usage'],'regex':r'^(\w+) (\d+)%(?: resets (\S+))?$','groups':['window','used','reset_iso']};json.dump(a,open(p,'w'))"
+B4=$($H/bin/mkbrief impl T-4 1 .autopilot/tickets/T-1.md)
+RUNH() { $H/bin/run-model run implement "$B4" .autopilot/out/T-4-impl-1.md --cwd "$PWD" --model fk-h 2>$SCR/cr.err | python3 -c "import json,sys;print(json.load(sys.stdin)['status'])"; git checkout -q -- tracked.txt; }
+R=$(FAKE_5H=80 FAKE_BEHAVIOUR=implement RUNH)
+check "coordinator quota reserve: 20% of the 5-hour window left (< 30%) -> refused, CRITICAL alert" "$R $(grep -c 'CRITICAL: delegation to the coordinator account claude/default refused (5h 20% left (reserve 30%))' $SCR/cr.err) $($H/bin/alert list | grep -c 'coordinator account')" "coordinator_reserve 1 1"
+R=$(FAKE_5H=10 FAKE_WEEK=85 FAKE_BEHAVIOUR=implement RUNH)
+check "coordinator quota reserve: 15% of the week left (< 20%) -> refused" "$R" "coordinator_reserve"
+R=$(FAKE_5H=10 FAKE_WEEK=10 FAKE_BEHAVIOUR=implement RUNH)
+check "coordinator quota above the reserve -> runs, alert resolved" "$R $($H/bin/alert list | grep 'coordinator account' | grep -c resolved)" "ok 1"
+$H/bin/alert ack all >/dev/null
+python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/harnesses/claude.json';a=json.load(open(p));a['usage']={'kind':'none'};json.dump(a,open(p,'w'))"
+R=$(FAKE_BEHAVIOUR=implement RUNH)
+check "coordinator quota unreadable -> refused (fails closed)" "$R" "coordinator_reserve"
+$H/bin/alert ack all >/dev/null; for k in fk-h fk-i fk-i-b fk-m fk-z fk-g; do $H/bin/harness remove $k >/dev/null; done; unset CLAUDECODE
+
+echo "--- no reviewer: wait within review_wait_minutes, else CRITICAL, never another tier"
+COOL() { python3 -c "
+import json,os,sys,datetime as d;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p))
+for k in sys.argv[2:]: r['health'][k]={'until':(d.datetime.now(d.timezone.utc)+d.timedelta(seconds=float(sys.argv[1]))).isoformat(),'reason':'quota: test','set_at':d.datetime.now(d.timezone.utc).isoformat()}
+json.dump(r,open(p,'w'))" "$@"; }
+COOL 4 fk-d fk-f
+OUT=$(FAKE_BEHAVIOUR=approve $H/bin/review T-1 w1 "$RB"); RC=$?
+check "the Tier 2 reviewers are back in 4 s: waits, then reviews" "$RC $(echo "$OUT" | grep -c '^WAITING: no eligible review reviewer')" "0 1"
+COOL 36000 fk-d fk-f
+OUT=$(FAKE_BEHAVIOUR=approve $H/bin/review T-1 w2 "$RB" 2>$SCR/nr.err); RC=$?
+check "no Tier 2 reviewer for 10 h: NO_REVIEWER exit 2, CRITICAL alert, no Tier 1/4 fallback" "$RC $(echo "$OUT" | grep -c '^NO_REVIEWER: review for T-1 round w2: 0 eligible reviewer') $(grep -c '^CRITICAL: review for T-1' $SCR/nr.err) $(ls .autopilot/out/ | grep -cE 'T-1-rev-(fk-a|fk-b|fk-e)-w2')" "2 1 1 0"
+python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['health']={};json.dump(r,open(p,'w'))"; $H/bin/alert ack all >/dev/null
+
+echo "--- watchdog: code in the model's own output is not an input prompt"
+cat > "$SCR/wp.py" <<'EOF'
+import importlib.util, importlib.machinery, os
+ld = importlib.machinery.SourceFileLoader('rm', os.path.join(os.environ['H'], 'bin', 'run-model'))
+sp = importlib.util.spec_from_loader('rm', ld); rm = importlib.util.module_from_spec(sp); ld.exec_module(rm)
+code = ['            facts.ticketed += 1\n        elif isinstance(event, TicketClosed):\n            ss}, {event.severity})")',
+        'def run(agent_id: str, *, user_guid', '            approval_id=approval_id,\n            x.mission_id,',
+        '            question=(\n                f"Approve this plan? Agents {\', \'.join(plan.agents)']
+print([rm.waiting_prompt(t, 3600) for t in code], rm.waiting_prompt('Do you want to proceed? (y/n)', 60), rm.waiting_prompt('Do you want to proceed? (y/n)', 5))
+EOF
+check "waiting_input only on a CLI prompt after silence, never on code lines" "$(python3 "$SCR/wp.py")" "[False, False, False, False] True False"
+
+echo "--- discover: latest version of every family, smoke first, level from the tier table"
+export AUTOPILOT_CONFIG_DIR=$SCR/cfg5; mkdir -p $AUTOPILOT_CONFIG_DIR; python3 "$SCR/fakeads.py" $AUTOPILOT_CONFIG_DIR
+python3 -c "
+import json,os
+m=lambda cli,mid,fam,lv,**k: dict({'cli':cli,'model':mid,'family':fam,'level':lv,'subscription':'paid'},**k)
+json.dump({'cooldown_minutes':30,'timeouts_seconds':{'implement':60,'review':60,'smoke':30,'idle':60},'health':{},'changelog':[],
+ 'tier_table':[{'match':'gpt-7-luna','level':2}],
+ 'models':{'cx-terra':m('codex','gpt-6.1-terra','gpt-*-terra',2),'cx-terra-b':m('codex','gpt-6.1-terra','gpt-*-terra',2,env={'CODEX_HOME':'~/.codex-b'}),
+           'cx-luna':m('codex','gpt-6-luna','gpt-*-luna',3),'cl-sonnet':m('claude','claude-sonnet-5-5','claude-sonnet-*',2)}},
+ open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json','w'))"
+python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/harnesses/claude.json';a=json.load(open(p));a['list_models']={'kind':'probe'};json.dump(a,open(p,'w'))"
+MID() { python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'));print(' '.join('%s=%s/%s' % (k, m['model'], m['level']) for k, m in r['models'].items()))"; }
+check "discover lists the newer family ids, applies nothing" "$(FAKE_MODELS='gpt-6.1-terra gpt-6.2-terra gpt-6-luna gpt-7-luna' $H/bin/run-model discover | python3 -c "import json,sys;d=json.load(sys.stdin);print(sorted((u['from'],u['to']) for u in d['upgrades']), [p['candidates'] for p in d['probes']])") $(MID)" "[('gpt-6-luna', 'gpt-7-luna'), ('gpt-6.1-terra', 'gpt-6.2-terra')] [['claude-sonnet-6-0', 'claude-sonnet-6', 'claude-sonnet-5-6']] cx-terra=gpt-6.1-terra/2 cx-terra-b=gpt-6.1-terra/2 cx-luna=gpt-6-luna/3 cl-sonnet=claude-sonnet-5-5/2"
+FAKE_MODELS='gpt-6.1-terra gpt-6.2-terra gpt-6-luna gpt-7-luna' FAKE_BAD_MODELS='gpt-6.2-terra claude-sonnet-6-0 claude-sonnet-6 claude-sonnet-5-6' $H/bin/run-model discover --apply >/dev/null 2>&1
+check "a candidate that fails its smoke is not applied, nothing cooled" "$(MID) $($H/bin/run-model health)" "cx-terra=gpt-6.1-terra/2 cx-terra-b=gpt-6.1-terra/2 cx-luna=gpt-7-luna/2 cl-sonnet=claude-sonnet-5-5/2 {}"
+FAKE_MODELS='gpt-6.1-terra gpt-6.2-terra' FAKE_GOOD_MODELS='gpt-6.2-terra claude-sonnet-5-6' $H/bin/run-model discover --apply 2>$SCR/disc.err >/dev/null
+check "upgrade after a fake smoke: every account moves, level kept; Claude probed to 5-6; changelog; reported" "$(MID) $(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'));print(sum('discover:' in str(c.get('change','')) for c in r['changelog']))") $(grep -c 'upgraded' $SCR/disc.err)" "cx-terra=gpt-6.2-terra/2 cx-terra-b=gpt-6.2-terra/2 cx-luna=gpt-7-luna/2 cl-sonnet=claude-sonnet-5-6/2 3 2"
+check "the tier table re-levels an upgraded id (gpt-7-luna -> Tier 2 by the owner's table)" "$(MID | tr ' ' '\n' | grep cx-luna)" "cx-luna=gpt-7-luna/2"
+export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; cd "$SCR/repo3"
 
 echo "--- usage aggregation (fake probe via adapter override)"
 python3 - <<'PY'
 import json, os
 cfg = os.environ['AUTOPILOT_CONFIG_DIR']
-p = os.path.join(cfg, 'harnesses', 'fakecli.json'); a = json.load(open(p))
-a['usage'] = {'kind': 'command', 'argv': ['usage'], 'regex': r'^(\w+) (\d+)%(?: resets (\S+))?$', 'groups': ['window', 'used', 'reset_iso']}
-json.dump(a, open(p, 'w'))
+for cli in ('claude', 'codex', 'grok', 'agy', 'opencode', 'cursor', 'vibe'):
+    p = os.path.join(cfg, 'harnesses', cli + '.json'); a = json.load(open(p))
+    a['usage'] = {'kind': 'command', 'argv': ['usage'], 'regex': r'^(\w+) (\d+)%(?: resets (\S+))?$', 'groups': ['window', 'used', 'reset_iso']}
+    json.dump(a, open(p, 'w'))
 PY
-cat >> "$SCR/fake/fakecli" <<'EOF'
-EOF
-cat > "$SCR/fake/fakecli_usage" <<'EOF'
-EOF
-python3 - <<'PY'
-import os
-p = os.path.join(os.environ['SCR'], 'fake', 'fakecli')
-s = open(p).read().replace('case "${FAKE_BEHAVIOUR:-approve}" in', 'if [ "$1" = usage ]; then echo "5h ${FAKE_5H:-10}% resets 2099-01-01T00:00:00+00:00"; echo "weekly ${FAKE_WEEK:-10}% resets 2099-01-02T00:00:00+00:00"; exit 0; fi\ncase "${FAKE_BEHAVIOUR:-approve}" in')
-open(p, 'w').write(s)
-PY
-R=$(FAKE_5H=100 FAKE_WEEK=50 $H/bin/run-model usage --apply | python3 -c "import json,sys;d=json.load(sys.stdin);print(sorted(k for k in d['exhausted_until_reset'] if k.startswith('fk-'))==['fk-a','fk-b','fk-c2','fk-c3','fk-d','fk-e'])")
-check "5h exhausted cools every fakecli key" "$R" "True"
+R=$(FAKE_5H=100 FAKE_WEEK=50 $H/bin/run-model usage --apply | python3 -c "import json,sys;d=json.load(sys.stdin);print(sorted(k for k in d['exhausted_until_reset'] if k.startswith('fk-'))==['fk-a','fk-b','fk-c2','fk-c3','fk-d','fk-e','fk-f'])")
+check "5h exhausted cools every key" "$R" "True"
 R=$(FAKE_5H=100 FAKE_WEEK=100 $H/bin/run-model usage --apply >/dev/null; $H/bin/run-model health | python3 -c "import json,sys;h=json.load(sys.stdin);print(h['fk-a']['until'][:10])")
 check "longest reset wins (weekly 2099-01-02)" "$R" "2099-01-02"
 R=$(FAKE_5H=100 FAKE_WEEK=10 $H/bin/run-model usage --apply | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['stale_quota_cooldowns_cleared'])")
@@ -154,14 +304,6 @@ p = os.path.join(os.environ['AUTOPILOT_CONFIG_DIR'], 'models.json'); r = json.lo
 r['health']['fk-b'] = {'until': '2099-01-02T00:00:00+00:00', 'reason': 'quota: weekly', 'set_at': (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat(), 'windows': ['weekly']}
 json.dump(r, open(p, 'w'))
 PY
-cat > "$SCR/fake/fakecli_5h_only" <<'EOF'
-EOF
-python3 - <<'PY'
-import os
-p = os.path.join(os.environ['SCR'], 'fake', 'fakecli'); s = open(p).read()
-s = s.replace('echo "weekly ${FAKE_WEEK:-10}% resets 2099-01-02T00:00:00+00:00"; exit 0', '[ -n "${FAKE_NO_WEEK:-}" ] || echo "weekly ${FAKE_WEEK:-10}% resets 2099-01-02T00:00:00+00:00"; exit 0')
-open(p, 'w').write(s)
-PY
 R=$(FAKE_5H=10 FAKE_NO_WEEK=1 $H/bin/run-model usage --apply | python3 -c "import json,sys;d=json.load(sys.stdin);print('fk-b' in d['stale_quota_cooldowns_cleared'])")
 check "a 5h-only reading does not clear a weekly cooldown" "$R" "False"
 R=$(FAKE_5H=10 FAKE_WEEK=10 $H/bin/run-model usage --apply | python3 -c "import json,sys;d=json.load(sys.stdin);print('fk-b' in d['stale_quota_cooldowns_cleared'])")
@@ -169,12 +311,12 @@ check "a reading covering weekly clears it" "$R" "True"
 
 echo "--- account standard"
 $H/bin/harness add-account codex b --label "second login" >/dev/null 2>&1; check "add-account codex b (standard home)" "$?" "0"
-check "cloned key uses CODEX_HOME=~/.codex-b" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'));print(r['models']['codex-sol-b']['env']['CODEX_HOME'], r['models']['codex-sol-b']['account_label'])")" "~/.codex-b second login"
+check "cloned key uses CODEX_HOME=~/.codex-b, its own subscription (paid?)" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'));m=r['models']['fk-b-b'];print(m['env']['CODEX_HOME'], m['account_label'], m['subscription'])")" "~/.codex-b second login paid?"
 $H/bin/harness add-account codex work >/dev/null 2>&1; check "add-account with a word instead of a letter refused" "$?" "1"
 $H/bin/harness add-account codex c --home ~/.codex-other >/dev/null 2>&1; check "non-standard home without --nonstandard refused" "$?" "1"
 $H/bin/harness add-account codex c --home ~/.codex-other --nonstandard >/dev/null 2>&1; check "non-standard home accepted with --nonstandard" "$?" "0"
-$H/bin/harness discover 2>/dev/null | grep -q "NON-STANDARD home for codex-sol-c" && echo "ok   discover flags the non-standard home" || { echo "FAIL discover did not flag ~/.codex-other"; FAIL=$((FAIL+1)); }
-$H/bin/harness set-home codex ~/.codex-other ~/.codex-c >/dev/null; check "set-home moves the roster entries" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'));print(r['models']['codex-sol-c']['env']['CODEX_HOME'])")" "~/.codex-c"
+$H/bin/harness discover 2>/dev/null | grep -q "NON-STANDARD home for fk-b-c" && echo "ok   discover flags the non-standard home" || { echo "FAIL discover did not flag ~/.codex-other"; FAIL=$((FAIL+1)); }
+$H/bin/harness set-home codex ~/.codex-other ~/.codex-c >/dev/null; check "set-home moves the roster entries" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'));print(r['models']['fk-b-c']['env']['CODEX_HOME'])")" "~/.codex-c"
 $H/bin/harness add-account fakecli b >/dev/null 2>&1; check "add-account refused for a harness without account_env" "$?" "1"
 echo "--- state helper + finish recovery"
 $H/bin/state set inflight.T-9 '{"wt":"x","round":1}' >/dev/null; $H/bin/state push done '"T-8"' >/dev/null
@@ -460,17 +602,17 @@ chmod +x "$SCR/fake/fakeacct"
 python3 - <<'PY'
 import json, os
 S = os.environ['SCR']; ac = os.path.join(S, 'acct'); cfg = os.environ['AUTOPILOT_CONFIG_DIR']
-json.dump({'name': 'fakeacct', 'binary': 'fakeacct', 'vendor': 'by_model', 'run': {'argv': ['-p', '{prompt}'], 'env': {}, 'output': 'stdout'},
-           'account_env': 'FAKE_HOME', 'account_default': os.path.join(ac, 'a'),
-           'usage': {'kind': 'codex_sessions', 'path': '$FAKE_HOME/sessions', 'windows': {'300min': '5h', '10080min': 'weekly'}},
-           'auto_reset': {'window': 'weekly', 'argv': [os.path.join(S, 'fake', 'fake-reset'), '--yes', '--account', '{account}']},
-           'quota_patterns': ['usage limit']}, open(os.path.join(cfg, 'harnesses', 'fakeacct.json'), 'w'))
-m = lambda model, home, vendor, cost: {'cli': 'fakeacct', 'model': model, 'vendor': vendor, 'cost': cost, 'tier': model, 'family': model,
-                                         **({'env': {'FAKE_HOME': os.path.join(ac, home)}} if home else {})}
+# Two Codex-like accounts (vendor openai, so the adapter is named codex: vendor -> CLI) and one xAI account (grok).
+for name, extra in (('codex', {'auto_reset': {'window': 'weekly', 'argv': [os.path.join(S, 'fake', 'fake-reset'), '--yes', '--account', '{account}']}}), ('grok', {})):
+    json.dump(dict({'name': name, 'binary': 'fakeacct', 'vendor': 'by_model', 'run': {'argv': ['-p', '{prompt}'], 'env': {}, 'output': 'stdout'},
+                    'account_env': 'FAKE_HOME', 'account_default': os.path.join(ac, 'a'),
+                    'usage': {'kind': 'codex_sessions', 'path': '$FAKE_HOME/sessions', 'windows': {'300min': '5h', '10080min': 'weekly'}},
+                    'quota_patterns': ['usage limit']}, **extra), open(os.path.join(cfg, 'harnesses', name + '.json'), 'w'))
+m = lambda cli, model, home, vendor, level: {'cli': cli, 'model': model, 'vendor': vendor, 'level': level, 'subscription': 'paid', 'tier': model, 'family': model,
+                                               **({'env': {'FAKE_HOME': os.path.join(ac, home)}} if home else {})}
 json.dump({'cooldown_minutes': 30, 'timeouts_seconds': {'implement': 60, 'review': 60, 'smoke': 30, 'idle': 60}, 'health': {}, 'changelog': [],
-           'models': {'fa-a': m('gpt-a', None, 'openai', 'high'), 'fa-b': m('gpt-a', 'b', 'openai', 'high'), 'fx': m('grok-y', 'x', 'xai', 'cheap')},
-           'pools': {'plan_review': ['fa-a', 'fa-b'], 'premortem': ['fa-a', 'fa-b'], 'review': ['fa-a', 'fa-b', 'fx'], 'implement': ['fx'],
-                     'implement_escalation': ['fx']}}, open(os.path.join(cfg, 'models.json'), 'w'))
+           'models': {'fa-a': m('codex', 'gpt-a', None, 'openai', 1), 'fa-b': m('codex', 'gpt-a', 'b', 'openai', 1), 'fx': m('grok', 'grok-y', 'x', 'xai', 2)}},
+          open(os.path.join(cfg, 'models.json'), 'w'))
 PY
 # SESS <account> <5h %> <weekly %> <minutes ago>: the newest Codex-style rate_limits record of that account.
 SESS() { mkdir -p $AC/$1/sessions/2026/11/09; python3 -c "
@@ -495,7 +637,7 @@ CLEAN '{}'; SESS a 100 100 1; echo ok > $SCR/reset.mode
 U=$($H/bin/run-model usage --apply 2>$SCR/u.err)
 check "auto-reset: weekly 100% claims the account's reset once, through the adapter (codex-reset --yes --account)" "$(cat $SCR/resets.log)" "--yes --account default"
 check "auto-reset: redeemed, smoke ok, cooldowns cleared, the triggering reading now stale" "$(echo "$U" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['resets'][0]['result'][:30], d['exhausted_until_reset'], [(s['account'], s['window']) for s in d['stale_readings_skipped']])") $(HEALTH)" "redeemed, smoke ok (fa-a), coo [] [('default', '5h'), ('default', 'weekly')] []"
-check "auto-reset: attempt recorded in the roster with the window, time and result" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['resets']['fakeacct/default'];print(r['window'], r['window_reset'][:10], bool(r['at']), r['result'][:8])")" "weekly 2099-01-02 True redeemed"
+check "auto-reset: attempt recorded in the roster with the window, time and result" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['resets']['codex/default'];print(r['window'], r['window_reset'][:10], bool(r['at']), r['result'][:8])")" "weekly 2099-01-02 True redeemed"
 CLEAN '{}'; SESS a 100 100 1; touch $AC/a/down
 U=$($H/bin/run-model usage --apply 2>/dev/null); $H/bin/run-model usage --apply >/dev/null 2>&1
 check "auto-reset: once per account per weekly window (smoke failed: cooled, no second claim)" "$(NRESET) $(HEALTH) $(echo "$U" | python3 -c "import json,sys;print(json.load(sys.stdin)['resets'][0]['result'][:22])")" "1 ['fa-a'] redeemed, smoke failed"
@@ -503,13 +645,13 @@ CLEAN '{"codex_auto_reset": False}'; SESS a 100 100 1
 $H/bin/run-model usage --apply >/dev/null 2>&1
 check "auto-reset: disabled by models.json codex_auto_reset=false" "$(NRESET) $(HEALTH)" "0 ['fa-a']"
 CLEAN '{}'; SESS a 100 100 1; touch $AC/a/down; echo x > $SCR/rb.md
-$H/bin/run-model run review $SCR/rb.md $SCR/rb.out --cwd $AR --standalone --exclude-vendor anthropic --model fa-a >/dev/null 2>&1
+$H/bin/run-model run review $SCR/rb.md $SCR/rb.out --cwd $AR --standalone --role milestone_review --exclude-vendor anthropic --model fa-a >/dev/null 2>&1
 check "auto-reset: a run that hits its quota claims the weekly reset too" "$(NRESET) $(cat $SCR/resets.log)" "1 --yes --account default"
 # Stale usage: a reading taken before a successful smoke of the account is not re-applied.
 CLEAN '{"codex_auto_reset": False}'; SESS a 100 100 30
 $H/bin/run-model smoke fa-a >/dev/null
 U=$($H/bin/run-model usage --apply 2>$SCR/u.err)
-check "stale usage: 100% reading older than a successful smoke is skipped, no cooldown" "$(echo "$U" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['exhausted_until_reset'], len(d['stale_readings_skipped']))") $(HEALTH) $(grep -c 'stale reading skipped: fakeacct default weekly' $SCR/u.err)" "[] 2 [] 1"
+check "stale usage: 100% reading older than a successful smoke is skipped, no cooldown" "$(echo "$U" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['exhausted_until_reset'], len(d['stale_readings_skipped']))") $(HEALTH) $(grep -c 'stale reading skipped: codex default weekly' $SCR/u.err)" "[] 2 [] 1"
 SESS a 100 100 0; sleep 1
 check "stale usage: a reading newer than the smoke still applies" "$($H/bin/run-model usage --apply 2>/dev/null >/dev/null; HEALTH)" "['fa-a']"
 # CRITICAL: both accounts of the vendor out, no reset available.
@@ -517,10 +659,10 @@ CLEAN '{}'; SESS a 100 100 1; SESS b 100 100 1; echo none > $SCR/reset.mode
 NU=$(J $SCR/linear.json "len(d['updates'])")
 $H/bin/run-model usage --apply >/dev/null 2>$SCR/u.err
 check "critical: both resets attempted, none available" "$(NRESET) $(HEALTH)" "2 ['fa-a', 'fa-b']"
-check "critical: CRITICAL line on stderr names the vendor and the blocked plan review" "$(grep -c '^CRITICAL: openai out of quota on every account (fakeacct/FAKE_HOME=.*/b, fakeacct/default); blocked pools: plan_review, premortem; earliest reset ' $SCR/u.err)" "1"
+check "critical: CRITICAL line on stderr names the vendor and the blocked plan review" "$(grep -c '^CRITICAL: openai out of quota on every account (codex/FAKE_HOME=.*/b, codex/default); blocked pools: milestone_review, plan_review, premortem; earliest reset ' $SCR/u.err)" "1"
 check "critical: alerts.jsonl entry (vendor, accounts, reset results, pools, earliest reset)" "$(python3 -c "
 import json; a=[json.loads(l) for l in open('$AR/.autopilot/alerts.jsonl')]; d=a[0]['details']
-print(len(a), a[0]['level'], d['vendor'], len(d['accounts']), sorted(v[:18] for v in d['resets'].values()), d['blocked_pools'], d['earliest_reset'][:10])")" "1 CRITICAL openai 2 ['no reset available', 'no reset available'] ['plan_review', 'premortem'] 2099-01-02"
+print(len(a), a[0]['level'], d['vendor'], len(d['accounts']), sorted(v[:18] for v in d['resets'].values()), d['blocked_pools'], d['earliest_reset'][:10])")" "1 CRITICAL openai 2 ['no reset available', 'no reset available'] ['milestone_review', 'plan_review', 'premortem'] 2099-01-02"
 check "critical: one Linear project update titled CRITICAL: openai out of quota" "$(J $SCR/linear.json "len(d['updates']) - $NU, d['updates'][-1]['body'].splitlines()[0]")" "1 CRITICAL: openai out of quota"
 $H/bin/run-model usage --apply >/dev/null 2>&1
 check "critical: rerun keeps one alert, no second Linear update, no second reset" "$(wc -l < $AR/.autopilot/alerts.jsonl | tr -d ' ') $(J $SCR/linear.json "len(d['updates']) - $NU") $(NRESET)" "1 1 2"
