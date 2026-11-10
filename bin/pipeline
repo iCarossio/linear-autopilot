@@ -1,0 +1,758 @@
+#!/usr/bin/env python3
+"""pipeline: the ticket clock. Moves every in-flight ticket through implement -> rebase -> checks -> one review ->
+fix round on its own, so no finished round waits for the coordinator, and hands approvals to the coordinator, who
+merges them. It never merges by itself, never pushes, never touches the shared stack (Docker, servers, the main
+checkout) and never starts a live gate: it only runs model rounds through run-model, the project checks in the
+ticket's worktree, and bin/review.
+
+  pipeline run [--interval S] [--once]           # the loop; start it under bin/bgrun (one `tick` line per pass)
+  pipeline start <ISSUE> [--wt PATH] [--pool P]  # put a planned ticket in flight: round 1 brief + Tier 3 implementer
+  pipeline fix <ISSUE> <findings.md>             # the coordinator's own next round (after triage, or instead of a stuck step)
+  pipeline retry <ISSUE>                         # a stuck ticket: redo the step that got stuck
+  pipeline merge <ISSUE> "<subject>" "<body>"    # merge an approved ticket: rebase, squash, bin/finish (exit 3: conflict)
+  pipeline status                                # one line per in-flight ticket, then the ETA lines of bin/eta
+  pipeline wait-approval [--interval S]          # block until approved.txt or attention.txt has a line, print them
+
+Per ticket, state.json `inflight.<ISSUE>`: `wt`, `round`, `stage`, `stage_at`, optional `pool` (review pool for
+bin/review), and the pipeline's own bookkeeping (`tries`, `merges`, `why`, `stuck_from`). Stages the loop drives:
+  implement  round <n> runs; its run-model JSON line lands in .autopilot/out/<ISSUE>-impl-<n>.json. ok -> rebase.
+  merge      a merge-only round after a rebase conflict: brief <ISSUE>-impl-<n>m<k>.md, --no-escalate, same round.
+  rebase     bring the worktree onto state.json `branch` (bin/rebase-wt: own commits are rebased, a conflict is left
+             in progress); conflict -> merge round, else -> review once a check slot is free (`max_jobs`).
+  review     the checks (ticket `CHECKS:` line, else state.json `checks`), then one bin/review run, in the background;
+             progress in .autopilot/pipeline/<ISSUE>-<n>.check. Check failed or changes -> fix round <n+1>;
+             approve -> approved; no verdict -> the review again (`review_retries`), then stuck.
+  approved   listed in .autopilot/pipeline/approved.txt (`<ISSUE> r<n>`) until `pipeline merge` takes it.
+  triage     round `max_rounds` (5) still has findings: the coordinator settles them (`pipeline fix`, or merge).
+  stuck      a step failed beyond its retries: CRITICAL alert, the coordinator looks, then `pipeline retry`.
+Any other stage (plan, hold, ...) is left alone. triage and stuck tickets are listed in attention.txt.
+Fix rounds go through `run-model run implement --role fix` with the brief <ISSUE>-impl-<n>.md, so run-model's
+automatic escalation after round 3 applies. Every fix brief ends with the rule that the full checks must pass.
+Settings: state.json `pipeline` {interval 60, max_jobs 3, max_rounds 5, max_merges 3, review_retries 3,
+impl_retries 3, retry_minutes 10, check_timeout_minutes 60}. Log: .autopilot/pipeline/pipeline.log.
+Tests: PIPELINE_SYNC=1 runs every dispatch in the foreground; PIPELINE_RUN_MODEL, PIPELINE_REVIEW, PIPELINE_FINISH
+(any bin script name) replace that script.
+"""
+import datetime as dt, fcntl, glob, json, os, re, signal, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+SELF = os.path.realpath(__file__)
+DEFAULTS = {'interval': 60, 'max_jobs': 3, 'max_rounds': 5, 'max_merges': 3, 'review_retries': 3, 'impl_retries': 3,
+            'retry_minutes': 10, 'check_timeout_minutes': 60}
+DRIVEN = ('implement', 'merge', 'rebase', 'review')
+GRACE = 90  # seconds before a run or job with no process and no result counts as dead (dispatch races)
+MARK = '@@pipeline '  # marker lines of a .check file; check output never starts with it
+M = PD = OUT = None
+EVENTS = []
+_PROCS = None
+STARTED = [0]  # jobs started during this tick: not yet in the ps snapshot
+
+
+class Stop(Exception):
+    """A ticket step that cannot go on without the coordinator (missing ticket file, a script refusing)."""
+
+
+def tool(name):
+    return os.environ.get('PIPELINE_' + name.upper().replace('-', '_')) or os.path.join(lib.HERE, name)
+
+
+def env(**extra):
+    e = dict(os.environ, AUTOPILOT_REPO=M)
+    for k, v in extra.items():
+        if v is None:
+            e.pop(k, None)
+        else:
+            e[k] = v
+    return e
+
+
+def cfg(st):
+    return dict(DEFAULTS, **(st.get('pipeline') or {}))
+
+
+def log(msg):
+    EVENTS.append(msg)
+    with open(os.path.join(PD, 'pipeline.log'), 'a') as f:
+        f.write('%s %s\n' % (dt.datetime.now().strftime('%m-%d %H:%M:%S'), msg))
+
+
+def procs():
+    """Command lines of every process, read once per tick."""
+    global _PROCS
+    if _PROCS is None:
+        _PROCS = subprocess.run(['ps', '-ax', '-o', 'command='], capture_output=True, text=True).stdout.splitlines()
+    return _PROCS
+
+
+def run_alive(name):
+    return any('/' + name + '.md' in c for c in procs())
+
+
+def job_alive(t, r):
+    for c in procs():
+        a = c.split()
+        if '_job' in a:
+            i = a.index('_job')
+            if a[i + 1:i + 3] == [t, str(r)]:
+                return True
+    return False
+
+
+def jobs_running():
+    return STARTED[0] + sum(1 for c in procs() if '_job' in c.split() and SELF in c)
+
+
+def spawn(argv, out=None, extra_env=None):
+    """Background by default (own session, stdin closed); PIPELINE_SYNC=1 runs it in the foreground."""
+    f = open(out, 'w') if out else subprocess.DEVNULL
+    kw = dict(cwd=M, env=env(**(extra_env or {})), stdin=subprocess.DEVNULL, stdout=f,
+              stderr=subprocess.STDOUT if out else subprocess.DEVNULL)
+    try:
+        if os.environ.get('PIPELINE_SYNC') == '1':
+            subprocess.run(argv, **kw)
+        else:
+            subprocess.Popen(argv, start_new_session=True, **kw)
+    finally:
+        if out:
+            f.close()
+
+
+def result(path):
+    """run-model's final JSON line (stderr lines such as `run-model: escalate ...` share the file), or None."""
+    if not os.path.exists(path):
+        return None
+    for line in reversed(open(path, errors='ignore').read().splitlines()):
+        if line.startswith('{'):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if 'status' in d:
+                return d
+    return None
+
+
+def age(v):
+    try:
+        return (lib.now() - lib.parse_time(v['stage_at'])).total_seconds()
+    except (KeyError, ValueError, TypeError):
+        return float('inf')
+
+
+def rnd(v):
+    return int(v.get('round') or 1)
+
+
+def wt_of(st, t, v=None):
+    v = v or st.get('inflight', {}).get(t) or {}
+    d = st.get('worktrees_dir') or os.path.join(os.path.dirname(M), os.path.basename(M) + '-wt')
+    return v.get('wt') or os.path.join(d, t)
+
+
+def ticket_file(t):
+    return os.path.join(M, '.autopilot', 'tickets', t + '.md')
+
+
+def checks_of(st, t):
+    """The ticket's `CHECKS:` line (what mkbrief gives the implementer), else state.json `checks`."""
+    tf = ticket_file(t)
+    mt = re.search(r'^CHECKS:(.*)$', open(tf).read(), re.M) if os.path.exists(tf) else None
+    if mt and mt.group(1).strip():
+        return [mt.group(1).strip()]
+    return list(st.get('checks', []))
+
+
+def final_rule(st, t):
+    cs = ' && '.join(checks_of(st, t)) or 'the project checks'
+    return ('Before finishing: run the full checks (`%s`) and make them pass; a round with failing checks is '
+            'rejected.' % cs)
+
+
+def transition(t, expect, r, **fields):
+    """Compare-and-set on inflight.<t>: applies `fields` only while the ticket is still at stage `expect` (None: any)
+    and round `r` (None: any), so an edit the coordinator made meanwhile always wins. A None value deletes the field."""
+    if 'stage' in fields:
+        fields.setdefault('stage_at', lib.now().isoformat())
+
+    def fn(st):
+        v = st.get('inflight', {}).get(t)
+        if v is None or (expect is not None and v.get('stage') != expect) or (r is not None and rnd(v) != r):
+            return False
+        for k, x in fields.items():
+            if x is None:
+                v.pop(k, None)
+            else:
+                v[k] = x
+        return True
+    return lib.update_state(M, fn)
+
+
+def mkbrief(kind, t, n, wt, findings=None):
+    if not os.path.exists(ticket_file(t)):
+        raise Stop('no ticket file %s' % ticket_file(t))
+    p = subprocess.run([tool('mkbrief'), kind, t, str(n), ticket_file(t)] + ([findings] if findings else []),
+                       cwd=M, env=env(WT=wt), capture_output=True, text=True)
+    if p.returncode or not p.stdout.strip():
+        raise Stop('mkbrief %s %s %s failed: %s' % (kind, t, n, (p.stderr or p.stdout).strip()[-300:]))
+    return p.stdout.strip().splitlines()[-1]
+
+
+def run_args(t, v):
+    """(run name, extra run-model args) of the ticket's current round: the run name is the brief and output basename."""
+    r = rnd(v)
+    if v.get('stage') == 'merge' or (v.get('stage') == 'stuck' and v.get('stuck_from') == 'merge'):
+        return '%s-impl-%sm%s' % (t, r, v.get('merges', 1)), ['--role', 'fix', '--no-escalate']
+    return '%s-impl-%s' % (t, r), (['--role', 'fix'] if r > 1 else [])
+
+
+def dispatch(t, wt, name, extra):
+    brief = os.path.join(M, '.autopilot', 'briefs', name + '.md')
+    spawn([tool('run-model'), 'run', 'implement', brief, os.path.join(OUT, name + '.md'), '--cwd', wt, '--issue', t] + extra,
+          out=os.path.join(OUT, name + '.json'))
+
+
+def lines(path):
+    return [x for x in open(path).read().splitlines() if x.strip()] if os.path.exists(path) else []
+
+
+def write_lines(path, ls):
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        f.write(''.join(x + '\n' for x in ls))
+    os.replace(tmp, path)
+
+
+def drop_approved(t):
+    p = os.path.join(PD, 'approved.txt')
+    ls = lines(p)
+    keep = [x for x in ls if x.split()[0] != t]
+    if keep != ls:
+        write_lines(p, keep)
+
+
+def stuck(t, frm, r, why):
+    if transition(t, None, r, stage='stuck', stuck_from=frm, why=why[:500]):
+        log('%s r%s: STUCK in %s: %s' % (t, r, frm, why[:300]))
+        lib.raise_alert(M, 'pipeline_stuck', t, 'CRITICAL: %s stuck in the pipeline' % t,
+                        '%s round %s stuck in %s: %s (pipeline status; pipeline retry %s)' % (t, r, frm, why[:300], t),
+                        {'issue': t, 'round': r, 'stage': frm})
+
+
+def marks(ck):
+    out = {}
+    if os.path.exists(ck):
+        for line in open(ck, errors='ignore'):
+            if line.startswith(MARK):
+                k, _, rest = line[len(MARK):].strip().partition(' ')
+                out[k] = rest
+    return out
+
+
+def check_path(t, r):
+    return os.path.join(PD, '%s-%s.check' % (t, r))
+
+
+# ---------- the steps ----------
+
+def start_job(t, r, wt, expect, review_only=False):
+    """The checks then one review, in the background. The .check file is reset before the job starts, so a DONE
+    marker the loop reads always belongs to the current job."""
+    if not transition(t, expect, r, stage='review'):
+        return
+    with open(check_path(t, r), 'w') as f:
+        f.write('%sSTART %s%s\n' % (MARK, lib.now().isoformat(), ' review-only' if review_only else ''))
+        if review_only:  # the checks passed on this tree in the previous job; a later retry must not rerun them either
+            f.write('%sCHECK_OK (previous job)\n' % MARK)
+    log('%s r%s: %s' % (t, r, 'review again' if review_only else 'implemented -> checks + review'))
+    if os.environ.get('PIPELINE_SYNC') != '1':
+        STARTED[0] += 1
+    spawn([sys.executable, SELF, '_job', t, str(r)] + (['--review-only'] if review_only else []))
+
+
+def rebase(t, v, st, c):
+    r, wt = rnd(v), wt_of(st, t, v)
+    if jobs_running() >= c['max_jobs']:
+        return  # stays in `rebase` until a check slot frees up (status: waiting for a check slot)
+    p = subprocess.run([tool('rebase-wt'), wt, st['branch']], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
+    out = (p.stdout + p.stderr).strip()
+    if p.returncode == 0:
+        start_job(t, r, wt, 'rebase')
+    elif p.returncode == 3 or 'CONFLICT' in out:
+        merge_round(t, v, st, c, out)
+    else:
+        stuck(t, 'rebase', r, 'rebase-wt rc=%s: %s' % (p.returncode, out[-300:]))
+
+
+def merge_round(t, v, st, c, why):
+    r, wt = rnd(v), wt_of(st, t, v)
+    k = int(v.get('merges') or 0) + 1
+    if k > c['max_merges']:
+        stuck(t, 'rebase', r, '%d merge rounds did not resolve the rebase conflict: %s' % (k - 1, why[-300:]))
+        return
+    fx = os.path.join(OUT, '%s-merge-%s-%s.md' % (t, r, k))
+    with open(fx, 'w') as f:
+        f.write(
+            'MERGE-ONLY ROUND. The worktree was rebased onto the project branch `%s` and conflicted:\n\n```\n%s\n```\n\n'
+            'Resolve it, nothing else:\n'
+            '- `git status` first. A rebase in progress: resolve every conflicted (UU) file keeping the intent of both sides, '
+            'no conflict markers left, `git add` it, then `GIT_EDITOR=true git rebase --continue`, until the rebase completes '
+            '(this round is the one exception to the no-git rule: finishing that rebase is the job; no other commit). The '
+            'ticket\'s uncommitted work is the last commit of the rebase (`autopilot-wip ...`): keep it a commit.\n'
+            '- Unmerged (UU) files without a rebase in progress (a stash re-applied with conflicts): resolve them the same way '
+            'and `git add` them.\n'
+            '- Never drop, pop or clear stash entries (they are backups), never `git reset --hard`, `git checkout -- .`, '
+            '`git clean`, `git rebase --abort` or `git stash drop`.\n'
+            '- No new features, no refactoring beyond the resolution.\n\n%s\n' % (st['branch'], why[-2500:], final_rule(st, t)))
+    name = '%s-impl-%sm%s' % (t, r, k)
+    try:
+        mkbrief('impl', t, '%sm%s' % (r, k), wt, fx)
+    except Stop as e:
+        stuck(t, 'rebase', r, str(e)); return
+    if transition(t, 'rebase', r, stage='merge', merges=k, tries=0):
+        log('%s r%s: rebase conflict -> merge round %s' % (t, r, k))
+        dispatch(t, wt, name, ['--role', 'fix', '--no-escalate'])
+
+
+def fix_round(t, v, st, c, body, src, expect='review', forced=False):
+    """Next round <n+1> with these findings; past `max_rounds` the ticket goes to the coordinator (triage) instead."""
+    r, wt = rnd(v), wt_of(st, t, v)
+    n = r + 1
+    if r >= c['max_rounds'] and not forced:
+        fp = os.path.join(OUT, '%s-triage-%s.md' % (t, r))
+        with open(fp, 'w') as f:
+            f.write(body + '\n')
+        if transition(t, expect, r, stage='triage', why='%s after round %s of %s; findings: %s' % (src, r, c['max_rounds'], fp),
+                      findings=fp):
+            log('%s r%s: %s -> TRIAGE (round %s reached)' % (t, r, src, c['max_rounds']))
+        return
+    fx = os.path.join(OUT, '%s-fix-%s.md' % (t, n))
+    with open(fx, 'w') as f:
+        f.write(body.rstrip() + '\n\n' + final_rule(st, t) + '\n')
+    mkbrief('impl', t, n, wt, fx)
+    if transition(t, expect, r, round=n, stage='implement', tries=0, merges=None, why=None, stuck_from=None, findings=None):
+        drop_approved(t)
+        lib.resolve_alert(M, 'pipeline_stuck', t)
+        log('%s r%s: %s -> fix round %s%s' % (t, r, src, n, ' (Tier 2 by escalation)' if n > escalate_after() else ''))
+        dispatch(t, wt, '%s-impl-%s' % (t, n), ['--role', 'fix'])
+
+
+def escalate_after():
+    try:
+        return int(lib.load_reg(warn=False).get('escalate_after_round', 3))
+    except Exception:
+        return 3
+
+
+def approve(t, r):
+    p = os.path.join(PD, 'approved.txt')
+    if transition(t, 'review', r, stage='approved'):
+        ls = [x for x in lines(p) if x.split()[0] != t]
+        write_lines(p, ls + ['%s r%s' % (t, r)])
+        lib.resolve_alert(M, 'pipeline_stuck', t)
+        log('%s r%s: APPROVED' % (t, r))
+
+
+def check_findings(ck):
+    text = open(ck, errors='ignore').read()
+    m = re.search('^' + re.escape(MARK) + r'CHECK_FAIL (.*)$', text, re.M)
+    body = text[:m.start()] if m else text
+    body = '\n'.join(x for x in body.splitlines() if not x.startswith(MARK))[-3000:]
+    return 'The project checks failed (%s). Last lines of the output:\n\n```\n%s\n```\n' % (m.group(1) if m else '?', body)
+
+
+def on_review(t, v, st, c):
+    r = rnd(v)
+    ck = check_path(t, r)
+    mk = marks(ck)
+    if 'DONE' not in mk:
+        if job_alive(t, r) or age(v) < GRACE:
+            return
+        tries = int(v.get('tries') or 0)
+        if tries >= c['review_retries']:
+            stuck(t, 'review', r, 'the check + review job died %d times without a result (%s)' % (tries + 1, ck)); return
+        transition(t, 'review', r, tries=tries + 1)
+        log('%s r%s: check/review job died, starting it again' % (t, r))
+        start_job(t, r, wt_of(st, t, v), 'review', review_only='CHECK_OK' in mk)
+        return
+    if 'CHECK_FAIL' in mk:
+        fix_round(t, v, st, c, check_findings(ck), 'checks failed'); return
+    rc = mk.get('REVIEW_RC', '')
+    if rc == '0':
+        approve(t, r)
+    elif rc == '1':
+        fp = os.path.join(OUT, '%s-findings-%s.md' % (t, r))
+        body = open(fp).read() if os.path.exists(fp) else '(the reviewer asked for changes; no findings file)'
+        fix_round(t, v, st, c, 'Blocking review findings to fix:\n\n' + body, 'changes')
+    elif rc == '3':
+        stuck(t, 'review', r, 'bin/review exit 3: a reviewer changed the history or the tree could not be restored; inspect %s '
+              '(.autopilot/out/review-%s-%s.txt)' % (wt_of(st, t, v), t, r))
+    else:
+        tries = int(v.get('tries') or 0)
+        if tries >= c['review_retries']:
+            stuck(t, 'review', r, 'no review verdict after %d tries (bin/review rc=%s, .autopilot/out/review-%s-%s.txt)' % (tries + 1, rc, t, r))
+            return
+        if transition(t, 'review', r, tries=tries + 1):
+            log('%s r%s: no verdict (review rc=%s) -> review again (%d/%d)' % (t, r, rc, tries + 1, c['review_retries']))
+            start_job(t, r, wt_of(st, t, v), 'review', review_only=True)
+
+
+def on_run(t, v, st, c):
+    """implement / merge: wait for run-model's JSON line, then rebase; a dead or failed run is dispatched again (bounded)."""
+    r, wt, stage = rnd(v), wt_of(st, t, v), v['stage']
+    name, extra = run_args(t, v)
+    js = os.path.join(OUT, name + '.json')
+    res = result(js)
+    tries = int(v.get('tries') or 0)
+    if res is None:
+        brief = os.path.join(M, '.autopilot', 'briefs', name + '.md')
+        if run_alive(name) or age(v) < GRACE or not os.path.exists(brief):
+            return  # running, just dispatched, or never dispatched (the coordinator owns the first dispatch)
+        if not os.path.exists(js):
+            return
+        if tries >= c['impl_retries']:
+            stuck(t, stage, r, '%s died %d times without a result' % (name, tries + 1)); return
+        if transition(t, stage, r, tries=tries + 1, stage_at=lib.now().isoformat()):
+            log('%s r%s: %s died without a result -> dispatched again' % (t, r, name))
+            dispatch(t, wt, name, extra)
+        return
+    if res.get('status') == 'ok':
+        if transition(t, stage, r, stage='rebase', tries=0):
+            log('%s r%s: %s ok (%s, Tier %s)' % (t, r, name, res.get('model'), res.get('level')))
+            v = dict(v, stage='rebase')
+            rebase(t, v, st, c)
+        return
+    status = res.get('status')
+    if status in ('docker_hung', 'refused', 'excluded', 'coordinator_reserve') or res.get('reason'):
+        stuck(t, stage, r, '%s: %s %s' % (name, status, str(res.get('reason', ''))[:200])); return
+    if tries >= c['impl_retries']:
+        stuck(t, stage, r, '%s: %s after %d tries (%s)' % (name, status, tries + 1, ', '.join(res.get('tried', []))[:200])); return
+    if time.time() - os.path.getmtime(js) < c['retry_minutes'] * 60:
+        return
+    if transition(t, stage, r, tries=tries + 1, stage_at=lib.now().isoformat()):
+        log('%s r%s: %s %s -> dispatched again (%d/%d)' % (t, r, name, status, tries + 1, c['impl_retries']))
+        dispatch(t, wt, name, extra)
+
+
+def sync_attention(st):
+    p = os.path.join(PD, 'attention.txt')
+    want = ['%s r%s %s: %s' % (t, rnd(v), v['stage'], v.get('why', '')) for t, v in st.get('inflight', {}).items()
+            if v.get('stage') in ('triage', 'stuck')]
+    if want != lines(p):
+        write_lines(p, want)
+
+
+def tick():
+    global _PROCS
+    _PROCS, STARTED[0] = None, 0
+    st = lib.load_state(M)
+    c = cfg(st)
+    for t, v in list(st.get('inflight', {}).items()):
+        if not isinstance(v, dict) or v.get('stage') not in DRIVEN or not os.path.isdir(wt_of(st, t, v)):
+            continue
+        try:
+            if v['stage'] in ('implement', 'merge'):
+                on_run(t, v, st, c)
+            elif v['stage'] == 'rebase':
+                rebase(t, v, st, c)
+            else:
+                on_review(t, v, st, c)
+        except Stop as e:
+            stuck(t, v['stage'], rnd(v), str(e))
+        except Exception as e:  # one broken ticket never stops the clock for the others
+            log('%s: pipeline error %r' % (t, e))
+    sync_attention(lib.load_state(M))
+    return len(st.get('inflight', {}))
+
+
+# ---------- the background job: checks, then one review ----------
+
+def cmd_job(t, r, review_only):
+    st = lib.load_state(M)
+    v = st.get('inflight', {}).get(t) or {}
+    wt, c = wt_of(st, t, v), cfg(st)
+    f = open(check_path(t, r), 'a')
+
+    def mark(s):
+        f.write(MARK + s + '\n'); f.flush()
+    mark('PID %d' % os.getpid())
+    if not review_only:
+        for cmd in checks_of(st, t):
+            mark('CHECK ' + cmd)
+            p = subprocess.Popen(['bash', '-c', cmd], cwd=wt, env=env(), stdin=subprocess.DEVNULL, stdout=f,
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                rc = p.wait(timeout=c['check_timeout_minutes'] * 60)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, signal.SIGKILL); p.wait(); rc = 124
+                f.write('\n(timeout: killed after %s min)\n' % c['check_timeout_minutes'])
+            if rc:
+                mark('CHECK_FAIL rc=%s `%s`' % (rc, cmd)); mark('DONE'); return
+        mark('CHECK_OK')
+    fx = os.path.join(OUT, '%s-fix-%s.md' % (t, r))
+    try:
+        brief = mkbrief('review', t, r, wt, fx if os.path.exists(fx) else None)
+    except Stop as e:
+        mark('REVIEW_ERROR ' + str(e)); mark('REVIEW_RC 98'); mark('DONE'); return
+    mark('REVIEW_START ' + brief)
+    with open(os.path.join(OUT, 'review-%s-%s.txt' % (t, r)), 'w') as rv:
+        rc = subprocess.run([tool('review'), t, str(r), brief, '1'], cwd=M, env=env(WT=wt, POOL=v.get('pool')),
+                            stdin=subprocess.DEVNULL, stdout=rv, stderr=subprocess.STDOUT).returncode
+    mark('REVIEW_RC %s' % rc); mark('DONE')
+
+
+# ---------- coordinator commands ----------
+
+def cmd_run(a):
+    st = lib.load_state(M)
+    interval = int(a[a.index('--interval') + 1]) if '--interval' in a else int(cfg(st)['interval'])
+    lk = open(os.path.join(PD, 'run.lock'), 'a+')
+    try:
+        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit('pipeline: already running for %s (lock %s)' % (M, lk.name))
+    if '--once' not in a:
+        print('pipeline: running for %s, every %ss (log .autopilot/pipeline/pipeline.log)' % (M, interval), flush=True)
+    while True:
+        del EVENTS[:]
+        try:
+            n = tick()
+            print('tick %s inflight=%d jobs=%d%s' % (dt.datetime.now().strftime('%H:%M:%S'), n, jobs_running(),
+                                                   (' | ' + '; '.join(EVENTS)) if EVENTS else ''), flush=True)
+        except Exception as e:
+            print('tick %s ERROR %r' % (dt.datetime.now().strftime('%H:%M:%S'), e), flush=True)
+        if '--once' in a:
+            return
+        time.sleep(interval)
+
+
+def cmd_start(t, a):
+    st = lib.load_state(M)
+    wt = a[a.index('--wt') + 1] if '--wt' in a else wt_of(st, t, {})
+    if not os.path.isdir(wt):
+        sys.exit('pipeline start: no worktree %s (git worktree add -b autopilot/%s %s HEAD)' % (wt, t, wt))
+    if not os.path.exists(ticket_file(t)):
+        sys.exit('pipeline start: no ticket file %s' % ticket_file(t))
+    cur = st.get('inflight', {}).get(t) or {}
+    if cur.get('stage') in DRIVEN + ('approved', 'merging'):
+        sys.exit('pipeline start: %s is already in flight (stage %s, round %s)' % (t, cur['stage'], rnd(cur)))
+    entry = dict(cur, wt=os.path.abspath(wt), round=1, stage='implement', stage_at=lib.now().isoformat(), tries=0)
+    if '--pool' in a:
+        entry['pool'] = a[a.index('--pool') + 1]
+    try:
+        mkbrief('impl', t, 1, entry['wt'])
+    except Stop as e:
+        sys.exit('pipeline start: %s' % e)
+    lib.update_state(M, lambda s: s.setdefault('inflight', {}).__setitem__(t, entry))
+    log('%s r1: started (%s)' % (t, entry['wt']))
+    dispatch(t, entry['wt'], '%s-impl-1' % t, [])
+    print('STARTED %s round 1 in %s' % (t, entry['wt']))
+
+
+def cmd_fix(t, findings):
+    st = lib.load_state(M)
+    v = st.get('inflight', {}).get(t) or sys.exit('pipeline fix: %s is not in flight' % t)
+    try:
+        fix_round(t, v, st, cfg(st), open(findings).read(), 'coordinator findings', expect=v.get('stage'), forced=True)
+    except Stop as e:
+        sys.exit('pipeline fix: %s' % e)
+    v = lib.load_state(M)['inflight'][t]
+    print('%s round %s %s' % (t, rnd(v), v.get('stage')))
+
+
+def cmd_retry(t):
+    st = lib.load_state(M)
+    v = st.get('inflight', {}).get(t) or sys.exit('pipeline retry: %s is not in flight' % t)
+    if v.get('stage') != 'stuck':
+        sys.exit('pipeline retry: %s is at stage %s, not stuck' % (t, v.get('stage')))
+    frm, r, wt = v.get('stuck_from') or 'rebase', rnd(v), wt_of(st, t, v)
+    lib.resolve_alert(M, 'pipeline_stuck', t)
+    if frm in ('implement', 'merge'):
+        name, extra = run_args(t, v)
+        transition(t, 'stuck', r, stage=frm, tries=0, why=None, stuck_from=None)
+        dispatch(t, wt, name, extra)
+    elif frm == 'review':
+        transition(t, 'stuck', r, stage='review', tries=0, why=None, stuck_from=None)
+        start_job(t, r, wt, 'review', review_only='CHECK_OK' in marks(check_path(t, r)))
+    else:
+        transition(t, 'stuck', r, stage='rebase', tries=0, merges=0, why=None, stuck_from=None)
+    log('%s r%s: retry %s (coordinator)' % (t, r, frm))
+    print('%s r%s: %s again' % (t, r, frm))
+
+
+def cmd_merge(t, subj, body):
+    """Rebase, squash, finish. A conflict sends the ticket back to a merge round and exits 3."""
+    st = lib.load_state(M)
+    br, v = st['branch'], st.get('inflight', {}).get(t)
+    wt = wt_of(st, t, v)
+    if not os.path.isdir(wt):
+        sys.exit('pipeline merge: no worktree %s' % wt)
+    r = rnd(v or {})
+    if v:
+        transition(t, None, None, stage='merging')
+
+    def back_to_merge_round(why):
+        drop_approved(t)
+        if not v:
+            return
+        transition(t, None, None, stage='rebase', merges=0)
+        s2 = lib.load_state(M)
+        merge_round(t, s2['inflight'][t], s2, cfg(s2), why)
+
+    p = subprocess.run([tool('rebase-wt'), wt, br], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
+    out = (p.stdout + p.stderr).strip()
+    if p.returncode:
+        print(out[-1500:])
+        if p.returncode == 3 or 'CONFLICT' in out:
+            back_to_merge_round(out)
+            print('REBASE-CONFLICT %s: the rebase is left in progress in %s; merge round dispatched' % (t, wt)); sys.exit(3)
+        if v:
+            transition(t, 'merging', None, stage='approved')
+        sys.exit(p.returncode)
+    ahead = lib.git(wt, 'rev-list', '--count', '%s..HEAD' % br).stdout.strip()
+    if ahead not in ('', '0'):
+        lib.git(wt, 'reset', '-q', '--soft', br)  # one change on top of the branch: finish commits it once
+    f = subprocess.run([tool('finish'), t, subj, body], cwd=M, env=env(WT=wt), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    fo = (f.stdout + f.stderr).strip()
+    print('\n'.join(fo.splitlines()[-4:]))
+    if f.returncode == 3:
+        lib.git(M, 'cherry-pick', '--abort')
+        p = subprocess.run([tool('rebase-wt'), wt, br], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
+        back_to_merge_round('cherry-pick onto %s conflicted (aborted):\n%s\n\nrebase of the worktree:\n%s' % (br, fo[-800:], (p.stdout + p.stderr)[-1200:]))
+        print('MERGE-CONFLICT %s: cherry-pick aborted, the ticket is back to a merge round' % t); sys.exit(3)
+    if f.returncode not in (0, 4):
+        if v:
+            transition(t, 'merging', None, stage='approved')
+        sys.exit(f.returncode)
+    drop_approved(t)
+
+    def done(s):
+        s.get('inflight', {}).pop(t, None)
+        if t not in s.setdefault('done', []):
+            s['done'].append(t)
+        if t in s.get('queue', []):
+            s['queue'].remove(t)
+    lib.update_state(M, done)
+    log('%s r%s: MERGED (%s)' % (t, r, fo.splitlines()[-1] if fo else ''))
+    sys.exit(f.returncode)
+
+
+def milestone_of(st, t):
+    for m in st.get('milestones') or []:
+        if t in m.get('issues', []):
+            return m.get('id') or m.get('name', '')
+    return '-'
+
+
+def who(st, t, v):
+    """The model of the current step with its tier: the reviewer while a review runs, else the implementer."""
+    r = rnd(v)
+    try:
+        reg, ad = lib.load_reg(warn=False), lib.adapters()
+    except Exception:
+        reg, ad = {'models': {}}, {}
+
+    def tier(k):
+        m = reg['models'].get(k)
+        try:
+            lv = lib.level_of(reg, m, ad.get(m['cli'])) if m else None
+        except Exception:
+            lv = None
+        return '%s (T%s)' % (k, lv if lv is not None else '?')
+    if v.get('stage') == 'review':
+        pre, suf = '%s-rev-' % t, '-%s.md' % r
+        fs = sorted(glob.glob(os.path.join(OUT, pre + '*' + suf + '*')), key=os.path.getmtime)
+        if fs:
+            b = os.path.basename(fs[-1])
+            return 'review ' + tier(b[len(pre):b.index(suf)])
+    name, _ = run_args(t, v)
+    res = result(os.path.join(OUT, name + '.json'))
+    if res and res.get('model'):
+        return tier(res['model'])
+    log_ = st.get('implementer_log', {}).get(t) or []
+    return tier(log_[-1]['key']) if log_ else '-'
+
+
+def detail(t, v):
+    s, r = v.get('stage', '?'), rnd(v)
+    if s == 'review':
+        mk = marks(check_path(t, r))
+        if 'DONE' in mk:
+            return 'review done'
+        return 'review' if 'CHECK_OK' in mk else 'checks'
+    if s in ('implement', 'merge'):
+        name, _ = run_args(t, v)
+        res = result(os.path.join(OUT, name + '.json'))
+        return s if not res else '%s %s' % (s, res.get('status'))
+    if s == 'rebase':
+        return 'rebase (check slot)'
+    return s
+
+
+def cmd_status():
+    st = lib.load_state(M)
+    inf = st.get('inflight', {})
+    if not inf:
+        print('no ticket in flight')
+    for t, v in sorted(inf.items(), key=lambda x: (milestone_of(st, x[0]), x[0])):
+        if not isinstance(v, dict):
+            continue
+        mins = age(v)
+        line = '%-10s %-14s r%-3s %-20s %-30s %s' % (t, milestone_of(st, t)[:14], rnd(v), detail(t, v)[:20], who(st, t, v)[:30],
+                                                     ('%d min' % (mins // 60)) if mins != float('inf') else '-')
+        if v.get('stage') in ('triage', 'stuck'):
+            line += '  ' + str(v.get('why', ''))[:120]
+        print(line)
+    p = subprocess.run([tool('eta')], cwd=M, env=env(), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    eta = []
+    for x in p.stdout.splitlines():
+        if x.startswith('REPLAN:'):
+            break
+        eta.append(x)
+    if eta:
+        print()
+        print('\n'.join(eta))
+
+
+def cmd_wait(a):
+    interval = float(a[a.index('--interval') + 1]) if '--interval' in a else 15
+    ap, at = os.path.join(PD, 'approved.txt'), os.path.join(PD, 'attention.txt')
+    while True:
+        ok, att = lines(ap), lines(at)
+        if ok or att:
+            print('\n'.join(ok + ['ATTENTION: ' + x for x in att]))
+            return
+        time.sleep(interval)
+
+
+def main(a):
+    global M, PD, OUT
+    if not a or a[0] in ('-h', '--help'):
+        print(__doc__); sys.exit(0 if a else 1)
+    M = lib.find_repo()
+    PD, OUT = os.path.join(M, '.autopilot', 'pipeline'), os.path.join(M, '.autopilot', 'out')
+    os.makedirs(PD, exist_ok=True); os.makedirs(OUT, exist_ok=True)
+    cmd = a[0]
+    if cmd == 'run':
+        cmd_run(a[1:])
+    elif cmd == '_job' and len(a) >= 3:
+        cmd_job(a[1], int(a[2]), '--review-only' in a)
+    elif cmd == 'start' and len(a) >= 2:
+        cmd_start(a[1], a[2:])
+    elif cmd == 'fix' and len(a) == 3:
+        cmd_fix(a[1], a[2])
+    elif cmd == 'retry' and len(a) == 2:
+        cmd_retry(a[1])
+    elif cmd == 'merge' and len(a) == 4:
+        cmd_merge(a[1], a[2], a[3])
+    elif cmd == 'status':
+        cmd_status()
+    elif cmd == 'wait-approval':
+        cmd_wait(a[1:])
+    else:
+        print(__doc__); sys.exit(1)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
