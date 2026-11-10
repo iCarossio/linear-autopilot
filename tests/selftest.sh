@@ -445,10 +445,12 @@ check "eta: parallel plan, no REPLAN" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/et
 BG=$SCR/bg; mkdir -p $BG
 check "bgrun: ok passes the exit code through" "$($H/bin/bgrun --name ok --log $BG/ok.log -- 'echo hi; exit 0' | tail -1 | sed 's/ in .*//')" "bgrun ok: ok rc=0"
 check "bgrun: failure keeps its exit code" "$($H/bin/bgrun --name f --log $BG/f.log -- 'exit 3' >/dev/null; echo $?)" "3"
-$H/bin/bgrun --idle 6 --name stall --log $BG/st.log -- 'echo started; python3 -c "import os,time; os.setsid(); time.sleep(300)" & sleep 300' >$BG/st.out; BGRC=$?
+# The detached sleeper carries this run's own path as its argument: pgrep matches it only, never the sleeper of another
+# selftest running on the machine at the same time (a machine-wide pattern made this check flaky under parallel runs).
+$H/bin/bgrun --idle 6 --name stall --log $BG/st.log -- 'echo started; python3 -c "import os,time; os.setsid(); time.sleep(300)" '"$BG"'/sleeper & sleep 300' >$BG/st.out; BGRC=$?
 check "bgrun: silent run stalls with exit 124" "$BGRC $(tail -1 $BG/st.out | grep -c '^bgrun stall: STALL no output')" "124 1"
 check "bgrun: stall report has the process tree" "$(grep -c 'Process tree' $BG/st.log)" "1"
-check "bgrun: detached descendants are killed" "$(pgrep -f 'time.sleep\(300\)' | wc -l | tr -d ' ')" "0"
+check "bgrun: detached descendants are killed" "$(for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$BG/sleeper" >/dev/null || break; sleep 0.5; done; pgrep -f "$BG/sleeper" | wc -l | tr -d ' ')" "0"
 check "bgrun: busy run hits --timeout" "$($H/bin/bgrun --timeout 6 --name to --log $BG/to.log -- 'while :; do echo tick; sleep 1; done' | tail -1 | grep -c '^bgrun to: TIMEOUT')" "1"
 check "bgrun: a changing --watch path counts as progress" "$($H/bin/bgrun --idle 6 --watch $BG/w.txt --name w --log $BG/w.log -- 'for i in 1 2 3 4 5 6 7 8 9 10; do date >> '$BG'/w.txt; sleep 1; done' | tail -1 | sed 's/ in .*//')" "bgrun w: ok rc=0"
 check "bgrun: a new working process counts as progress" "$($H/bin/bgrun --idle 6 --name sp --log $BG/sp.log -- 'for i in 1 2 3 4 5; do python3 -c "import time; time.sleep(3)"; done' | tail -1 | sed 's/ in .*//')" "bgrun sp: ok rc=0"
