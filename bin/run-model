@@ -536,7 +536,7 @@ MONTHS = {m: i + 1 for i, m in enumerate(['jan', 'feb', 'mar', 'apr', 'may', 'ju
 def reset_from_text(text):
     """Reset time announced in a CLI message, as an aware datetime, or None. Understands ISO stamps,
     'resets Oct 25 at 3:29am (America/New_York)', 'renews on October 26 at 15:45', 'try again at 3:00 PM',
-    'in 2 hours 5 minutes'. Times without a zone are local; a date-less time already past means tomorrow."""
+    'in 2 hours 5 minutes', 'Resets in 162h57m57s' (Antigravity). Times without a zone are local; a date-less time already past means tomorrow."""
     from zoneinfo import ZoneInfo
     t = text.lower()
     m = re.search(r'(?:reset|renew|available|again)\w*[^\n]{0,40}?(\d{4}-\d\d-\d\dt\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:z|[+-]\d\d:?\d\d))', t)
@@ -552,8 +552,9 @@ def reset_from_text(text):
         if m.group(1) and cand < local - dt.timedelta(days=1): cand = cand.replace(year=cand.year + 1)
         elif not m.group(1) and cand <= local: cand += dt.timedelta(days=1)
         return cand
-    m = re.search(r'in (?:(\d+) ?h(?:ours?|rs?)?)?\s*(?:(\d+) ?m(?:in(?:utes?)?)?)?\b', t)
-    if m and (m.group(1) or m.group(2)) and re.search(r'(reset|again|retry)', t):
+    m = next((x for x in re.finditer(r'\bin (?:(\d+) ?h(?:ours?|rs?)?)?\s*(?:(\d+) ?m(?:in(?:utes?)?)?)?\s*(?:\d+ ?s(?:ec(?:onds?)?)?)?\b', t)
+              if x.group(1) or x.group(2)), None)
+    if m and re.search(r'(reset|again|retry)', t):
         return now() + dt.timedelta(hours=int(m.group(1) or 0), minutes=int(m.group(2) or 0))
     return None
 
