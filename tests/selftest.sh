@@ -395,7 +395,7 @@ RBB=$(cd "$SCR/repo3" && WT="$SCR/repo3-wt/T-2" $H/bin/mkbrief review T-2 1 .aut
 check "review base is the merge-base when the ticket is committed" "$([ -n "$BASE" ] && echo sha || echo HEAD)" "sha"
 cd "$SCR/repo3"; OUT=$($H/bin/finish T-2 "feat: two" "body" 2>&1); echo "    finish: $OUT"; check "finish integrates the committed range + uncommitted fix" "$?" "0"
 check "both files on the project branch" "$(ls feat.txt fix.txt 2>/dev/null | wc -l | tr -d ' ')" "2"
-check "two commits integrated" "$(git log --oneline | grep -c 'T-2\|ticket commit')" "2"
+check "the ticket commit and the fix squashed into one commit" "$(git log --oneline | grep -c 'T-2\|ticket commit') $(git show --stat --format= HEAD | grep -c 'feat.txt\|fix.txt')" "1 2"
 echo "--- token consumption report"
 TOK=$SCR/tok; mkdir -p $TOK/claude/projects/p1 $TOK/codex/sessions/2026/10/01 $TOK/grok/sessions/x/s1; NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cat > $TOK/claude/projects/p1/a.jsonl <<EOF2
@@ -743,4 +743,140 @@ check "critical: resolved once a key is back, still listed until acknowledged" "
 $H/bin/alert ack all >/dev/null
 check "critical: acknowledged -> gone from alert list and eta" "$($H/bin/alert list | wc -l | tr -d ' ') $(ETA_LOAD=0 $H/bin/eta | grep -c CRITICAL)" "0 0"
 unset AUTOPILOT_REPO
+echo "--- pipeline: implement -> rebase -> checks -> one review -> fix, approvals, merge rounds, merge helper"
+PLD=$SCR/pl; mkdir -p $PLD
+# fake run-model: an implementation round appends to the tracked a.txt; a merge round (<ISSUE>-impl-<n>m<k>) writes the
+# resolution from $PLD/resolve.txt, `git add`s it and finishes a rebase left in progress. Every call is logged.
+cat > $SCR/fake/fake-rm <<'EOF'
+#!/bin/bash
+echo "$*" >> "$PLD/rm.log"
+OUT=$4; shift 4; while [ $# -gt 0 ]; do case $1 in --cwd) WTD=$2; shift;; --issue) ISS=$2; shift;; esac; shift; done
+N=$(basename "$OUT" .md); cd "$WTD"
+case "$(cat $PLD/impl.mode 2>/dev/null || echo ok)" in
+  fail) echo '{"status": "all_failed", "role": "fix", "tried": ["fk-c:quota"]}'; exit 2;;
+esac
+if [[ $N =~ -impl-[0-9]+m[0-9]+$ ]]; then
+  cp "$PLD/resolve.txt" a.txt; git add a.txt
+  if [ -d "$(git rev-parse --git-path rebase-merge)" ]; then GIT_EDITOR=true git -c user.email=t@t -c user.name=t rebase --continue >/dev/null 2>&1; fi
+else
+  echo "impl $N" >> "$(cat $PLD/impl.file 2>/dev/null || echo work-$ISS.txt)"
+fi
+echo "STATUS: done" > "$OUT"
+echo "run-model: some stderr line"
+echo "{\"model\": \"fk-c\", \"level\": 3, \"status\": \"ok\", \"run_role\": \"fix\", \"issue\": \"$ISS\", \"out\": \"$OUT\"}"
+EOF
+# fake bin/review: exit code from the head of $PLD/review.rcs (default 0); exit 1 writes a findings file.
+cat > $SCR/fake/fake-review <<'EOF'
+#!/bin/bash
+echo "$1 r$2 POOL=${POOL:-} WT=$WT brief=$(basename $3)" >> "$PLD/review.log"
+RC=$(head -1 "$PLD/review.rcs" 2>/dev/null); [ -n "$RC" ] || RC=0; sed -i.bak 1d "$PLD/review.rcs" 2>/dev/null
+case $RC in
+  0) echo "fk-d: approve -> approve | fine";;
+  1) echo "fk-d: changes_required -> changes"; echo "- [fk-d] major a.txt:1 missing newline" > "$AUTOPILOT_REPO/.autopilot/out/$1-findings-$2.md";;
+  *) echo "fk-d: error (no verdict)";;
+esac
+exit $RC
+EOF
+chmod +x $SCR/fake/fake-rm $SCR/fake/fake-review; export PLD
+PR=$SCR/prepo; mkdir -p $PR && cd $PR && git init -q && echo base > a.txt && echo other > b.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm init
+PB=$(git branch --show-current); echo ".autopilot/" >> .git/info/exclude; mkdir -p .autopilot/tickets
+python3 -c "
+import json; json.dump({'branch': '$PB', 'worktrees_dir': '$SCR/prepo-wt', 'checks': ['test ! -e FAILCHECK'], 'inflight': {}, 'done': [], 'queue': [],
+  'milestones': [{'id': 'm1', 'name': 'First', 'issues': ['P-1', 'P-2']}, {'id': 'm2', 'name': 'Second', 'issues': ['P-3', 'P-4', 'P-5']}],
+  'pipeline': {'max_rounds': 4, 'review_retries': 1}}, open('.autopilot/state.json', 'w'))"
+for t in P-1 P-2 P-3 P-4 P-5; do printf '# %s title\n\nDo it.\n\n**Acceptance**\n- works\n' $t > .autopilot/tickets/$t.md; git worktree add -q -b autopilot/$t $SCR/prepo-wt/$t HEAD; done
+export AUTOPILOT_REPO=$PR PIPELINE_SYNC=1 PIPELINE_RUN_MODEL=$SCR/fake/fake-rm PIPELINE_REVIEW=$SCR/fake/fake-review
+PL=$H/bin/pipeline; TICK() { $PL run --once >> $PLD/ticks.log 2>&1; }
+ST() { $H/bin/state get inflight.$1 | python3 -c "import json,sys;v=json.load(sys.stdin);print(v['round'], v['stage']) if v else print('gone')"; }
+O=$PR/.autopilot/out; W1=$SCR/prepo-wt/P-1
+$PL start P-1 >/dev/null; check "start: round 1 dispatched as <ISSUE>-impl-1, Tier 3 role (no --role fix)" "$(ST P-1) $(tail -1 $PLD/rm.log | grep -c 'P-1-impl-1.md --cwd .* --issue P-1$')" "1 implement 1"
+$PL start P-1 >/dev/null 2>&1; check "start refuses a ticket already in flight" "$?" "1"
+$H/bin/state set inflight.P-1.pool '"review_high"' >/dev/null
+echo 1 > $PLD/review.rcs; TICK
+check "implement ok -> rebase -> checks pass -> review ran (per-ticket pool, worktree)" "$(ST P-1) $(grep -c '^@@pipeline CHECK_OK' $PR/.autopilot/pipeline/P-1-1.check) $(tail -1 $PLD/review.log | grep -c "P-1 r1 POOL=review_high WT=$W1 brief=P-1-review-1.md")" "1 review 1 1"
+TICK
+check "review asks for changes -> fix round 2 (--role fix, brief <ISSUE>-impl-2.md)" "$(ST P-1) $(tail -1 $PLD/rm.log | grep -c 'briefs/P-1-impl-2.md .*--role fix')" "2 implement 1"
+check "the fix brief carries the findings and the checks rule" "$(grep -c 'missing newline' $PR/.autopilot/briefs/P-1-impl-2.md) $(grep -c 'run the full checks (`test ! -e FAILCHECK`) and make them pass; a round with failing checks is rejected' $PR/.autopilot/briefs/P-1-impl-2.md)" "1 1"
+touch $W1/FAILCHECK; TICK; TICK
+check "checks fail -> no review, fix round 3 with the check output" "$(ST P-1) $(wc -l < $PLD/review.log | tr -d ' ') $(grep -c 'The project checks failed (rc=1 `test ! -e FAILCHECK`)' $O/P-1-fix-3.md)" "3 implement 1 1"
+rm $W1/FAILCHECK; printf '2\n0\n' > $PLD/review.rcs; TICK; TICK
+check "no verdict -> the review again, review only (no second check run)" "$(ST P-1) $(grep -c 'review-only' $PR/.autopilot/pipeline/P-1-3.check) $(grep -c '^@@pipeline CHECK ' $PR/.autopilot/pipeline/P-1-3.check)" "3 review 1 0"
+TICK
+check "approve -> approved.txt <ISSUE> r<round>, stage approved" "$(ST P-1) $(cat $PR/.autopilot/pipeline/approved.txt)" "3 approved P-1 r3"
+check "wait-approval prints approved.txt at once" "$($PL wait-approval --interval 0.1)" "P-1 r3"
+echo "- [coordinator] rename x" > $PLD/coord.md; $PL fix P-1 $PLD/coord.md >/dev/null
+check "coordinator fix: next round dispatched, approval withdrawn" "$(ST P-1) $(wc -c < $PR/.autopilot/pipeline/approved.txt | tr -d ' ')" "4 implement 0"
+printf '2\n2\n' > $PLD/review.rcs; TICK; TICK; TICK
+check "no verdict again past review_retries -> stuck, attention.txt, CRITICAL alert" "$(ST P-1) $(grep -c '^P-1 r4 stuck: no review verdict' $PR/.autopilot/pipeline/attention.txt) $($H/bin/alert list | grep -c 'P-1 round 4 stuck in review')" "4 stuck 1 1"
+check "wait-approval wakes on attention" "$($PL wait-approval --interval 0.1 | grep -c '^ATTENTION: P-1 r4 stuck')" "1"
+echo 1 > $PLD/review.rcs; $PL retry P-1 >/dev/null; TICK
+check "retry -> review again; changes at max_rounds -> triage, never a round 5 by itself" "$(ST P-1) $(grep -c '^P-1 r4 triage' $PR/.autopilot/pipeline/attention.txt) $($H/bin/alert list | grep -c 'P-1 round 4 stuck.*resolved')" "4 triage 1 1"
+$PL fix P-1 $PLD/coord.md >/dev/null; TICK; TICK
+check "coordinator fix after triage -> round 5 approved, attention cleared" "$(ST P-1) $(cat $PR/.autopilot/pipeline/approved.txt) $(wc -c < $PR/.autopilot/pipeline/attention.txt | tr -d ' ')" "5 approved P-1 r5 0"
+$H/bin/alert ack all >/dev/null
+# P-2: the project branch moved on the same lines while round 1 ran: rebase conflict -> merge-only round
+echo a.txt > $PLD/impl.file; $PL start P-2 >/dev/null; rm $PLD/impl.file; echo main-change >> a.txt; git -c user.email=t@t -c user.name=t commit -qam "main moved"
+printf 'base\nmain-change\nimpl P-2-impl-1\n' > $PLD/resolve.txt; TICK
+check "rebase conflict -> merge round (same round, <ISSUE>-impl-1m1, --no-escalate), stash kept named in the brief" "$(ST P-2) $(tail -1 $PLD/rm.log | grep -c 'briefs/P-2-impl-1m1.md .*--role fix --no-escalate') $(grep -c 'MERGE-ONLY ROUND' $PR/.autopilot/briefs/P-2-impl-1m1.md) $(grep -c 'stash kept' $PR/.autopilot/briefs/P-2-impl-1m1.md)" "1 merge 1 1 1"
+TICK; TICK
+check "merge round done -> checks + review -> approved" "$(ST P-2) $(grep -c '^P-2 r1$' $PR/.autopilot/pipeline/approved.txt)" "1 approved 1"
+STATUS=$($PL status)
+check "status: one line per in-flight ticket (issue, milestone, round, stage, model with tier, minutes)" "$(echo "$STATUS" | grep -cE '^P-1 +m1 +r5 +approved +fk-c \(T[0-9?]\) +[0-9]+ min$') $(echo "$STATUS" | grep -cE '^P-2 +m1 +r1 +approved ')" "1 1"
+check "status: then the ETA bars of every milestone, no REPLAN line" "$(echo "$STATUS" | grep -cE '^(First|Second) +\[') $(echo "$STATUS" | grep -c REPLAN)" "2 0"
+# merge helper: P-2 (clean: uncommitted work only) and P-1 (two commits of its own + uncommitted work: squashed)
+N0=$(git rev-list --count HEAD); OUT=$($PL merge P-2 "feat: two" "body" 2>&1)
+check "merge (uncommitted only): one commit, ticket done, approval consumed" "$? $(($(git rev-list --count HEAD) - N0)) $(git log -1 --format=%s) $(ST P-2) $(grep -c P-2 $PR/.autopilot/pipeline/approved.txt) $($H/bin/state get done | grep -c P-2)" "0 1 feat: two [P-2] gone 0 1"
+cd $W1 && echo c1 > c1.txt && git add c1.txt && git -c user.email=t@t -c user.name=t commit -qm "own 1" && echo c2 > c2.txt && git add c2.txt && git -c user.email=t@t -c user.name=t commit -qm "own 2" && echo c3 > c3.txt; cd $PR
+N0=$(git rev-list --count HEAD); OUT=$($PL merge P-1 "feat: one" "body" 2>&1)
+check "merge squashes two own commits + uncommitted work into one commit on the branch" "$? $(($(git rev-list --count HEAD) - N0)) $(git show --stat --format= HEAD | grep -c 'c[123].txt\|work-P-1.txt') $(test -d $W1 && echo kept || echo removed)" "0 1 4 removed"
+# P-3: a worktree left diverged by a finish whose cherry-pick conflicted (own commit) + a later fix; the branch moved
+W3=$SCR/prepo-wt/P-3; $H/bin/state set inflight.P-3 "{\"wt\": \"$W3\", \"round\": 2, \"stage\": \"approved\"}" >/dev/null
+cd $W3 && echo t3 > t3.txt && git add t3.txt && git -c user.email=t@t -c user.name=t commit -qm "feat: three [P-3]" && echo fix3 > fix3.txt; cd $PR
+echo other2 >> b.txt; git -c user.email=t@t -c user.name=t commit -qam "main moved again"
+N0=$(git rev-list --count HEAD); OUT=$($PL merge P-3 "feat: three" "body" 2>&1)
+check "merge of a diverged worktree: rebased, squashed, one commit with the fix" "$? $(($(git rev-list --count HEAD) - N0)) $(git show --stat --format= HEAD | grep -c 't3.txt\|fix3.txt')" "0 1 2"
+# P-4: own commit on the same line as the branch: the rebase is left in progress and a merge round resolves it
+W4=$SCR/prepo-wt/P-4; $H/bin/state set inflight.P-4 "{\"wt\": \"$W4\", \"round\": 1, \"stage\": \"approved\"}" >/dev/null
+cd $W4 && echo p4 >> a.txt && git -c user.email=t@t -c user.name=t commit -qam "p4" && echo u4 > u4.txt; cd $PR
+echo 'P-4 r1' >> $PR/.autopilot/pipeline/approved.txt
+cp a.txt $PLD/resolve.txt; echo p4 >> $PLD/resolve.txt; OUT=$($PL merge P-4 "feat: four" "body" 2>&1); RC=$?
+check "merge with a conflicting own commit: exit 3, approval withdrawn, merge round dispatched" "$RC $(echo "$OUT" | grep -c '^REBASE-CONFLICT P-4') $(grep -c P-4 $PR/.autopilot/pipeline/approved.txt) $(tail -1 $PLD/rm.log | grep -c 'P-4-impl-1m1.md .*--no-escalate')" "3 1 0 1"
+check "the merge round finished the rebase; the uncommitted work rides on top as the wip commit" "$(ST P-4) $(cd $W4 && git rev-list --count $PB..HEAD) $(test -f $W4/u4.txt && echo u4) $(cd $W4 && git log --format=%s | grep -c autopilot-wip)" "1 merge 2 u4 1"
+TICK; TICK
+check "then checks + review -> approved again" "$(ST P-4) $(grep -c '^P-4 r1$' $PR/.autopilot/pipeline/approved.txt)" "1 approved 1"
+N0=$(git rev-list --count HEAD); OUT=$($PL merge P-4 "feat: four" "body" 2>&1)
+check "merge of the resolved ticket: one commit" "$? $(($(git rev-list --count HEAD) - N0)) $(tail -1 a.txt) $(test -f u4.txt && echo u4)" "0 1 p4 u4"
+# P-5: a run that died without a result (machine asleep, session killed) is dispatched again; a failed one is bounded
+W5=$SCR/prepo-wt/P-5; $H/bin/mkbrief impl P-5 1 .autopilot/tickets/P-5.md >/dev/null
+$H/bin/state set inflight.P-5 "{\"wt\": \"$W5\", \"round\": 1, \"stage\": \"implement\", \"stage_at\": \"2020-01-01T00:00:00+00:00\"}" >/dev/null
+echo "run-model: started" > $O/P-5-impl-1.json; echo fail > $PLD/impl.mode; TICK
+check "dead run (no result, no process) -> dispatched again, counted" "$(grep -c 'P-5-impl-1.md' $PLD/rm.log) $($H/bin/state get inflight.P-5.tries)" "1 1"
+$H/bin/state set inflight.P-5.tries 3 >/dev/null; touch -t 202001010000 $O/P-5-impl-1.json; TICK
+check "failed run past impl_retries -> stuck" "$(ST P-5)" "1 stuck"
+rm -f $PLD/impl.mode; $H/bin/alert ack all >/dev/null 2>&1
+# rebase-wt alone: own commits + uncommitted + untracked work, the branch moved elsewhere
+git worktree add -q -b autopilot/R-1 $SCR/prepo-wt/R-1 HEAD~1; WR=$SCR/prepo-wt/R-1
+cd $WR && echo r1 > r1.txt && git add r1.txt && git -c user.email=t@t -c user.name=t commit -qm "r1" && echo dirty >> b.txt && echo new > untracked.txt
+$H/bin/rebase-wt $WR $PB >/dev/null; RC=$?
+check "rebase-wt with own commits: rebased onto the branch, uncommitted and untracked work kept as is, no wip commit" "$RC $(git rev-list --count $PB..HEAD) $(git merge-base --is-ancestor $PB HEAD && echo on-branch) $(git status --short | tr '\n' ' ')$(git log --format=%s | grep -c autopilot-wip)" "0 1 on-branch  M b.txt ?? untracked.txt 0"
+cd $PR; echo clash > r1.txt; git add r1.txt; git -c user.email=t@t -c user.name=t commit -qm "clash"; cd $WR
+OUT=$($H/bin/rebase-wt $WR $PB); RC=$?
+check "rebase-wt conflict on own commits: exit 3, rebase left in progress" "$RC $(echo "$OUT" | grep -c 'left in progress') $(test -d "$(git rev-parse --git-path rebase-merge)" && echo in-progress)" "3 1 in-progress"
+OUT=$($H/bin/rebase-wt $WR $PB); RC=$?
+check "rebase-wt again: reports the rebase in progress, touches nothing" "$RC $(echo "$OUT" | grep -c 'is in progress') $(test -d "$(git rev-parse --git-path rebase-merge)" && echo in-progress)" "3 1 in-progress"
+git rebase --abort >/dev/null 2>&1; cd $PR
+# the real mode: run-model and the check + review job run detached, the loop only polls their files
+unset PIPELINE_SYNC; printf '# P-6\n\nDo it.\n' > .autopilot/tickets/P-6.md; git worktree add -q -b autopilot/P-6 $SCR/prepo-wt/P-6 HEAD
+$PL start P-6 >/dev/null; for i in $(seq 1 80); do TICK; [ "$(ST P-6)" = "1 approved" ] && break; sleep 0.25; done
+check "detached mode: run and check + review job in the background, polled to approval" "$(ST P-6)" "1 approved"
+$PL run --interval 30 > $PLD/run.out 2>&1 & RP=$!; sleep 1
+$PL run --once >/dev/null 2>&1; check "one loop per project (lock)" "$?" "1"
+kill $RP; wait $RP 2>/dev/null
+check "the loop prints a tick line per pass (keeps bgrun's idle watchdog quiet)" "$(grep -c '^tick ' $PLD/run.out)" "1"
+export PIPELINE_SYNC=1; printf '# P-7\n\nDo it.\n' > .autopilot/tickets/P-7.md; git worktree add -q -b autopilot/P-7 $SCR/prepo-wt/P-7 HEAD
+$H/bin/state set pipeline.max_jobs 0 >/dev/null; $PL start P-7 >/dev/null; TICK
+check "no free check slot (max_jobs): the ticket waits in rebase, status says so" "$(ST P-7) $($PL status | grep -c '^P-7 .* rebase (check slot) ')" "1 rebase 1"
+$H/bin/state set pipeline.max_jobs 3 >/dev/null; TICK
+check "a slot frees up: checks + review run" "$(ST P-7)" "1 review"
+unset AUTOPILOT_REPO PIPELINE_SYNC PIPELINE_RUN_MODEL PIPELINE_REVIEW
 echo "=== $PASS passed, $FAIL failed"
