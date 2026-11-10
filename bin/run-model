@@ -2,17 +2,27 @@
 """linear-autopilot model runner. Keeps the coordinator's context small: it runs another
 model's CLI, stores the full output in a file and prints ONE json line.
 
-  run-model run <implement|review> <brief.md> <out.md> [--cwd DIR] [--issue ID | --standalone] [--exclude-vendor V[,V]] [--allow-mid]
-                [--model KEY | --prefer KEY] [--pool NAME | --escalate] [--no-fallback]
+  run-model run <implement|review> <brief.md> <out.md> [--cwd DIR] [--issue ID | --standalone] [--exclude-vendor V[,V]]
+                [--role ROLE | --pool NAME | --escalate] [--model KEY [--allow-tier0] | --prefer KEY] [--no-fallback]
+  run-model pool <ROLE>                 # the draw for a role right now (candidates in draw order)
+  run-model whoami [--record]           # the coordinator account detected for this session; --record writes state.json coordinator_account
   run-model smoke <KEY>                 # tiny prompt, checks the model answers
-  run-model discover [--apply]          # find newer models of the same family/tier (see the run skill, "Self-update")
+  run-model discover [--apply]          # newer ids of every versioned family per CLI; --apply smokes and switches (latest version always)
   run-model health                      # show cooldowns
   run-model reset <KEY>                 # clear a cooldown
-  run-model wait <POOL> [EXCLUDE,...]   # block until a model of the pool is healthy (sleeps to the earliest cooldown end), print its key
+  run-model wait <ROLE> [EXCLUDE,...] [--vendors N]   # block until the role has N healthy vendors, print the keys
   run-model usage [--apply]             # exact quota + reset times per harness and account; --apply cools exhausted models until their reset,
-                                        # claims a Codex weekly reset first (models.json codex_auto_reset) and raises CRITICAL alerts
+                                        # claims a Codex weekly reset first (models.json codex_auto_reset), records the credit left per account
+                                        # (weights of the draws), runs `discover --apply` once a day, and raises CRITICAL alerts
   run-model alerts                      # recompute the CRITICAL alerts now (bin/alert lists and acknowledges them)
   run-model vendor <KEY>                # vendor of a roster key (anthropic, openai, ...), for reviewer diversity
+
+Tier policy (owner's rule, 2026-11-09; lib "tier policy"): a run takes a role, and the role allows levels: implement and
+fix Tier 3, --escalate Tier 2 (logged in state.json `escalations`), review Tier 2, plan_review / premortem /
+milestone_review Tier 1, trivial Tier 4. Legacy pool names are role aliases. There is no ordered pool: the candidates
+of the role are drawn at random weighted by the credit left on each account (paid before free), the coordinator's own
+account last and quota-guarded. `--model` outside the role's tier is refused (exit 4), Tier 0 only with --allow-tier0,
+an `excluded` or `reserved` entry never runs, an entry that breaks vendor -> CLI is refused.
 
 Hard rules enforced here:
 - every implementer dispatched for a ticket is recorded in state.json `implementers[<ISSUE>]` BEFORE it runs (even if it
@@ -21,9 +31,12 @@ Hard rules enforced here:
   (a pre-mortem or a repo-level review with its own exclusions); it never uses a recorded implementer, nor any key running
   the same underlying model on another account or harness, nor a vendor given by --exclude-vendor, whatever --model /
   --prefer / fallbacks say (status `excluded`, exit 4);
-- a plan review (--pool plan_review|premortem, or a brief `<ISSUE>-plan-...`) is a review of the planner's work: the planner's
-  vendor and identity are excluded (state.json `coordinator`, or --exclude-vendor), and only `cost: high` models may run it
-  (--allow-mid, or ALLOW_MID=1, adds `mid` as a documented degraded mode).
+- a plan review (role plan_review / premortem / milestone_review, or a brief `<ISSUE>-plan-...`) is a review of the
+  planner's work: the planner's vendor and identity are excluded (state.json `coordinator`, or --exclude-vendor);
+- the coordinator's own account (detected from this process: adapter `coordinator_env` + `account_env`, or
+  $AUTOPILOT_COORDINATOR; else state.json `coordinator_account` recorded at setup) is used only when
+  nothing else can run, and only while its quota keeps `coordinator_reserve` (default 30% of the 5-hour window, 20% of
+  the weekly one); below it the run is refused (`coordinator_reserve`) and a CRITICAL alert is raised.
 
 Quota (owner's standing rule, 2026-11-09):
 - an account whose WEEKLY window is exhausted (fresh reading, `usage --apply` or a quota error in a run) gets its usage reset
@@ -54,6 +67,30 @@ def live_quota_lines(tail):
 WAITING = re.compile(r'press (enter|any key)|\[y/n\]|\(y/n\)|'
                      r'do you want to (proceed|continue|allow)|approve this|waiting for (your )?(input|approval|confirmation)|'
                      r'trust (this|the) (folder|directory)|select an option', re.I)
+# A prompt is the CLI's own last line, never code the model printed: code lines (quotes, braces, assignments, a call
+# with arguments, a type annotation) are not prompts. Seen: three codex-luna accounts cooled as `waiting_input` on
+# `question=(f"Approve this plan? Agents {', '.join(plan.agents)}` in the model's own output (2026-11-10).
+CODE_LINE = re.compile(r'[{}=;`"\']|\w\(\w|\w: (str|int|float|bool|list|dict|None|Any)\b|, \*,|\bdef |\breturn\b|\bimport\b|^\s*(#|//|\.\.\.)|,\s*$')
+ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+WAIT_SILENT = 30  # seconds without any new output before a prompt-looking last line counts
+
+
+def waiting_prompt(tail, silent, a=None):
+    """True when the CLI waits for input: nothing printed for WAIT_SILENT seconds and its last non-empty line is a
+    prompt (adapter `waiting_patterns`, else WAITING) that is not code."""
+    if silent < WAIT_SILENT:
+        return False
+    lines = [l for l in ANSI.sub('', tail).splitlines() if l.strip()]
+    if not lines:
+        return False
+    last = lines[-1].strip()
+    if len(last) > 160 or CODE_LINE.search(last):
+        return False
+    pats = [x for x in (a or {}).get('waiting_patterns', []) if x]
+    rx = re.compile('|'.join(pats), re.I) if pats else WAITING
+    return bool(rx.search(last))
+
+
 now = lib.now
 
 
@@ -75,8 +112,9 @@ def cmd_for(m, a, prompt, out, cwd):
     return [exe] + argv, lib.effective_env(m, a), a['run'].get('output', 'stdout')
 
 
-def run_one(r, key, role, brief, out, cwd, timeout=None):
-    m = r['models'][key]; a = lib.adapter_of(m)
+def run_one(r, key, role, brief, out, cwd, timeout=None, m=None, probe=False):
+    """probe: a candidate model id tried through `m` (discover): no cooldown, no last_ok for `key`."""
+    m = m or r['models'][key]; a = lib.adapter_of(m)
     brief, out, cwd = os.path.abspath(brief), os.path.abspath(out), os.path.abspath(cwd)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     prompt = f'Read the file {brief} and follow its instructions exactly. Working directory: {cwd}.'
@@ -86,7 +124,7 @@ def run_one(r, key, role, brief, out, cwd, timeout=None):
         os.remove(out)  # a stale file from a previous model would be judged as this run's output
     cmd, env, output_mode = cmd_for(m, a, prompt, out, cwd)
     qrx = quota_rx(a)
-    text, code = supervise(cmd, cwd, timeout, r['timeouts_seconds'].get('idle', 900), out + '.log', env, qrx)
+    text, code = supervise(cmd, cwd, timeout, r['timeouts_seconds'].get('idle', 900), out + '.log', env, qrx, a)
     if output_mode != 'file' or not os.path.exists(out) or os.path.getsize(out) == 0:
         open(out, 'w').write(text)
     body = open(out, errors='ignore').read()
@@ -110,6 +148,8 @@ def run_one(r, key, role, brief, out, cwd, timeout=None):
            'status': status, 'exit': code, 'seconds': secs, 'out': out, 'chars': len(body)}
     if role == 'review' and before is not None and lib.tree_fingerprint(cwd) != before:
         res['reviewer_modified_tree'] = True
+    if probe:
+        return res
     if status == 'ok':
         lib.record_ok(key)
     if status in ('quota', 'unavailable'):
@@ -141,7 +181,7 @@ def tree_active(cwd, seconds):
         return False
 
 
-def supervise(cmd, cwd, timeout, idle, logpath, env, qrx=None):
+def supervise(cmd, cwd, timeout, idle, logpath, env, qrx=None, a=None):
     """A model CLI must never block the session: stdin is closed, the process runs in its own group, and it is
     killed as soon as it asks for input, goes silent for `idle` seconds, or exceeds `timeout`."""
     import signal
@@ -158,7 +198,7 @@ def supervise(cmd, cwd, timeout, idle, logpath, env, qrx=None):
         size = os.path.getsize(logpath)
         if size != last_size: last_size, last_change = size, time.time()
         tail = open(logpath, errors='ignore').read()[-2000:] if size else ''
-        if WAITING.search(tail): reason = 'waiting_input'
+        if waiting_prompt(tail, time.time() - last_change, a): reason = 'waiting_input'
         elif live_quota_lines(tail) >= 3: reason = 'quota'  # the CLI itself looping on a quota message (adapter patterns only classify the final exit)
         elif time.time() - last_change > idle:
             # silent CLI but files still changing in cwd (long build/capture in a tool call) = progress
@@ -195,58 +235,122 @@ def repo_for(brief, cwd):
     return None
 
 
+def run_role(args, kind, brief):
+    """The role a run takes: --role, else --pool (legacy names are aliases), else implement / escalate, else a plan
+    review for a `<ISSUE>-plan-` brief, else a ticket code review."""
+    if '--role' in args: return lib.role_of(args[args.index('--role') + 1])
+    if '--pool' in args: return lib.role_of(args[args.index('--pool') + 1])
+    if kind == 'implement': return 'escalate' if '--escalate' in args else 'implement'
+    return 'plan_review' if re.match(r'.+?-plan-', os.path.basename(brief)) else 'review'
+
+
+def refuse(role, issue, reason, status='refused', **extra):
+    print(json.dumps(dict({'status': status, 'role': role, 'issue': issue, 'reason': reason}, **extra))); sys.exit(4)
+
+
+WINDOW_5H = re.compile(r'5h|300 ?min|session|5.?hour', re.I)
+WINDOW_WEEK = re.compile(r'week|10080', re.I)
+
+
+def coordinator_guard(r, ad, key):
+    """(ok, why) before delegating to the coordinator's own account: its remaining quota, read now, must keep the
+    reserve (models.json `coordinator_reserve`, default 30% of the 5-hour window and 20% of the weekly window left).
+    An unreadable quota fails closed: the coordinator must never run out of credits."""
+    m = r['models'][key]; a = ad[m['cli']]
+    res = dict({'5h': 30, 'weekly': 20}, **(r.get('coordinator_reserve') or {}))
+    ws = [w for w in usage_probe(a, lib.effective_env(m, a)) if w.get('used') is not None]
+    if not ws:
+        return False, 'quota of the coordinator account %s unreadable' % lib.account_key(m, a)
+    low = []
+    for w in ws:
+        name = '5h' if WINDOW_5H.search(w['window']) else 'weekly' if WINDOW_WEEK.search(w['window']) else None
+        if name and 100 - w['used'] < res[name]:
+            low.append('%s %d%% left (reserve %d%%)' % (w['window'], 100 - w['used'], res[name]))
+    return (False, ', '.join(low)) if low else (True, '')
+
+
 def cmd_run(args):
-    role, brief, out = args[0], args[1], args[2]
+    kind, brief, out = args[0], args[1], args[2]
+    if kind not in ('implement', 'review'): sys.exit('run-model run: <implement|review>')
     cwd = args[args.index('--cwd') + 1] if '--cwd' in args else os.getcwd()
     issue = args[args.index('--issue') + 1] if '--issue' in args else lib.issue_from_brief(brief)
     repo = repo_for(brief, cwd)
     r = lib.load_reg(); ad = lib.adapters()
+    role = run_role(args, kind, brief)
+    if '--allow-mid' in args or os.environ.get('ALLOW_MID') == '1':
+        refuse(role, issue, 'ALLOW_MID / --allow-mid was removed by the tier policy: plan reviews and pre-mortems are Tier 1 only. Wait (`run-model wait plan_review`) and tell the owner when it lasts')
+    if kind == 'review' and role not in lib.REVIEW_ROLES:
+        refuse(role, issue, 'a review takes role review (Tier 2) or a plan role (Tier 1); %s never reviews' % role)
+    if kind == 'implement' and role in lib.REVIEW_ROLES:
+        refuse(role, issue, 'role %s reviews, it never implements' % role)
     ex_vendors = [v for v in (args[args.index('--exclude-vendor') + 1] if '--exclude-vendor' in args else '').split(',') if v]
-    if role == 'review' and not (issue and repo) and '--standalone' not in args:
+    if kind == 'review' and not (issue and repo) and '--standalone' not in args:
         print(json.dumps({'status': 'error', 'role': role, 'reason': 'a review run needs --issue <ID> inside a project with .autopilot/state.json (or a brief named <ISSUE>-review-<n>.md), or --standalone for a review that is not about a ticket'})); sys.exit(4)
-    keys_, ids_ = lib.implementers_of(repo, issue) if role == 'review' and issue and repo else ([], [])
-    pool_name = args[args.index('--pool') + 1] if '--pool' in args else None
-    plan_review = role == 'review' and (pool_name in ('plan_review', 'premortem') or bool(re.match(r'.+?-plan-', os.path.basename(brief))))
-    floor = None
-    if plan_review:
+    keys_, ids_ = lib.implementers_of(repo, issue) if kind == 'review' and issue and repo else ([], [])
+    if role in lib.PLAN_ROLES:
         coord = lib.load_state(repo).get('coordinator') if repo else None
         if coord in r['models']:
             keys_ = keys_ + [coord]; ex_vendors.append(lib.vendor_of(r['models'][coord], ad.get(r['models'][coord]['cli'])))
         if not ex_vendors:
             print(json.dumps({'status': 'error', 'role': role, 'reason': 'a plan review needs the planner identity: `coordinator` (roster key) in .autopilot/state.json, or --exclude-vendor <vendor>'})); sys.exit(4)
-        floor = {'high', 'mid'} if ('--allow-mid' in args or os.environ.get('ALLOW_MID') == '1') else {'high'}
-    excluded = lib.expand_exclusions(r, keys=keys_, identities=ids_, vendors=ex_vendors, ad=ad) if role == 'review' else set()
-    if floor:
-        excluded |= {k for k, m in r['models'].items() if m.get('cost', 'mid') not in floor}
+    excluded = lib.expand_exclusions(r, keys=keys_, identities=ids_, vendors=ex_vendors, ad=ad) if kind == 'review' else set()
+    levels = lib.roles(r)[role]
+    if role == 'escalate':
+        if not (issue and repo):
+            refuse(role, issue, '--escalate needs a ticket identity (--issue)')
+        print('run-model: escalate %s: Tier %s -> Tier %s (stuck ticket)' % (issue, '/'.join(map(str, lib.roles(r)['implement'])), levels[0]), file=sys.stderr)
+        lib.update_state(repo, lambda st: st.setdefault('escalations', {}).setdefault(issue, []).append(
+            {'at': now().isoformat(), 'from': lib.roles(r)['implement'], 'to': levels}))
     if '--model' in args:
-        keys = [args[args.index('--model') + 1]]
-        if keys[0] in excluded:
-            print(json.dumps({'status': 'excluded', 'role': role, 'issue': issue, 'model': keys[0],
-                              'reason': 'implemented or planned this ticket (same underlying model on any account or harness), an excluded vendor, or below the plan-review cost floor'})); sys.exit(4)
+        k = args[args.index('--model') + 1]
+        m = r['models'].get(k) or refuse(role, issue, 'unknown roster key %s' % k)
+        a = ad.get(m['cli'])
+        why = lib.refused(r, ad).get(k)
+        if why: refuse(role, issue, 'roster entry %s refused by the policy: %s' % (k, why), model=k)
+        exr = lib.excluded_reason(r, k, m, a)
+        if exr: refuse(role, issue, '%s is excluded: %s' % (k, exr), model=k)
+        lv = lib.level_of(r, m, a)
+        if lv == 0 and '--allow-tier0' not in args:
+            refuse(role, issue, '%s is Tier 0: never selected without the owner opt-in --allow-tier0' % k, model=k)
+        if lv != 0 and lv not in levels:
+            refuse(role, issue, '%s is Tier %s; role %s takes Tier %s only' % (k, lv, role, '/'.join(map(str, levels))), model=k)
+        if k in excluded:
+            print(json.dumps({'status': 'excluded', 'role': role, 'issue': issue, 'model': k,
+                              'reason': 'implemented or planned this ticket (same underlying model on any account or harness), or an excluded vendor'})); sys.exit(4)
+        keys = [k]
     else:
-        pool = r['pools']['implement' if role == 'implement' else 'review']
-        if role == 'implement' and '--escalate' in args: pool = r['pools']['implement_escalation']
-        if '--pool' in args: pool = r['pools'][args[args.index('--pool') + 1]]
-        keys = [k for k in pool if lib.healthy(r, k) and k not in excluded]
+        keys = [k for k in lib.pool(r, role, ad) if lib.healthy(r, k) and k not in excluded]
         if '--prefer' in args:  # put one model first but keep the rest as fallback (spreads parallel runs)
             pk = args[args.index('--prefer') + 1]
-            if pk in keys or (pk in r['models'] and lib.healthy(r, pk) and pk not in excluded): keys = [pk] + [k for k in keys if k != pk]
-        if not keys and role == 'review':  # every reviewer down: fall back to the escalation pool (same exclusions)
-            keys = [k for k in r['pools']['implement_escalation'] if lib.healthy(r, k) and k not in excluded]
+            if pk in keys: keys = [pk] + [k for k in keys if k != pk]
     tried = []
     critical_check(repo)  # the coordinator sees a vendor outage on every run, not only at the heartbeat
     for k in keys:
         if k not in r['models'] or not lib.healthy(r, k) or k in excluded:  # roster edited or cooled down while this run was going
             continue
+        m = r['models'][k]; a = ad.get(m['cli'])
         allowed = os.environ.get('ALLOW_IMPLEMENT', '').split(',')  # explicit per-session user exception
-        if role == 'implement' and r['models'][k].get('no_implement') and k not in allowed:  # planners/reviewers only (token cost)
+        if kind == 'implement' and m.get('no_implement') and k not in allowed:
             tried.append(f"{k}:no_implement"); continue
-        if role == 'implement':
+        if lib.on_coordinator_account(r, m, a):
+            ok, why = coordinator_guard(r, ad, k)
+            if not ok:
+                tried.append(f'{k}:coordinator_reserve')
+                lib.raise_alert(repo, 'coordinator_reserve', lib.account_key(m, a), 'CRITICAL: coordinator quota reserve reached',
+                                'delegation to the coordinator account %s refused (%s); role %s has no other model available' % (lib.account_key(m, a), why, role),
+                                {'account': lib.account_key(m, a), 'role': role, 'why': why})
+                if '--model' in args:
+                    refuse(role, issue, 'coordinator account reserve: ' + why, status='coordinator_reserve', model=k)
+                continue
+            lib.resolve_alert(repo, 'coordinator_reserve', lib.account_key(m, a))
+        if kind == 'implement':
             if not (issue and repo):
                 print(json.dumps({'status': 'error', 'role': role, 'reason': 'implement runs need a ticket identity: --issue <ID> or a brief named <ISSUE>-impl-<n>.md inside a project with .autopilot/state.json'})); sys.exit(4)
-
-            lib.record_implementer(repo, issue, k, r['models'][k], ad.get(r['models'][k]['cli']) or lib.adapter_of(r['models'][k]))
-        res = run_one(r, k, role, brief, out, cwd); tried.append(f"{k}:{res['status']}")
+            lib.record_implementer(repo, issue, k, m, a or lib.adapter_of(m))
+        acct = lib.account_key(m, a)
+        lib.update_reg(lambda rr: rr.setdefault('last_used', {}).__setitem__(acct, now().isoformat()))
+        res = run_one(r, k, 'implement' if kind == 'implement' else 'review', brief, out, cwd); tried.append(f"{k}:{res['status']}")
+        res['level'] = lib.level_of(r, m, a); res['run_role'] = role
         if res['status'] == 'quota':
             after_quota(k, repo)
         if res['status'] == 'docker_hung':
@@ -254,7 +358,8 @@ def cmd_run(args):
         if res['status'] == 'ok' or '--no-fallback' in args:
             res['tried'] = tried; res['issue'] = issue; print(json.dumps(res)); return
         r = lib.load_reg()
-    print(json.dumps({'status': 'all_failed', 'role': role, 'issue': issue, 'tried': tried, 'excluded': sorted(excluded)})); sys.exit(2)
+    print(json.dumps({'status': 'all_failed', 'role': role, 'issue': issue, 'tried': tried, 'excluded': sorted(excluded),
+                      'levels': levels})); sys.exit(2)
 
 
 def smoke(r, key):
@@ -297,58 +402,111 @@ def sh(c, env=None, timeout=60):
 
 
 def list_models(a, env):
-    """Model ids a harness offers (for discover). Kinds: command+regex, json_file, none."""
+    """Model ids a harness offers (for discover). Kinds: command+regex, json_file, probe (no listing: candidate ids
+    are generated and smoke-tested, see `probe_candidates`), none. Returns (ids, kind)."""
     spec = a.get('list_models', {'kind': 'none'}); kind = spec.get('kind', 'none')
     exe = shutil.which(a.get('binary', a['name'])) or a.get('binary', a['name'])
     if kind == 'command':
-        return re.findall(spec['regex'], sh([exe] + spec['argv'], env)[0], re.M)
+        return re.findall(spec['regex'], sh([exe] + spec['argv'], env)[0], re.M), kind
     if kind == 'json_file':
         try:
             data = lib.read_json(lib.expand_path(spec['path'], a, env))
             for part in spec.get('list', '').split('.'):
                 if part: data = data[part]
-            return [next((m[k] for k in spec.get('id', ['id']) if m.get(k)), None) for m in data]
+            return [next((m[k] for k in spec.get('id', ['id']) if m.get(k)), None) for m in data], kind
         except Exception:
-            return []
-    return []
+            return [], kind
+    return [], kind
+
+
+VER = r'(v?\d+(?:[.-]\d+)*)'
 
 
 def ver(s): return tuple(int(x) for x in re.findall(r'\d+', s))
 
 
-def cmd_discover(args):
-    r = lib.load_reg(); ad = lib.adapters(); cands = []; avail = {}
+def family_rx(m):
+    fam = re.escape(m['family']).replace(r'\*', VER)
+    return re.compile('^' + fam + ('([-:]free)$' if lib.is_free_model(m) and m.get('tier') == 'free' else '$'))
+
+
+def probe_candidates(m):
+    """Next version ids of an entry whose CLI cannot list its models (Claude): the next minor, the next major (with
+    and without a minor). `claude-sonnet-5-5` -> claude-sonnet-6-0, claude-sonnet-6, claude-sonnet-5-6."""
+    mm = family_rx(m).match(m['model'])
+    if not mm:
+        return []
+    v = mm.group(1); sep = '-' if '-' in v else '.'; parts = [int(x) for x in re.findall(r'\d+', v)]
+    nxt = [[parts[0] + 1] + [0] * (len(parts) - 1), [parts[0] + 1]]
+    if len(parts) > 1: nxt.append(parts[:-1] + [parts[-1] + 1])
+    out = []
+    for p_ in nxt:
+        cand = m['model'][:mm.start(1)] + sep.join(map(str, p_)) + m['model'][mm.end(1):]
+        if cand not in out and cand != m['model']: out.append(cand)
+    return out
+
+
+def probe_smoke(r, key, model_id):
+    """Smoke a candidate id through `key`'s CLI and account without touching the entry (no cooldown on failure)."""
+    import tempfile
+    m = dict(r['models'][key], model=model_id)
+    d = tempfile.mkdtemp(); b = os.path.join(d, 'brief.md'); o = os.path.join(d, 'out.md')
+    open(b, 'w').write('Reply with exactly: AUTOPILOT_OK')
+    res = run_one(r, key, 'review', b, o, d, timeout=r['timeouts_seconds'].get('smoke', 120), m=m, probe=True)
+    return res['status'] == 'ok' and 'AUTOPILOT_OK' in open(o, errors='ignore').read()
+
+
+def discover(apply):
+    """Newer ids of every versioned family (`family` with a `*`) per CLI and account. With apply: smoke the newest
+    candidate through the entry's own CLI and account; when it answers, every entry on that CLI with the old id moves
+    to the new one, its level follows the owner's tier table when the table names the new id (else it is kept), and
+    models.json `changelog` records it. Returns the report."""
+    r = lib.load_reg(); ad = lib.adapters(); cands = {}; avail = {}
     for key, m in r['models'].items():
         a = ad.get(m['cli'])
-        if not a: continue
+        if not a or '*' not in m.get('family', '') or not lib.installed(a): continue
         ck = (m['cli'], lib.account_of(m, a))
         if ck not in avail: avail[ck] = list_models(a, lib.effective_env(m, a))
-        if '*' not in m.get('family', ''): continue  # unversioned entry (e.g. an account default model): not upgradable
-        fam = re.escape(m['family']).replace(r'\*', r'(v?[\d.]+)')
-        rx = re.compile('^' + fam + ('([-:]free)$' if m['tier'] == 'free' else '$'))
-        best = m['model']
-        for mid in avail[ck]:
-            mm = rx.match(mid or '')
-            if not mm or (m['tier'] != 'free' and re.search(r'[-:]free$', mid)): continue
-            if ver(mm.group(1)) > ver(rx.match(best).group(1) if rx.match(best) else '0'): best = mid
-        if best != m['model']: cands.append({'key': key, 'from': m['model'], 'to': best})
-    out = {'available_counts': {f'{c}/{acc}': len(v) for (c, acc), v in avail.items()}, 'upgrades': cands}
-    if '--apply' in args:
+        ids, kind = avail[ck]
+        rx = family_rx(m); cur = rx.match(m['model'])
+        if kind == 'probe':
+            found = probe_candidates(m)
+        else:
+            found = [mid for mid in ids if mid and rx.match(mid) and (lib.is_free_model(m) or not lib.FREE_ID.search(mid))]
+            found = [mid for mid in found if ver(rx.match(mid).group(1)) > ver(cur.group(1) if cur else '0')]
+            found.sort(key=lambda mid: ver(rx.match(mid).group(1)), reverse=True)
+        if found and (m['cli'], m['model']) not in cands:
+            cands[(m['cli'], m['model'])] = {'key': key, 'from': m['model'], 'candidates': found, 'kind': kind}
+    out = {'available_counts': {f'{c}/{acc}': len(v[0]) for (c, acc), v in avail.items()},
+           'upgrades': [dict(c, to=c['candidates'][0]) for c in cands.values() if c['kind'] != 'probe'],
+           'probes': [c for c in cands.values() if c['kind'] == 'probe']}
+    if apply:
         applied = []
-        for c in cands:
-            old = c['from']
-            lib.update_reg(lambda r: r['models'][c['key']].__setitem__('model', c['to']))
-            sm = subprocess.run([sys.executable, __file__, 'smoke', c['key']], capture_output=True, text=True).stdout
-            ok = '"passed": true' in sm
+        for c in cands.values():
+            new = next((mid for mid in c['candidates'] if probe_smoke(r, c['key'], mid)), None)
+            if not new: continue
+            lv, entry = lib.table_level(r, new)
 
-            def fin(r):
-                if not ok: r['models'][c['key']]['model'] = old
-                else: r.setdefault('changelog', []).append({'date': str(now().date()), 'change': f"{c['key']} {old} -> {c['to']} (smoke ok)"})
-                r['health'].pop(c['key'], None)
-            lib.update_reg(fin)
-            if ok: applied.append(c)
+            def fin(rr, c=c, new=new, lv=lv):
+                moved = []
+                for k, m in rr['models'].items():
+                    if m['cli'] == rr['models'][c['key']]['cli'] and m['model'] == c['from']:
+                        old_lv = m.get('level'); m['model'] = new
+                        if lv is not None and lv != old_lv and not lib.forced_four(m): m['level'] = lv
+                        moved.append('%s%s' % (k, '' if m.get('level') == old_lv else ' (level %s -> %s, tier table)' % (old_lv, m.get('level'))))
+                rr.setdefault('changelog', []).append({'date': str(now().date()), 'change': 'discover: %s -> %s on %s (smoke ok)' % (c['from'], new, ', '.join(moved)),
+                                                       'why': 'latest version of the family always (owner rule)'})
+                return moved
+            applied.append({'from': c['from'], 'to': new, 'keys': lib.update_reg(fin)})
         out['applied'] = applied
     lib.update_reg(lambda r: r.__setitem__('last_discovery', str(now().date())))
+    return out
+
+
+def cmd_discover(args):
+    out = discover('--apply' in args)
+    for x in out.get('applied', []):
+        print('run-model: upgraded %s -> %s (%s)' % (x['from'], x['to'], ', '.join(x['keys'])), file=sys.stderr)
     print(json.dumps(out))
 
 
@@ -542,36 +700,33 @@ def reset_note(r, ad, acct):
     return 'not attempted: the reset window is not exhausted (5-hour limit, or no fresh reading)'
 
 
-def eligible(r, ad, pool, coord_vendor):
-    """Healthy keys that may run the pool; plan_review and premortem take `cost: high` of another vendor than the planner."""
-    out = []
-    for k in r['pools'].get(pool, []):
-        m = r['models'].get(k)
-        if not m or not lib.healthy(r, k):
-            continue
-        if pool in ('plan_review', 'premortem') and (m.get('cost', 'mid') != 'high' or lib.vendor_of(m, ad.get(m['cli'])) == coord_vendor):
-            continue
-        out.append(k)
-    return out
+CHECKED_ROLES = (('implement', 1), ('review', 1), ('plan_review', 1), ('premortem', 1), ('milestone_review', 1))
 
 
 def critical_check(repo):
-    """Raise, refresh or resolve the CRITICAL alerts: a vendor whose every account in the pools is down on quota (after
-    the resets were tried), and a plan_review/premortem pool with no eligible model left. An outage shorter than
-    `alert_min_outage_minutes` (default 60) is not one. Prints one `CRITICAL:` line per active alert on stderr; a new
-    alert also posts a Linear project update when state.json has a project. Returns the active alerts."""
+    """Raise, refresh or resolve the CRITICAL alerts run-model owns: a vendor whose every account in the roles is down
+    on quota (after the resets were tried), and a role with no eligible model (Tier 1 plan roles exclude the
+    coordinator's vendor; the coordinator's own account never counts for Tier 1/2). An outage shorter than
+    `alert_min_outage_minutes` (default 60), or a role empty by configuration, is not one. Prints one `CRITICAL:` line
+    per active alert on stderr; a new alert also posts a Linear project update when state.json has a project.
+    Returns the active alerts (every kind, including those raised elsewhere)."""
     r = lib.load_reg(); ad = lib.adapters(); t = now()
     st = lib.load_state(repo) if repo else {}
     coord = r['models'].get(st.get('coordinator') or '')
-    coord_vendor = lib.vendor_of(coord, ad.get(coord['cli'])) if coord else None
+    coord_vendor = lib.vendor_of(coord, ad.get(coord['cli'])) if coord and ad.get(coord['cli']) else None
     min_out = float(r.get('alert_min_outage_minutes', 60))
     until = lambda ks: min(lib.parse_time(r['health'][k]['until']) for k in ks)
+    members = {role: lib.candidates(r, role, ad) for role, _ in CHECKED_ROLES}
     by_vendor = {}
-    for k in dict.fromkeys(k for p in r['pools'].values() for k in p):
-        m = r['models'].get(k)
-        if m and ad.get(m['cli']):
-            by_vendor.setdefault(lib.vendor_of(m, ad[m['cli']]), []).append(k)
-    blocked = sorted(p for p in r['pools'] if r['pools'][p] and not eligible(r, ad, p, coord_vendor))
+    for k in dict.fromkeys(k for ks in members.values() for k in ks):
+        m = r['models'][k]
+        by_vendor.setdefault(lib.vendor_of(m, ad[m['cli']]), []).append(k)
+    blocked = {}
+    for role, n in CHECKED_ROLES:
+        ex = lib.expand_exclusions(r, vendors=[coord_vendor], ad=ad) if role in lib.PLAN_ROLES and coord_vendor else set()
+        ready = lib.vendor_ready_at(r, [role], n, ex, ad)
+        if ready is not None and ready > t:
+            blocked[role] = ready
     found = {}
     for v, ks in sorted(by_vendor.items()):
         if any(lib.healthy(r, k) for k in ks) or not any(r['health'][k]['reason'].startswith('quota') for k in ks):
@@ -579,34 +734,34 @@ def critical_check(repo):
         earliest = until(ks)
         if (earliest - t).total_seconds() < min_out * 60:
             continue
-        accts = sorted({'%s/%s' % (r['models'][k]['cli'], lib.account_of(r['models'][k], ad[r['models'][k]['cli']])) for k in ks})
-        pools = sorted(p for p, pk in r['pools'].items() if set(pk) & set(ks))
+        accts = sorted({lib.account_key(r['models'][k], ad[r['models'][k]['cli']]) for k in ks})
+        roles_ = sorted(role for role, mk in members.items() if set(mk) & set(ks))
         resets = {acc: reset_note(r, ad, acc) for acc in accts}
+        bl = [p for p in sorted(blocked) if p in roles_]
         found[('vendor_out', v)] = {
             'title': 'CRITICAL: %s out of quota' % v,
             'message': '%s out of quota on every account (%s); blocked pools: %s; earliest reset %s; resets: %s' % (
-                v, ', '.join(accts), ', '.join(p for p in blocked if p in pools) or 'none', earliest.astimezone().strftime('%a %d %b %H:%M %Z'),
+                v, ', '.join(accts), ', '.join(bl) or 'none', earliest.astimezone().strftime('%a %d %b %H:%M %Z'),
                 '; '.join('%s: %s' % kv for kv in resets.items())),
-            'details': {'vendor': v, 'accounts': accts, 'resets': resets, 'pools': pools, 'blocked_pools': [p for p in blocked if p in pools],
+            'details': {'vendor': v, 'accounts': accts, 'resets': resets, 'pools': roles_, 'blocked_pools': bl,
                         'earliest_reset': earliest.isoformat()}}
     covered = {p for d in found.values() for p in d['details']['blocked_pools']}
-    for p in ('plan_review', 'premortem'):
-        if p not in blocked or p in covered:
+    for role, ready in sorted(blocked.items()):
+        if role in covered or (ready - t).total_seconds() < min_out * 60:
             continue
-        down = [k for k in r['pools'][p] if k in r['models'] and not lib.healthy(r, k) and r['models'][k].get('cost', 'mid') == 'high'
-                and lib.vendor_of(r['models'][k], ad.get(r['models'][k]['cli'])) != coord_vendor]
-        if not down or (until(down) - t).total_seconds() < min_out * 60:
-            continue  # empty by configuration, not by quota; or back soon
-        found[('pool_blocked', p)] = {
-            'title': 'CRITICAL: %s has no eligible model' % p,
-            'message': '%s has no eligible model (high tier, not %s) until %s: %s cooling down' % (
-                p, coord_vendor or 'the planner', until(down).astimezone().strftime('%a %d %b %H:%M %Z'), ', '.join(down)),
-            'details': {'pool': p, 'cooling': down, 'earliest_reset': until(down).isoformat()}}
+        down = [k for k in members[role] if not lib.healthy(r, k)]
+        tiers = '/'.join(map(str, lib.roles(r)[role]))
+        found[('pool_blocked', role)] = {
+            'title': 'CRITICAL: %s has no eligible model' % role,
+            'message': '%s has no eligible model (Tier %s%s) until %s: %s cooling down' % (
+                role, tiers, ', not %s' % coord_vendor if role in lib.PLAN_ROLES and coord_vendor else '',
+                ready.astimezone().strftime('%a %d %b %H:%M %Z'), ', '.join(down)),
+            'details': {'pool': role, 'cooling': down, 'earliest_reset': ready.isoformat()}}
 
     def merge(al):
         new = []
         for a in al:
-            if not a.get('resolved_at') and (a['kind'], a['key']) not in found:
+            if a.get('kind') in ('vendor_out', 'pool_blocked') and not a.get('resolved_at') and (a['kind'], a['key']) not in found:
                 a['resolved_at'] = t.isoformat()
         for (kind, key), d in found.items():
             cur = next((a for a in al if a['kind'] == kind and a['key'] == key and not a.get('resolved_at')), None)
@@ -677,21 +832,38 @@ def cmd_usage(args):
             if fresh and responsible <= fresh:
                 cleared.append(k)
                 if apply: lib.update_reg(lambda rr, k=k: rr['health'].pop(k, None))
+    seen = {}
+    for entry in u:  # credit left per account, for the weighted draws (lib.weight): the most used fresh window wins
+        ws = [w['used'] for w in entry['windows'] if w.get('used') is not None and not w.get('stale')]
+        if ws: seen['%s/%s' % (entry['cli'], entry['account'])] = {'used': max(ws), 'at': now().isoformat()}
+    if seen: lib.update_reg(lambda rr: rr.setdefault('usage_seen', {}).update(seen))
+    upgrades = None
+    if apply and os.environ.get('AUTOPILOT_NO_DISCOVER') != '1' and r.get('last_discovery') != str(now().date()):
+        upgrades = discover(True)  # latest version always: once a day from the heartbeat's `usage --apply`
+        for x in upgrades.get('applied', []):
+            print('run-model: upgraded %s -> %s (%s)' % (x['from'], x['to'], ', '.join(x['keys'])), file=sys.stderr)
     alerts = critical_check(lib.find_repo(required=False)) if apply else []
     print(json.dumps({'usage': u, 'exhausted_until_reset': sorted(set(cooled)), 'stale_quota_cooldowns_cleared': sorted(set(cleared) - set(cooled)),
-                      'stale_readings_skipped': stale, 'resets': resets, 'critical': [a['id'] for a in alerts], 'applied': apply}))
+                      'stale_readings_skipped': stale, 'resets': resets, 'critical': [a['id'] for a in alerts], 'applied': apply,
+                      'discovery': upgrades}))
 
 
 def cmd_wait(args):
-    """Sleep until a model of the pool is healthy again, then print its key. Put it in front of the run
-    that needs the pool (`k=$(run-model wait review_high) && ...`) so work restarts the minute a model resets."""
-    pool, ex = args[0], (args[1].split(',') if len(args) > 1 else [])
+    """Sleep until the role (or legacy pool name) has an eligible healthy model, then print the keys picked (one per
+    vendor, `--vendors N`, default 1). EXCLUDE keys (comma list) are expanded to every account and harness of the same
+    model. Put it in front of the run that needs the role (`run-model wait review T-1-impl-keys && ...`) so work
+    restarts the minute a model resets."""
+    pool_name = args[0]
+    ex = [x for x in (args[1].split(',') if len(args) > 1 and not args[1].startswith('--') else []) if x]
+    n = int(args[args.index('--vendors') + 1]) if '--vendors' in args else 1
     while True:
-        r = lib.load_reg(); keys = [k for k in r['pools'][pool] if k not in ex]
-        ok = [k for k in keys if lib.healthy(r, k)]
-        if ok: print(ok[0]); return
-        ends = [lib.parse_time(r['health'][k]['until']) for k in keys if k in r['health']]
-        time.sleep(max(30, min(120, (min(ends) - now()).total_seconds() + 5)) if ends else 60)  # recheck often: cooldowns can be reset by hand
+        r = lib.load_reg(); ad = lib.adapters()
+        EX = lib.expand_exclusions(r, keys=ex, ad=ad)
+        pick, _ = lib.pick_reviewers(r, [pool_name], n, EX, ad)
+        if len(pick) >= n: print(','.join(pick)); return
+        ready = lib.vendor_ready_at(r, [pool_name], n, EX, ad)
+        if ready is None: sys.exit('run-model wait: %s has fewer than %d eligible vendor(s) by configuration (bin/harness check)' % (pool_name, n))
+        time.sleep(max(30, min(120, (ready - now()).total_seconds() + 5)))  # recheck often: cooldowns can be reset by hand
 
 
 if __name__ == '__main__':
@@ -707,4 +879,16 @@ if __name__ == '__main__':
     elif a[0] == 'reset': lib.update_reg(lambda r: r['health'].pop(a[1], None)); print('ok')
     elif a[0] == 'vendor':
         r = lib.load_reg(); m = r['models'].get(a[1]) or sys.exit(f'unknown key {a[1]}'); print(lib.vendor_of(m))
+    elif a[0] == 'whoami':
+        ca = lib.detect_coordinator()
+        if not ca: sys.exit('run-model whoami: coordinator not detected (no adapter coordinator_env set in this process; AUTOPILOT_COORDINATOR=<cli>[/<account>])')
+        r = lib.load_reg(warn=False); ad = lib.adapters()
+        out = {'cli': ca[0], 'account': ca[1], 'keys': [k for k, m in r['models'].items() if ad.get(m['cli']) and lib.on_coordinator_account(r, m, ad[m['cli']], ca)],
+               'detected_at': now().isoformat()}
+        if '--record' in a:
+            repo = lib.find_repo()
+            lib.update_state(repo, lambda st: st.__setitem__('coordinator_account', out))
+        print(json.dumps(out))
+    elif a[0] == 'pool':
+        r = lib.load_reg(); print(json.dumps(lib.pool(r, a[1])))
     else: print(__doc__); sys.exit(1)

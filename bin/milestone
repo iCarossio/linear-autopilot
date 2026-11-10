@@ -13,7 +13,7 @@ and their Linear milestone never gets a target date.
   milestone list [--json]               id, name, done/total, ETA (from `bin/eta --json`)
   milestone seed <tickets.json>         after the plan's `bin/linear import`: one milestone per tickets.json milestone,
                                         blockers and sizes from the tickets, then recompute (the approved plan: no decision)
-  milestone add <spec.json> [--dry-run] [--planner KEY] [--review-k N] [--allow-mid]
+  milestone add <spec.json> [--dry-run] [--planner KEY] [--review-k N]
                 [--skip-premortem "<why>"] [--skip-review "<why>"] [--approved --by <who> --source <kind:ref>]
   milestone adopt --id ID --name NAME --issues ENG-1,ENG-2,... [--linear-id ID | --create-linear]
                 [--origin plan|extension] [--premortem PATH] [--plan-review PATH] --by <who> --source <kind:ref> [--dry-run]
@@ -432,7 +432,7 @@ def cmd_add(a):
                        'it fail (shared files, a dependency, a KPI it moves, the deadline).\n\n'
                        f'{section}\n---\n\n# Existing plan (context)\n\n{ctx}')
             cmd = [os.path.join(BIN, 'premortem'), os.path.join(d, 'premortem-input.md'), '--repo', repo,
-                   '--planner', planner, '--out-dir', d] + (['--allow-mid'] if a.allow_mid else [])
+                   '--planner', planner, '--out-dir', d]
             print(f'pre-mortem of milestone {mid} (10-40 min) ...', flush=True)
             rc, out, err = run(repo, cmd)
             open(os.path.join(d, 'premortem.log'), 'w').write(out + err)
@@ -455,7 +455,6 @@ def cmd_add(a):
             rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp])
             if rc != 0: die(f'mkbrief failed: {err.strip()}')
             extra = {'POOL': 'plan_review'}
-            if a.allow_mid: extra['ALLOW_MID'] = '1'
             if a.planner and a.planner != st.get('coordinator'):
                 reg = lib.load_reg(); ad = lib.adapters(); m = reg['models'].get(a.planner) or die(f'unknown planner {a.planner}')
                 extra['EXCLUDE'] = a.planner; extra['EXCLUDE_VENDOR'] = lib.vendor_of(m, ad.get(m['cli']))
@@ -746,7 +745,7 @@ def main():
     p = argparse.ArgumentParser(prog='milestone'); sub = p.add_subparsers(dest='cmd')
     li = sub.add_parser('list'); li.add_argument('--json', action='store_true')
     ad = sub.add_parser('add'); ad.add_argument('spec'); ad.add_argument('--dry-run', action='store_true')
-    ad.add_argument('--planner'); ad.add_argument('--review-k', type=int, default=1); ad.add_argument('--allow-mid', action='store_true')
+    ad.add_argument('--planner'); ad.add_argument('--review-k', type=int, default=1)
     ad.add_argument('--skip-premortem', metavar='WHY'); ad.add_argument('--skip-review', metavar='WHY')
     ad.add_argument('--approved', action='store_true'); ad.add_argument('--by'); ad.add_argument('--source')
     se = sub.add_parser('seed'); se.add_argument('tickets')

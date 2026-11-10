@@ -20,8 +20,8 @@
   "account_default": "~/.claude",
   "account_detect": "~/.claude-[a-z]",
   "list_models": {
-    "kind": "none",
-    "note": "no CLI listing: update model ids by hand when a newer version appears"
+    "kind": "probe",
+    "note": "no CLI listing: run-model discover generates the next version ids of each family (claude-sonnet-5-5 -> 6-0, 6, 5-6) and switches to the newest that answers a smoke test"
   },
   "usage": {
     "kind": "command",
@@ -47,5 +47,9 @@
   "tokens": {
     "kind": "claude_projects",
     "path": "$CLAUDE_CONFIG_DIR/projects"
-  }
+  },
+  "coordinator_env": [
+    "CLAUDECODE"
+  ],
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
 }

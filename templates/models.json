@@ -1,137 +1,71 @@
 {
-  "_doc": "Template roster for linear-autopilot. `bin/harness init` copies it to $AUTOPILOT_CONFIG_DIR/models.json (never edited in the repo). Order inside each pool = preference. 'family' + 'tier' drive upgrades (bin/run-model discover): a newer version of the same family and tier replaces the entry; tiers are never swapped. 'cost' (high|mid|cheap|free) documents what a model costs on the user's plans; 'no_implement' keeps expensive models out of implementation. Accounts: a model entry with 'env' (e.g. CODEX_HOME) is another account of the same CLI (bin/harness add-account). Model ids below are examples from October 2026: run `bin/harness discover` and `bin/run-model discover --apply` after init.",
-  "last_discovery": "2026-10-25",
+  "_doc": "Template roster for linear-autopilot. `bin/harness init` copies it to $AUTOPILOT_CONFIG_DIR/models.json (never edited in the repo); `/autopilot-init` then records the subscriptions the owner names and runs `bin/harness check`. Tier policy (README, Tiers): every entry has `level` (0-4), `vendor` and `subscription`; a role takes every model of its tier (`roles`), drawn at run time at random weighted by the credit left on its account (no hand-ordered pools). Vendor -> CLI is fixed: anthropic=claude, openai=codex, google=agy, mistral=vibe, xai=grok|cursor, any other vendor=opencode. Mistral, free models and old Gemini are Tier 4 whatever `level` says. `family` (with a `*` for the version) drives `run-model discover`: the newest id of the family replaces the entry after a smoke test, its level following `tier_table`. Model ids below are examples from November 2026.",
+  "last_discovery": "2026-11-09",
   "cooldown_minutes": 30,
   "codex_auto_reset": true,
   "codex_auto_reset_doc": "Owner's standing authorization (2026-11-09): run-model redeems a Codex usage reset by itself (bin/codex-reset --yes) when a fresh reading shows an account's WEEKLY window at 100%, once per account per weekly window, then smoke-tests the account. false = never; the outage is then a CRITICAL alert.",
   "alert_min_outage_minutes": 60,
+  "review_wait_minutes": 90,
+  "review_wait_minutes_doc": "bin/review waits for an eligible reviewer of the role's tier that comes back within this window; beyond it, a CRITICAL alert, never another tier.",
+  "coordinator_reserve": {
+    "5h": 30,
+    "weekly": 20
+  },
+  "coordinator_reserve_doc": "percent of each window that must stay left on the coordinator's own account (detected per session) before any model runs on it: the coordinator must never run out of credits. Below it: refused, CRITICAL alert.",
+  "roles": {
+    "implement": [
+      3
+    ],
+    "fix": [
+      3
+    ],
+    "review": [
+      2
+    ],
+    "plan_review": [
+      1
+    ],
+    "premortem": [
+      1
+    ],
+    "milestone_review": [
+      1
+    ],
+    "coordinate": [
+      1
+    ],
+    "trivial": [
+      4
+    ]
+  },
+  "roles_doc": "role -> levels. Bounded by the policy in code: implement/fix Tier 3, review Tier 2, plan_review/premortem/milestone_review/coordinate Tier 1, trivial Tier 4 (or 3); `--escalate` = one level above implement, never Tier 1; Tier 0 never automatic.",
+  "subscription_doc": "per entry, set by /autopilot-init after asking the owner (never a default): paid (a plan the owner pays for), paid? (paid, plan not confirmed), free (free plan, low limits), reserved (kept for other uses: never selected; `bin/harness subscription <cli> <account> reserved --reason ...`). `excluded: <reason>` removes one entry; a project's state.json `exclude` removes keys or whole accounts for that project only. Draw weights: paid 1, paid? or unset 0.7, free 0.25, times the credit left on the account. The coordinator's own account is not configured here: it is detected per session (adapter `coordinator_env`, `bin/run-model whoami`) and protected (last resort, cheap roles, `coordinator_reserve`).",
+  "tier_table": [],
+  "tier_table_doc": "owner overrides of the built-in tier table (bin/autopilot_lib.py DEFAULT_TIER_TABLE, Nov 2026), first match wins: [{\"match\": \"<regex on the model id>\", \"level\": n}]",
   "timeouts_seconds": {
     "implement": 4800,
     "review": 1800,
     "smoke": 120,
     "idle": 900
   },
-  "pools_doc": {
-    "premortem": "high tier, distinct vendors; the planner's vendor is excluded by bin/premortem",
-    "plan_review": "high tier of another vendor reviews each ticket plan before any code",
-    "implement_critical": "critical-path tickets: best cheap/mid implementers first",
-    "implement": "every other ticket: free and cheap first",
-    "implement_escalation": "last round or stuck ticket (--escalate)",
-    "fix_mid": "fix after a second failed review",
-    "review_mid": "adversarial review of normal tickets",
-    "review_high": "adversarial review of architecture-shaping or cross-cutting tickets, and the final global review",
-    "review": "last-resort reviewers (free)"
-  },
-  "pools": {
-    "implement_critical": [
-      "codex-sol",
-      "codex-terra",
-      "codex-luna",
-      "claude-sonnet",
-      "oc-deepseek-pro",
-      "oc-glm",
-      "oc-go-beam-free"
-    ],
-    "implement": [
-      "codex-terra",
-      "codex-luna",
-      "codex-sol",
-      "claude-sonnet",
-      "oc-deepseek-pro",
-      "oc-glm",
-      "oc-go-beam-free",
-      "oc-or-laguna-free"
-    ],
-    "implement_escalation": [
-      "codex-sol",
-      "codex-terra",
-      "claude-sonnet",
-      "codex-luna"
-    ],
-    "fix_mid": [
-      "codex-terra",
-      "codex-sol",
-      "codex-luna",
-      "claude-sonnet",
-      "oc-deepseek-pro"
-    ],
-    "review_mid": [
-      "claude-sonnet",
-      "codex-terra",
-      "codex-luna",
-      "claude-opus",
-      "oc-go-beam-free",
-      "oc-or-laguna-free",
-      "oc-or-nemotron-ultra-free"
-    ],
-    "review_high": [
-      "claude-opus",
-      "codex-sol",
-      "codex-terra",
-      "claude-sonnet",
-      "codex-luna",
-      "oc-or-nemotron-ultra-free",
-      "oc-or-laguna-free",
-      "oc-go-beam-free"
-    ],
-    "plan_review": [
-      "codex-sol",
-      "claude-opus",
-      "grok"
-    ],
-    "review": [
-      "oc-go-beam-free",
-      "oc-or-laguna-free",
-      "oc-or-nemotron-ultra-free"
-    ],
-    "premortem": [
-      "codex-sol",
-      "claude-opus",
-      "grok"
-    ]
-  },
   "models": {
-    "oc-deepseek-flash-free": {
-      "cli": "opencode",
-      "model": "opencode/deepseek-v4.1-flash-free",
-      "family": "opencode/deepseek-*-flash",
-      "tier": "free",
-      "cost": "free"
+    "codex-sol": {
+      "cli": "codex",
+      "model": "gpt-6.1-sol",
+      "family": "gpt-*-sol",
+      "tier": "codex-sol",
+      "cost": "high",
+      "vendor": "openai",
+      "level": 1
     },
-    "oc-glm-flash-free": {
-      "cli": "opencode",
-      "model": "opencode/glm-5.3-flash-free",
-      "family": "opencode/glm-*-flash",
-      "tier": "free",
-      "cost": "free"
-    },
-    "oc-mimo-flash-free": {
-      "cli": "opencode",
-      "model": "opencode/mimo-v2.6-flash-free",
-      "family": "opencode/mimo-*-flash",
-      "tier": "free",
-      "cost": "free"
-    },
-    "oc-nemotron-super-free": {
-      "cli": "opencode",
-      "model": "opencode/nemotron-3.5-super-vl-free",
-      "family": "opencode/nemotron-*-super",
-      "tier": "free",
-      "cost": "free"
-    },
-    "oc-deepseek-pro": {
-      "cli": "opencode",
-      "model": "opencode-go/deepseek-v4-pro",
-      "family": "opencode-go/deepseek-*-pro",
-      "tier": "go",
-      "cost": "cheap"
-    },
-    "oc-glm": {
-      "cli": "opencode",
-      "model": "opencode-go/glm-5.3",
-      "family": "opencode-go/glm-*",
-      "tier": "go",
-      "cost": "cheap"
+    "codex-terra": {
+      "cli": "codex",
+      "model": "gpt-6.1-terra",
+      "family": "gpt-*-terra",
+      "tier": "codex-terra",
+      "cost": "mid",
+      "vendor": "openai",
+      "level": 2
     },
     "codex-luna": {
       "cli": "codex",
@@ -139,50 +73,8 @@
       "family": "gpt-*-luna",
       "tier": "codex-luna",
       "cost": "cheap",
-      "note": "user asked for 6.1 terra/luna; not available on 2026-10-24, upgrade when it appears"
-    },
-    "codex-terra": {
-      "cli": "codex",
-      "model": "gpt-6.1-terra",
-      "family": "gpt-*-terra",
-      "tier": "codex-terra",
-      "cost": "mid"
-    },
-    "grok": {
-      "cli": "grok",
-      "model": "grok-4.7",
-      "family": "grok-*",
-      "tier": "grok-subscription",
-      "cost": "mid"
-    },
-    "claude-sonnet": {
-      "cli": "claude",
-      "model": "claude-sonnet-5-5",
-      "family": "claude-sonnet-*",
-      "tier": "sonnet",
-      "cost": "mid",
-      "note": "shares the coordinator's Anthropic quota: keep it last-resort for review if the coordinator is Claude"
-    },
-    "oc-go-deepseek-flash": {
-      "cli": "opencode",
-      "model": "opencode-go/deepseek-v4.1-flash",
-      "family": "deepseek-*-flash",
-      "tier": "opencode-go-flash",
-      "cost": "cheap"
-    },
-    "oc-go-glm-flash": {
-      "cli": "opencode",
-      "model": "opencode-go/glm-5.3-flash",
-      "family": "glm-*-flash",
-      "tier": "opencode-go-flash",
-      "cost": "cheap"
-    },
-    "oc-go-beam-free": {
-      "cli": "opencode",
-      "model": "opencode-go/beam-free#max",
-      "family": "beam-free",
-      "tier": "opencode-go-free",
-      "cost": "free"
+      "vendor": "openai",
+      "level": 3
     },
     "claude-opus": {
       "cli": "claude",
@@ -190,7 +82,26 @@
       "family": "claude-opus-*",
       "tier": "opus",
       "cost": "high",
-      "no_implement": true
+      "vendor": "anthropic",
+      "level": 1
+    },
+    "claude-sonnet": {
+      "cli": "claude",
+      "model": "claude-sonnet-5-5",
+      "family": "claude-sonnet-*",
+      "tier": "sonnet",
+      "cost": "mid",
+      "vendor": "anthropic",
+      "level": 2
+    },
+    "claude-haiku": {
+      "cli": "claude",
+      "model": "claude-haiku-5-5",
+      "family": "claude-haiku-*",
+      "tier": "haiku",
+      "cost": "cheap",
+      "vendor": "anthropic",
+      "level": 3
     },
     "agy-gemini-flash": {
       "cli": "agy",
@@ -198,23 +109,54 @@
       "family": "gemini-*-flash",
       "tier": "flash",
       "cost": "cheap",
-      "note": "Google Antigravity free account (agy CLI); separate vendor and quota"
+      "note": "Google Antigravity (agy): the only CLI for Google models",
+      "vendor": "google",
+      "level": 2
     },
-    "agy-claude-opus": {
-      "cli": "agy",
-      "model": "claude-opus-4-6-thinking",
-      "family": "claude-opus-*",
-      "tier": "opus",
-      "cost": "high",
-      "note": "Claude Opus via the Antigravity free account: Anthropic family but a separate quota from the coordinator plan"
-    },
-    "agy-claude-sonnet": {
-      "cli": "agy",
-      "model": "claude-sonnet-4-6",
-      "family": "claude-sonnet-*",
-      "tier": "sonnet",
+    "grok": {
+      "cli": "grok",
+      "model": "grok-4.7",
+      "family": "grok-*",
+      "tier": "grok-subscription",
       "cost": "mid",
-      "note": "Claude Sonnet via the Antigravity free account (separate quota)"
+      "vendor": "xai",
+      "level": 1
+    },
+    "oc-deepseek-pro": {
+      "cli": "opencode",
+      "model": "opencode-go/deepseek-v4-pro",
+      "family": "opencode-go/deepseek-*-pro",
+      "tier": "go",
+      "cost": "cheap",
+      "vendor": "deepseek",
+      "level": 1
+    },
+    "oc-glm": {
+      "cli": "opencode",
+      "model": "opencode-go/glm-5.3",
+      "family": "opencode-go/glm-*",
+      "tier": "go",
+      "cost": "cheap",
+      "vendor": "zhipu",
+      "level": 1
+    },
+    "oc-go-deepseek-flash": {
+      "cli": "opencode",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "family": "deepseek-*-flash",
+      "tier": "opencode-go-flash",
+      "cost": "cheap",
+      "vendor": "deepseek",
+      "level": 3
+    },
+    "oc-go-glm-flash": {
+      "cli": "opencode",
+      "model": "opencode-go/glm-5.3-flash",
+      "family": "glm-*-flash",
+      "tier": "opencode-go-flash",
+      "cost": "cheap",
+      "vendor": "zhipu",
+      "level": 3
     },
     "vibe-mistral": {
       "cli": "vibe",
@@ -222,36 +164,81 @@
       "family": "mistral-*",
       "tier": "default",
       "cost": "cheap",
-      "note": "Mistral Vibe free account (very low usage): mostly a reviewer from a fourth vendor"
+      "note": "Mistral Vibe: Tier 4 like every Mistral model (trivial tasks only)",
+      "vendor": "mistral",
+      "level": 4
+    },
+    "oc-deepseek-flash-free": {
+      "cli": "opencode",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "family": "opencode/deepseek-*-flash",
+      "tier": "free",
+      "cost": "free",
+      "vendor": "deepseek",
+      "level": 4
+    },
+    "oc-glm-flash-free": {
+      "cli": "opencode",
+      "model": "opencode/glm-5.3-flash-free",
+      "family": "opencode/glm-*-flash",
+      "tier": "free",
+      "cost": "free",
+      "vendor": "zhipu",
+      "level": 4
+    },
+    "oc-mimo-flash-free": {
+      "cli": "opencode",
+      "model": "opencode/mimo-v2.6-flash-free",
+      "family": "opencode/mimo-*-flash",
+      "tier": "free",
+      "cost": "free",
+      "vendor": "xiaomi",
+      "level": 4
+    },
+    "oc-nemotron-super-free": {
+      "cli": "opencode",
+      "model": "opencode/nemotron-3.5-super-vl-free",
+      "family": "opencode/nemotron-*-super",
+      "tier": "free",
+      "cost": "free",
+      "vendor": "nvidia",
+      "level": 4
+    },
+    "oc-go-beam-free": {
+      "cli": "opencode",
+      "model": "opencode-go/beam-free#max",
+      "family": "beam-free",
+      "tier": "opencode-go-free",
+      "cost": "free",
+      "vendor": "opencode",
+      "level": 4
     },
     "oc-or-laguna-free": {
       "cli": "opencode",
       "model": "openrouter/poolside/laguna-s-2.1:free",
       "family": "openrouter/poolside/laguna-s-*",
       "tier": "free",
-      "cost": "free"
+      "cost": "free",
+      "vendor": "opencode",
+      "level": 4
     },
     "oc-or-nemotron-ultra-free": {
       "cli": "opencode",
       "model": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
       "family": "openrouter/nvidia/nemotron-*-ultra-550b-a55b",
       "tier": "free",
-      "cost": "free"
+      "cost": "free",
+      "vendor": "nvidia",
+      "level": 4
     },
     "oc-or-free": {
       "cli": "opencode",
       "model": "openrouter/openrouter/free",
       "family": "openrouter/free",
       "tier": "free",
-      "cost": "free"
-    },
-    "codex-sol": {
-      "cli": "codex",
-      "model": "gpt-6.1-sol",
-      "family": "gpt-*-sol",
-      "tier": "codex-sol",
-      "cost": "high",
-      "no_implement": true
+      "cost": "free",
+      "vendor": "opencode",
+      "level": 4
     }
   },
   "health": {},

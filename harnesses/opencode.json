@@ -43,5 +43,7 @@
   "tokens": {
     "kind": "opencode_db",
     "path": "$XDG_DATA_HOME/opencode/opencode.db"
-  }
+  },
+  "coordinator_env": [],
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
 }

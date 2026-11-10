@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""premortem <PLAN.md> --planner <KEY> [--repo DIR] [--k 1] [--exclude-vendor V[,V]] [--exclude KEY[,KEY]] [--allow-mid] [--only-pass 1|2] [--out-dir DIR] [--dry-run]
+"""premortem <PLAN.md> --planner <KEY> [--repo DIR] [--k 1] [--exclude-vendor V[,V]] [--exclude KEY[,KEY]] [--only-pass 1|2] [--out-dir DIR] [--dry-run]
 
 Adversarial pre-mortem of a project plan by k high-tier models from k different vendors (default k=1: one
 reviewer, outside the planner's vendor), before any Linear ticket exists. Each reviewer is told: "we are at the
@@ -16,8 +16,9 @@ similarity), ranks by probability x impact and writes:
 Hard rules (fail closed):
 - --planner <roster key> is required (or --exclude-vendor): the planner's vendor and model id are excluded on every
   account, so a model never reviews its own plan;
-- reviewers come from the `premortem` and `plan_review` pools only, cost `high` only (--allow-mid adds `mid`), k
-  distinct vendors; when fewer are available the run is degraded, never filled with a second model of the same vendor;
+- reviewers are Tier 1 only (roles premortem / plan_review, drawn at random weighted by the credit left on each
+  account), k distinct vendors; when fewer are available the run is degraded, never filled with a second model of the
+  same vendor nor with another tier (the old --allow-mid is refused);
 - a reviewer that modified the tree, or whose output does not parse, does not count.
 
 --out-dir DIR writes every file above to DIR instead of <repo>/.autopilot/plan/ (`bin/milestone add` uses it to keep a
@@ -70,14 +71,15 @@ if planner:
 if not ex_vendors:
     sys.exit('premortem: --planner <roster key> (or --exclude-vendor <vendor>) is required: a model must not review its own plan')
 EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, ad=ad)
-floor = {'high', 'mid'} if '--allow-mid' in args else {'high'}
-pick, vendors = lib.pick_reviewers(reg, ['premortem', 'plan_review'], k, EX, ad, cost_floor=floor)
+if '--allow-mid' in args:
+    sys.exit('premortem: --allow-mid was removed by the tier policy: pre-mortems are Tier 1 only (run-model wait premortem, or tell the owner)')
+pick, vendors = lib.pick_reviewers(reg, ['premortem', 'plan_review'], k, EX, ad)
 names = ', '.join('%s (%s)' % (x, v) for x, v in zip(pick, vendors)) or 'none'
-print('reviewers: %s  (excluded vendors: %s; cost: %s)' % (names, ', '.join(sorted(set(ex_vendors))), '/'.join(sorted(floor))))
+print('reviewers: %s  (excluded vendors: %s; Tier 1)' % (names, ', '.join(sorted(set(ex_vendors)))))
 if '--dry-run' in args:
     sys.exit(0 if len(pick) >= k else 1)
 if not pick:
-    print('NO_REVIEWER: no healthy high-tier model outside the excluded vendors (run-model health / usage; --allow-mid; or wait: run-model wait premortem)'); sys.exit(2)
+    print('NO_REVIEWER: no healthy Tier 1 model outside the excluded vendors (run-model health / usage; wait: run-model wait premortem; tell the owner)'); sys.exit(2)
 out_dir = os.path.abspath(opt(args, '--out-dir', os.path.join(repo, '.autopilot', 'plan'))); os.makedirs(out_dir, exist_ok=True)
 plan = open(plan_path).read()
 plan_digest = lib.digest_text(plan)
@@ -103,7 +105,6 @@ def brief_for(key, n, mine, other):
 def run(key, n, mine=None, other=None):
     out = os.path.join(out_dir, f'premortem-{key}-{n}.md')
     cmd = [RM, 'run', 'review', brief_for(key, n, mine, other), out, '--cwd', repo, '--standalone', '--pool', 'premortem', '--exclude-vendor', ','.join(sorted(set(ex_vendors))), '--model', key]
-    if '--allow-mid' in args: cmd.append('--allow-mid')
     p = subprocess.run(cmd, capture_output=True, text=True)
     try: res = json.loads(p.stdout.strip().splitlines()[-1])
     except Exception: res = {'status': 'error', 'raw': p.stdout[-300:]}

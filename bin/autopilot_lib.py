@@ -5,7 +5,7 @@ Config: $AUTOPILOT_CONFIG_DIR (default ~/.config/linear-autopilot): models.json 
 harnesses/ (adapter overrides), prompts/ (template overrides). Per project: <repo>/.autopilot/state.json.
 Python 3.9+ (no match statements, no nested same-quote f-strings).
 """
-import contextlib, datetime as dt, fcntl, glob, hashlib, json, os, re, subprocess, sys, tarfile, tempfile
+import contextlib, datetime as dt, fcntl, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 HOME = os.path.dirname(HERE)
@@ -53,16 +53,33 @@ def write_json_atomic(path, data):
     os.replace(tmp, path)
 
 
-def load_reg():
+_WARNED = set()
+
+
+def load_reg(warn=True):
+    """The roster. Entries that break the tier policy (vendor -> CLI, level) are reported once per process on stderr;
+    they stay in the file (so `bin/harness` can fix or remove them) but no pool ever selects them (see `refused`)."""
     if not os.path.exists(REG):
         sys.exit('no roster at %s. Run the autopilot-init skill (bin/harness init).' % REG)
-    return read_json(REG)
+    r = read_json(REG)
+    if warn:
+        try:
+            bad = refused(r)
+        except SystemExit:
+            raise
+        except Exception:
+            bad = {}
+        for k, why in sorted(bad.items()):
+            if (k, why) not in _WARNED:
+                _WARNED.add((k, why))
+                print('roster: refused %s: %s' % (k, why), file=sys.stderr)
+    return r
 
 
 def update_reg(fn):
     """Locked read-modify-write of the roster. fn(r) mutates r and may return a value."""
     with locked(REG):
-        r = load_reg()
+        r = load_reg(warn=False)
         out = fn(r)
         write_json_atomic(REG, r)
         return out
@@ -117,9 +134,13 @@ def adapter_of(m, ad=None):
 
 
 def effective_env(m, a):
-    """The one environment a roster entry runs with, and that identity and path expansion use:
-    the process environment, then the adapter's env, then the account override (e.g. CODEX_HOME)."""
+    """The one environment a roster entry runs with, and that identity and path expansion use: the process
+    environment without the account variable (a base entry is the default account), then the adapter's env, then the
+    entry's account override (e.g. CODEX_HOME)."""
     env = dict(os.environ)
+    if a.get('account_env') and a['account_env'] not in m.get('env', {}):
+        # a base entry is the CLI's default account, whatever account the coordinator session itself runs on
+        env.pop(a['account_env'], None)
     env.update({k: os.path.expanduser(str(v)) for k, v in a.get('run', {}).get('env', {}).items()})
     env.update({k: os.path.expanduser(str(v)) for k, v in m.get('env', {}).items()})
     return env
@@ -491,16 +512,350 @@ def validate_reasons(j):
     return good, dropped
 
 
-def pick_reviewers(reg, pools, k, excluded, ad=None, cost_floor=None):
-    """k healthy keys from the pools in order, with k distinct vendors. Never relaxes the vendor rule:
-    returns fewer than k when the vendors are not there. cost_floor: set of allowed `cost` values."""
+# ---------- tier policy (owner's rule, 2026-11-09; README "Tiers") ----------
+# Every roster entry has a `level` (0-4) and a `vendor`. Pools are not hand-ordered lists any more: each role allows
+# some levels (models.json `roles`, bounded by ROLES_ALLOWED) and `pool()` builds the candidates from the roster.
+#   Tier 0 frontier ceiling: never selected automatically (owner opt-in per run: run-model --allow-tier0 --model KEY).
+#   Tier 1 flagship: plan reviews, pre-mortems, milestone adversarial reviews, coordination. Never implements, never
+#          reviews a ticket's code.
+#   Tier 2 balanced: ticket code reviews (two reviewers of distinct vendors); `--escalate` implements a stuck ticket.
+#   Tier 3 fast and cheap: ticket implementation and fix rounds.
+#   Tier 4 small: every Mistral model, every free model, old Gemini, whatever the tier table says. Trivial tasks only,
+#          never a reviewer.
+# Vendor -> CLI is fixed: a model is only ever reached through its vendor's own CLI (VENDOR_CLIS); any other vendor
+# goes through opencode (OpenCode Go or OpenRouter). An entry that breaks it is refused, not repaired.
+
+VENDOR_CLIS = {'anthropic': ('claude',), 'openai': ('codex',), 'google': ('agy',), 'mistral': ('vibe',), 'xai': ('grok', 'cursor')}
+OTHER_VENDOR_CLIS = ('opencode',)
+LEVELS = (0, 1, 2, 3, 4)
+ROLES_DEFAULT = {'implement': [3], 'fix': [3], 'review': [2], 'plan_review': [1], 'premortem': [1], 'milestone_review': [1],
+                 'coordinate': [1], 'trivial': [4]}
+ROLES_ALLOWED = {'implement': {3}, 'fix': {3}, 'review': {2}, 'plan_review': {1}, 'premortem': {1}, 'milestone_review': {1},
+                 'coordinate': {1}, 'trivial': {3, 4}}
+PLAN_ROLES = ('plan_review', 'premortem', 'milestone_review')  # review the planner's work: the planner's vendor is excluded
+REVIEW_ROLES = ('review',) + PLAN_ROLES                          # roles a `run-model run review` may take
+CHEAP_ROLES = ('implement', 'fix', 'trivial')                    # the coordinator's own account may take these, last
+# Legacy pool names (before 2026-11-09) and the role they now mean. `escalate` = one level above implement, never Tier 1.
+POOL_ROLE = {'implement': 'implement', 'implement_critical': 'implement', 'fix': 'fix', 'fix_mid': 'fix',
+             'implement_escalation': 'escalate', 'escalate': 'escalate', 'review': 'review', 'review_mid': 'review',
+             'review_high': 'review', 'plan_review': 'plan_review', 'premortem': 'premortem',
+             'milestone_review': 'milestone_review', 'coordinate': 'coordinate', 'trivial': 'trivial'}
+# subscription (gathered by /autopilot-init, never a default): paid (a plan the owner pays for), paid? (paid, plan not
+# confirmed), free (free plan, low limits), reserved (the owner keeps it for other uses: never selected). `excluded:
+# "<reason>"` on an entry, or a project's state.json `exclude` ({"<key>|<cli>/<account>|<cli>": "<reason>"}), removes
+# entries too. The coordinator's own account is not a subscription: it is detected at run time (`coordinator_account`).
+SUBSCRIPTIONS = ('paid', 'paid?', 'free', 'reserved')
+SUB_RANK = {'paid': 0, 'paid?': 1, 'free': 2}
+FREE_ID = re.compile(r'(?:[-:/]free)(?:#.*)?$|^openrouter/openrouter/free', re.I)
+# The owner's tier table (Nov 2026), first match wins, matched on the model id. models.json `tier_table` entries come
+# first. It assigns a level to a new entry and re-levels an upgraded id; Tier 4 overrides (Mistral, free) are in code.
+DEFAULT_TIER_TABLE = [
+    {'match': r'mythos|fable', 'level': 0}, {'match': r'gpt-[\d.]+-astra', 'level': 0}, {'match': r'gemini-[\d.]+-carbon', 'level': 0},
+    {'match': r'claude-opus', 'level': 1}, {'match': r'gpt-[\d.]+-sol', 'level': 1}, {'match': r'gemini-[\d.]+-argon', 'level': 1},
+    {'match': r'grok-4\.7', 'level': 1}, {'match': r'muse-spark', 'level': 1}, {'match': r'kimi-k\d', 'level': 1},
+    {'match': r'qwen[\d.]+-max', 'level': 1}, {'match': r'deepseek-v[\d.]+-pro', 'level': 1},
+    {'match': r'claude-sonnet', 'level': 2}, {'match': r'gpt-[\d.]+-terra', 'level': 2}, {'match': r'gemini-3\.8-flash(?!-lite)', 'level': 2},
+    {'match': r'grok-4\.3', 'level': 2}, {'match': r'qwen[\d.]+-plus', 'level': 2},
+    {'match': r'claude-haiku', 'level': 3}, {'match': r'gpt-[\d.]+-luna', 'level': 3}, {'match': r'gemini-[\d.]+-flash-lite', 'level': 3},
+    {'match': r'deepseek-v[\d.]+-flash', 'level': 3}, {'match': r'glm-[\d.]+-flash', 'level': 3}, {'match': r'qwen[\d.]+-flash', 'level': 3},
+    {'match': r'grok-[\d.]+-fast', 'level': 3},
+    {'match': r'glm-[\d.]+', 'level': 1},
+    {'match': r'gemini-(?:[0-2]\.|3\.[0-4](?!\d))', 'level': 4, 'why': 'old Gemini'},
+]
+
+
+def is_free_model(m):
+    return m.get('cost') == 'free' or bool(FREE_ID.search(str(m.get('model', ''))))
+
+
+def hinted_vendor(model_id):
+    """The vendor the model id names (provider prefixes included: `openrouter/anthropic/...`), or None."""
+    mid = str(model_id).lower()
+    for hint, v in VENDOR_HINTS:
+        if re.search(hint, mid):
+            return v
+    return None
+
+
+def tier_table(r):
+    return list((r or {}).get('tier_table') or []) + DEFAULT_TIER_TABLE
+
+
+def table_level(r, model_id):
+    """(level, entry) from the tier table for a model id, or (None, None)."""
+    for e in tier_table(r):
+        if re.search(e['match'], str(model_id), re.I):
+            return int(e['level']), e
+    return None, None
+
+
+def forced_four(m, a=None):
+    """Why the owner's rule puts this entry at Tier 4 whatever its level says, or None."""
+    if vendor_of(m, a) == 'mistral':
+        return 'Mistral model'
+    if is_free_model(m):
+        return 'free model'
+    return None
+
+
+def level_of(r, m, a=None):
+    """The level the policy uses: Tier 4 when forced, else the entry's `level`, else the tier table. None = unknown."""
+    if forced_four(m, a):
+        return 4
+    if m.get('level') is not None:
+        return int(m['level'])
+    return table_level(r, m.get('model', ''))[0]
+
+
+def entry_problems(r, key, m, ad=None):
+    """Why the policy refuses a roster entry ([] = valid): unknown harness, a vendor reached through another vendor's
+    CLI, a declared vendor that contradicts the model id, no level, an unknown subscription."""
+    ad = ad if ad is not None else adapters()
+    a = ad.get(m.get('cli'))
+    if not a:
+        return ["unknown harness '%s'" % m.get('cli')]
+    out = []
+    v = vendor_of(m, a)
+    hv = hinted_vendor(m.get('model', ''))
+    if hv in VENDOR_CLIS and v != hv:
+        out.append('model id %s names vendor %s but the entry says %s' % (m.get('model'), hv, v))
+    for vv in {v, hv} - {None}:
+        clis = VENDOR_CLIS.get(vv, OTHER_VENDOR_CLIS)
+        if m['cli'] not in clis:
+            out.append('%s models run only through %s, not %s' % (vv, ' or '.join(clis), m['cli']))
+    lv = level_of(r, m, a)
+    if lv is None:
+        out.append('no level (set `level` 0-4, or add the family to the tier table)')
+    elif lv not in LEVELS:
+        out.append('level %r not in 0-4' % lv)
+    if m.get('subscription') is not None and m['subscription'] not in SUBSCRIPTIONS:
+        out.append('subscription %r not in %s' % (m['subscription'], ', '.join(SUBSCRIPTIONS)))
+    return out
+
+
+def refused(r, ad=None):
+    """{key: reason} of the entries the policy refuses."""
+    ad = ad if ad is not None else adapters()
+    out = {}
+    for k, m in r.get('models', {}).items():
+        p = entry_problems(r, k, m, ad)
+        if p:
+            out[k] = '; '.join(p)
+    return out
+
+
+def roles(r):
+    """role -> allowed levels, from models.json `roles` (defaults filled in). A role that allows a level the policy
+    forbids for it (ROLES_ALLOWED) stops the program: tiers are never reshuffled by configuration."""
+    out = {k: list(v) for k, v in ROLES_DEFAULT.items()}
+    for role, lv in ((r or {}).get('roles') or {}).items():
+        if role not in ROLES_ALLOWED:
+            sys.exit('models.json roles: unknown role %r (known: %s)' % (role, ', '.join(ROLES_ALLOWED)))
+        bad = sorted(set(lv) - ROLES_ALLOWED[role])
+        if bad or not lv:
+            sys.exit('models.json roles.%s = %s breaks the tier policy (allowed: %s). Tier 0 is never automatic, Tier 1 only '
+                     'plans/pre-mortems/milestone reviews/coordinates, ticket reviews are Tier 2, implementation and fixes '
+                     'Tier 3, Tier 4 only trivial tasks.' % (role, lv, sorted(ROLES_ALLOWED[role])))
+        out[role] = list(lv)
+    impl = min(out['implement'])
+    out['escalate'] = [max(2, impl - 1)]  # one level up, never Tier 1
+    return out
+
+
+def role_of(pool_name):
+    role = POOL_ROLE.get(pool_name)
+    if not role:
+        sys.exit('unknown pool or role %r (known: %s)' % (pool_name, ', '.join(sorted(POOL_ROLE))))
+    return role
+
+
+def account_key(m, a):
+    """`<cli>/<account>`: the unit a quota belongs to."""
+    return '%s/%s' % (m['cli'], account_of(m, a))
+
+
+def detect_coordinator(ad=None):
+    """(cli, account) of the coordinator session this process runs under, or None. $AUTOPILOT_COORDINATOR
+    (`<cli>` or `<cli>/<account>`) wins; else the first adapter whose `coordinator_env` variable is set in this
+    process (Claude Code sets CLAUDECODE, ...), with the account its `account_env` gives in this process (unset = the
+    CLI's default home). Every bin/ script runs as a child of the coordinator, so it inherits that environment."""
+    ad = ad if ad is not None else adapters()
+    forced = os.environ.get('AUTOPILOT_COORDINATOR', '').strip()
+    if forced:
+        cli, _, acct = forced.partition('/')
+        a = ad.get(cli)
+        if acct or not a:
+            return cli, acct or 'default'
+        return cli, session_account(a)
+    for name, a in sorted(ad.items()):
+        if any(os.environ.get(v) for v in a.get('coordinator_env', [])):
+            return name, session_account(a)
+    return None
+
+
+def session_account(a):
+    """The account label of this process for an adapter: its `account_env` as set here (unset = default)."""
+    k = a.get('account_env')
+    v = os.environ.get(k) if k else None
+    return account_of({'cli': a['name'], 'model': '', 'env': {k: v}} if v else {'cli': a['name'], 'model': ''}, a)
+
+
+_COORD = {}
+
+
+def coordinator_account(r=None, repo=None, ad=None):
+    """(cli, account) to protect: detected from this process (see detect_coordinator), else the one recorded in the
+    project's state.json `coordinator_account` at setup (`run-model whoami --record`), else None. Never configured in
+    models.json: starting the coordinator from another account protects that one and frees the previous one."""
+    if 'v' not in _COORD:
+        v = detect_coordinator(ad)
+        if not v:
+            repo = repo or find_repo(required=False)
+            ca = (load_state(repo) if repo else {}).get('coordinator_account') or {}
+            v = (ca['cli'], ca.get('account') or 'default') if ca.get('cli') else None
+        _COORD['v'] = v
+    return _COORD['v']
+
+
+def on_coordinator_account(r, m, a=None, ca=None):
+    """True for an entry on the coordinator's own account: same CLI and same account as `coordinator_account`. Keyed on
+    the exact account, never on the vendor: another login of the same CLI is a normal account."""
+    ca = ca or coordinator_account(r)
+    if not ca or m.get('cli') != ca[0]:
+        return False
+    a = a or adapters().get(m['cli'])
+    return bool(a) and account_of(m, a) == ca[1]
+
+
+def project_excludes(repo=None):
+    """state.json `exclude` of the current project: {"<key>" | "<cli>/<account>" | "<cli>": "<reason>"}."""
+    repo = repo or find_repo(required=False)
+    return (load_state(repo) if repo else {}).get('exclude') or {}
+
+
+def excluded_reason(r, k, m, a, pex=None):
+    """Why an entry is never selected (owner's choice), or None."""
+    if m.get('excluded'):
+        return str(m['excluded'])
+    if m.get('subscription') == 'reserved':
+        return 'reserved by the owner'
+    pex = project_excludes() if pex is None else pex
+    for x in (k, account_key(m, a) if a else None, m.get('cli')):
+        if x and x in pex:
+            return 'project exclude %s: %s' % (x, pex[x])
+    return None
+
+
+def selectable(m):
+    return not m.get('excluded') and m.get('subscription') != 'reserved'
+
+
+_WHICH = {}
+
+
+def installed(a):
+    """The adapter's binary resolves to a real executable on PATH (a shell alias or function wrapping a removed
+    binary does not count: run-model runs the binary, never the user's shell)."""
+    b = a.get('binary', a.get('name'))
+    if b not in _WHICH:
+        exe = shutil.which(b)
+        _WHICH[b] = bool(exe and os.path.isfile(os.path.realpath(exe)) and os.access(os.path.realpath(exe), os.X_OK))
+    return _WHICH[b]
+
+
+SUB_WEIGHT = {'paid': 1.0, 'paid?': 0.7, 'free': 0.25}
+
+
+def credit_left(r, acct):
+    """Fraction of credit left on an account (0..1) from the latest `run-model usage` reading (models.json `usage_seen`,
+    the most used window wins), or None when unknown or older than 6 h."""
+    u = ((r or {}).get('usage_seen') or {}).get(acct) or {}
+    if u.get('used') is None or not u.get('at') or (now() - parse_time(u['at'])).total_seconds() > 6 * 3600:
+        return None
+    return max(0.0, min(1.0, (100 - float(u['used'])) / 100))
+
+
+def weight(r, m, acct):
+    """Draw weight of a candidate: its subscription (paid > paid? > free) times the credit left on its account
+    (unknown = neutral 0.5, near exhaustion = almost never), so every paid subscription is spent before its reset."""
+    left = credit_left(r, acct)
+    w = 0.5 if left is None else (0.02 if left < 0.1 else left)
+    return SUB_WEIGHT.get(m.get('subscription'), 0.7) * w
+
+
+def rng(r=None):
+    """Random source of the draws: seeded by $AUTOPILOT_SEED or models.json `seed` for reproducible runs and tests."""
+    import random
+    seed = os.environ.get('AUTOPILOT_SEED') or (r or {}).get('seed')
+    return random.Random(seed) if seed not in (None, '') else random.Random()
+
+
+def candidates(r, name, ad=None):
+    """Every key that may take a role (or a legacy pool name): a valid, selectable entry (not `excluded`, not
+    `reserved`, not in the project's `exclude`) whose policy level is allowed for the role (Tier 0 never) and whose CLI is installed. Unordered."""
+    ad = ad if ad is not None else adapters()
+    role = role_of(name)
+    allowed = set(roles(r)[role])
+    bad = refused(r, ad)
+    pex = project_excludes()
+    out = []
+    for k, m in r.get('models', {}).items():
+        a = ad.get(m.get('cli'))
+        if k in bad or not a or excluded_reason(r, k, m, a, pex) or level_of(r, m, a) not in allowed or not installed(a):
+            continue
+        out.append(k)
+    return out
+
+
+def pool(r, name, ad=None, rand=None):
+    """Candidates of a role in draw order: no hand-made preference. Healthy candidates off the coordinator's account
+    are drawn at random weighted by `weight` (sampling without replacement: the order is the fallback chain), then the
+    cooling ones (earliest reset first), then the coordinator's own account last: only for cheap roles (implement,
+    fix, trivial), and for Tier 1/2 roles only when the role has no other candidate at all. run-model also checks the
+    coordinator's remaining quota before using it."""
+    ad = ad if ad is not None else adapters()
+    role = role_of(name)
+    rand = rand or rng(r)
+    t = now()
+    live, cooling, coord = [], [], []
+    for k in candidates(r, name, ad):
+        m = r['models'][k]; a = ad[m['cli']]
+        if on_coordinator_account(r, m, a):
+            coord.append(k); continue
+        h = r.get('health', {}).get(k)
+        if h and parse_time(h['until']) > t:
+            cooling.append((h['until'], k))
+        else:
+            live.append((weight(r, m, account_key(m, a)), k))
+    order = []
+    while live:
+        tot = sum(w for w, _ in live)
+        x = rand.random() * tot
+        for i, (w, k) in enumerate(live):
+            x -= w
+            if x <= 0 or i == len(live) - 1:
+                order.append(k); live.pop(i); break
+    order += [k for _, k in sorted(cooling)]
+    if coord and (role in CHEAP_ROLES or not order):
+        order += coord
+    return order
+
+
+def pools(r, ad=None):
+    ad = ad if ad is not None else adapters()
+    return {role: pool(r, role, ad) for role in list(ROLES_DEFAULT) + ['escalate']}
+
+
+def pick_reviewers(reg, pool_names, k, excluded, ad=None):
+    """k healthy keys of k distinct vendors from the roles' candidates: the first drawn at random (weighted, see
+    `pool`), each next one drawn among the remaining candidates of another vendor. Never relaxes the vendor rule nor
+    the tier: returns fewer than k when the vendors are not there (the caller waits or alerts)."""
     ad = ad or adapters()
+    rand = rng(reg)
     pick, vendors = [], []
-    for x in dict.fromkeys(x for p in pools for x in reg['pools'].get(p, [])):
+    for x in dict.fromkeys(x for p in pool_names for x in pool(reg, p, ad, rand)):
         m = reg['models'].get(x)
         if not m or not healthy(reg, x) or x in excluded:
-            continue
-        if cost_floor and m.get('cost', 'mid') not in cost_floor:
             continue
         v = vendor_of(m, ad.get(m['cli']))
         if v in vendors:
@@ -509,3 +864,52 @@ def pick_reviewers(reg, pools, k, excluded, ad=None, cost_floor=None):
         if len(pick) == k:
             break
     return pick, vendors
+
+
+def vendor_ready_at(reg, pool_names, k, excluded, ad=None):
+    """When k distinct vendors of the roles' candidates (minus `excluded`) will be healthy: now when they are, the
+    k-th earliest per-vendor cooldown end otherwise, None when fewer than k vendors exist at all (configuration)."""
+    ad = ad or adapters()
+    t = now(); best = {}
+    for x in dict.fromkeys(x for p in pool_names for x in candidates(reg, p, ad)):
+        if x in excluded:
+            continue
+        m = reg['models'][x]
+        if role_of(pool_names[0]) not in CHEAP_ROLES and on_coordinator_account(reg, m, ad.get(m['cli'])):
+            continue
+        h = reg.get('health', {}).get(x)
+        until = parse_time(h['until']) if h and parse_time(h['until']) > t else t
+        v = vendor_of(m, ad.get(m['cli']))
+        best[v] = min(best.get(v, until), until)
+    ends = sorted(best.values())
+    return ends[k - 1] if len(ends) >= k else None
+
+
+def raise_alert(repo, kind, key, title, message, details=None):
+    """Raise (or refresh) one CRITICAL alert outside run-model's own recomputed set (e.g. a review that cannot find two
+    Tier-2 vendors, the coordinator's quota reserve). It stays until resolved by `resolve_alert` and acknowledged.
+    Prints the `CRITICAL:` line; a new alert also posts a Linear project update when the project is known."""
+    t = now()
+
+    def fn(al):
+        cur = next((a for a in al if a['kind'] == kind and a['key'] == key and not a.get('resolved_at')), None)
+        if cur:
+            cur.update(message=message, details=details or {}, updated_at=t.isoformat()); return cur, False
+        al.append({'id': '%s-%s' % (t.strftime('%Y%m%d-%H%M'), re.sub(r'[^\w.-]+', '-', key)), 'level': 'CRITICAL', 'kind': kind,
+                   'key': key, 'at': t.isoformat(), 'title': title, 'message': message, 'details': details or {}})
+        return al[-1], True
+    a, new = update_alerts(repo, fn)
+    print('CRITICAL: %s (alert %s; bin/alert list)' % (message, a['id']), file=sys.stderr)
+    pid = (load_state(repo) if repo else {}).get('project_id') or ''
+    if new and pid and not pid.startswith('<'):
+        p = subprocess.run([os.path.join(HERE, 'linear'), 'project-update', pid, '%s\n\n%s\n\nRaised at %s.' % (title, message, a['at'][:16])],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        update_alerts(repo, lambda al: [x.__setitem__('linear', 'posted' if p.returncode == 0 else (p.stderr or p.stdout)[-200:]) for x in al if x['id'] == a['id']])
+    return a
+
+
+def resolve_alert(repo, kind, key):
+    if not os.path.exists(alerts_path(repo)):
+        return
+    t = now().isoformat()
+    update_alerts(repo, lambda al: [a.__setitem__('resolved_at', t) for a in al if a['kind'] == kind and a['key'] == key and not a.get('resolved_at')])

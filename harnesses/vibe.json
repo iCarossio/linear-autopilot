@@ -27,5 +27,7 @@
   "tokens": {
     "kind": "none",
     "note": "Mistral Vibe keeps no token counts in its session store (only the context size); see /usage in an interactive session"
-  }
+  },
+  "coordinator_env": [],
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
 }
