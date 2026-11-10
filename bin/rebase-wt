@@ -1,11 +1,18 @@
 #!/bin/bash
-# rebase-wt <worktree>  : bring a worktree's ticket work onto the current project branch head.
-# - uncommitted work: stash (unique, found by its own message, never by stack position) -> fast-forward -> apply.
-# - work already committed on the ticket branch (e.g. after a `finish` cherry-pick conflict + `git cherry-pick --abort`
-#   in the repo): rebase the ticket branch onto the project branch instead.
+# rebase-wt <worktree> [branch] : bring a worktree's ticket work onto the current project branch head.
+# branch: the project branch (default: the branch of the main checkout, the first entry of `git worktree list`).
+# - uncommitted work only: stash (unique, found by its own message, never by stack position) -> fast-forward -> apply.
+# - work already committed on the ticket branch (a `finish` whose cherry-pick conflicted, a merge round that finished
+#   a rebase): the uncommitted work (untracked files included) is committed on the ticket branch as `autopilot-wip ...`,
+#   every ticket commit is rebased onto the project branch, then the wip commit is turned back into uncommitted work.
+#   On a conflict the rebase is LEFT IN PROGRESS so that a merge round can resolve it (`git add`,
+#   `GIT_EDITOR=true git rebase --continue`); the wip commit then stays a commit of the ticket branch (`finish` and
+#   `pipeline merge` squash the ticket into one commit). Aborting it instead would only make every later call hit the
+#   same conflict again.
+# - a rebase already in progress, or unresolved (UU) files: nothing is touched, CONFLICT is reported again.
 # The whole operation holds a repo-level lock: the stash stack is shared by every worktree of a repo, so two
-# parallel rebase-wt calls must never interleave. On conflicts it prints the files and exits 3 (the stash is kept, or
-# the rebase is aborted): resolve in the worktree, then `git reset -q && git stash drop <ref>` for a kept stash.
+# parallel rebase-wt calls must never interleave. On conflicts it prints `CONFLICT ...` and the files and exits 3
+# (a stash kept is named: resolve in the worktree, then `git reset -q && git stash drop <ref>`).
 set -e
 W=$1; [ -d "$W" ] || { echo "rebase-wt: no such worktree $W"; exit 1; }
 cd "$W"
@@ -14,23 +21,39 @@ LOCK="$GITDIR/autopilot-rebase.lock"
 for i in $(seq 1 600); do mkdir "$LOCK" 2>/dev/null && break; sleep 1; [ "$i" = 600 ] && { echo "rebase-wt: lock held for 10 min: $LOCK"; exit 1; }; done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 # The first entry of `git worktree list` is the main checkout, which sits on the project branch.
-BRANCH=$(git worktree list --porcelain | awk '/^branch /{print $2; exit}' | sed 's#refs/heads/##')
+BRANCH=${2:-$(git worktree list --porcelain | awk '/^branch /{print $2; exit}' | sed 's#refs/heads/##')}
 TAG="rebase-wt-$(basename "$W")-$$-$(date +%s)"
+unmerged() { git diff --name-only --diff-filter=U; }
+in_rebase() { [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; }
+if in_rebase; then
+  echo "CONFLICT (a rebase onto $BRANCH is in progress in $W: resolve, git add, GIT_EDITOR=true git rebase --continue)"; unmerged; exit 3
+fi
+if [ -n "$(unmerged)" ]; then echo "CONFLICT (unresolved files in $W: resolve them, then git add them)"; unmerged; exit 3; fi
+AHEAD=$(git rev-list --count "$BRANCH..HEAD")
+if [ "$AHEAD" != 0 ]; then
+  WIP="autopilot-wip $TAG"
+  if [ -n "$(git status --porcelain)" ]; then
+    ID=(); git config user.email >/dev/null || ID=(-c user.name=autopilot -c user.email=autopilot@localhost)
+    git add -A; git "${ID[@]}" commit -q --no-verify -m "$WIP"
+  fi
+  if ! git rebase "$BRANCH" >/dev/null 2>&1; then
+    if in_rebase; then
+      echo "CONFLICT (rebase of the ticket commits onto $BRANCH left in progress in $W: resolve, git add, GIT_EDITOR=true git rebase --continue; the uncommitted work is the commit \"$WIP\")"
+      unmerged; exit 3
+    fi
+    [ "$(git log -1 --format=%s)" = "$WIP" ] && git reset -q HEAD~1
+    echo "rebase-wt: git rebase onto $BRANCH failed in $W"; exit 1
+  fi
+  if [ "$(git log -1 --format=%s)" = "$WIP" ]; then git reset -q HEAD~1; fi
+  echo "REBASED $(git rev-parse --short HEAD)"; exit 0
+fi
 git stash push -u -q -m "$TAG" || true
 REF=$(git stash list --format='%gd %gs' | awk -v t="$TAG" '$0 ~ t {print $1; exit}')
-AHEAD=$(git rev-list --count "$BRANCH..HEAD")
-if [ "$AHEAD" = 0 ]; then
-  git merge -q --ff-only "$BRANCH"
-else
-  if ! git rebase "$BRANCH" >/dev/null 2>&1; then
-    echo "CONFLICT (rebase of $AHEAD committed ticket commit(s) onto $BRANCH)"; git diff --name-only --diff-filter=U; git rebase --abort
-    [ -n "$REF" ] && echo "stash kept: $REF ($TAG)"; exit 3
-  fi
-fi
+git merge -q --ff-only "$BRANCH"
 if [ -n "$REF" ]; then
   SHA=$(git rev-parse "$REF")
   if ! git stash apply -q "$SHA" 2>/dev/null; then
-    echo "CONFLICT"; git diff --name-only --diff-filter=U; echo "stash kept: $REF ($TAG)"; exit 3
+    echo "CONFLICT"; unmerged; echo "stash kept: $REF ($TAG)"; exit 3
   fi
   DROP=$(git stash list --format='%gd %gs' | awk -v t="$TAG" '$0 ~ t {print $1; exit}')
   [ -n "$DROP" ] && git stash drop -q "$DROP"

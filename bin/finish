@@ -1,12 +1,16 @@
 #!/bin/bash
 # finish <ISSUE> "<commit subject>" "<body>"
-# Commit the ticket in its worktree (<worktrees_dir>/<ISSUE>, or $WT), cherry-pick every commit of the ticket branch that is
-# not on the project branch (one commit normally; the whole range after a conflict recovery) onto the project branch, remove
-# the worktree, push if state.json says push: true. Prints `COMMITTED <sha> <ISSUE>`. Set NO_WT=1 to commit directly
-# in the repo (a ticket worked on without a worktree); otherwise a missing worktree is an error, never a silent fallback.
+# Commit the ticket in its worktree (<worktrees_dir>/<ISSUE>, or $WT) as ONE commit, cherry-pick it onto the project branch,
+# remove the worktree, push if state.json says push: true. A ticket branch that already has commits of its own (a recovery
+# after a conflict, a merge round's rebase) is squashed with the uncommitted work into that one commit first: a range
+# cherry-pick could take the commits only partly or leave the worktree diverged. Prints `COMMITTED <sha> <ISSUE>`.
+# Set NO_WT=1 to commit directly in the repo (a ticket worked on without a worktree); otherwise a missing worktree is an
+# error, never a silent fallback.
 # Exit 3 on a cherry-pick conflict: resolve in the repo (package.json/lockfiles: take the union of both sides' scripts and
 # deps, then reinstall), `git add`, `GIT_EDITOR=true git cherry-pick --continue`, then remove the worktree and branch
 # yourself; or `git cherry-pick --abort`, `rebase-wt <wt>` (it rebases the committed ticket) and run finish again.
+# `pipeline merge` does that sequence for you (rebase first, squash, finish, abort and hand a conflict to a merge round).
+# Exit 3 too when the worktree has a rebase in progress or unresolved files (finish the merge round first).
 # Exit 4 when the push did not reach the remote.
 set -e
 ID=$1; SUBJ=$2; BODY=$3
@@ -23,9 +27,15 @@ WT="${WT:-$WTDIR/$ID}"  # WT= overrides when the worktree is named after a paren
 case "$SUBJ" in *"[$ID]"|*"[${ID%[a-z]}]") FULL="$SUBJ" ;; *) FULL="$SUBJ [$ID]" ;; esac
 commit() { if [ -n "$TRAILER" ]; then git commit -q -m "$FULL" -m "$BODY" -m "$TRAILER"; else git commit -q -m "$FULL" -m "$BODY"; fi; }
 if [ -d "$WT" ]; then
-  cd "$WT"; WTBRANCH=$(git branch --show-current); git add -A
-  if ! git diff --cached --quiet; then commit; fi   # a ticket already committed (recovery after a conflict) has nothing new to commit
-  BASE=$(git merge-base "$BRANCH" HEAD); RANGE=$(git rev-list --count "$BASE..HEAD")
+  cd "$WT"; WTBRANCH=$(git branch --show-current)
+  if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ] || [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+    echo "CONFLICT $ID (the worktree has a rebase in progress or unresolved files: resolve them first)"; git diff --name-only --diff-filter=U; exit 3
+  fi
+  git add -A; BASE=$(git merge-base "$BRANCH" HEAD); OWN=$(git rev-list --count "$BASE..HEAD")
+  if [ "$OWN" -gt 1 ] || { [ "$OWN" = 1 ] && ! git diff --cached --quiet; }; then
+    git reset -q --soft "$BASE"; commit                # squash: the ticket's commits plus the new changes, one commit
+  elif ! git diff --cached --quiet; then commit; fi    # a ticket already committed once with nothing new keeps its commit
+  RANGE=$(git rev-list --count "$BASE..HEAD")
   [ "$RANGE" -gt 0 ] || { echo "finish: nothing to integrate for $ID (no changes, no commits ahead of $BRANCH)"; exit 1; }
   cd "$M"; git cherry-pick "$BASE..$WTBRANCH" >/dev/null || { echo "CONFLICT $ID"; git diff --name-only --diff-filter=U; exit 3; }
   git worktree remove --force "$WT"; git branch -q -D "$WTBRANCH"
