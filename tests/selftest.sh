@@ -168,6 +168,34 @@ $H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-b 
 R=$(FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-2.md --cwd "$PWD" --escalate 2>$SCR/esc.err | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['level'])")
 check "--escalate goes 3 -> 2, never Tier 1, logged" "$R $(grep -c 'escalate T-2: Tier 3 -> Tier 2' $SCR/esc.err) $($H/bin/state get escalations.T-2 | python3 -c "import json,sys;print(json.load(sys.stdin)[0]['to'])")" "ok 2 1 [2]"
 git checkout -q -- tracked.txt
+
+echo "--- automatic escalation: 1 implementation + 2 fixes on Tier 3, then Tier 2 (escalate_after_round)"
+IMPL() { FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$@" 2>>$SCR/auto.err | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['level'],d['run_role'])"; git checkout -q -- tracked.txt; }
+B4_1=$($H/bin/mkbrief impl T-4 1 .autopilot/tickets/T-1.md); B4_2=$($H/bin/mkbrief impl T-4 2 .autopilot/tickets/T-1.md); B4_3=$($H/bin/mkbrief impl T-4 3 .autopilot/tickets/T-1.md)
+check "rounds 1-3 draw Tier 3 (round 1 implement, rounds 2-3 fix)" "$(IMPL "$B4_1" .autopilot/out/T-4-impl-1.md --cwd "$PWD"); $(IMPL "$B4_2" .autopilot/out/T-4-impl-2.md --cwd "$PWD" --role fix); $(IMPL "$B4_3" .autopilot/out/T-4-impl-3.md --cwd "$PWD" --role fix)" "ok 3 implement; ok 3 fix; ok 3 fix"
+check "no escalation logged for rounds 1-3" "$($H/bin/state get escalations.T-4 2>/dev/null | grep -c round)" "0"
+B4_4=$($H/bin/mkbrief impl T-4 4 .autopilot/tickets/T-1.md)
+check "round 4 (brief name) draws Tier 2 automatically, --role fix included" "$(IMPL "$B4_4" .autopilot/out/T-4-impl-4.md --cwd "$PWD" --role fix --prefer fk-f)" "ok 2 escalate"
+check "the automatic escalation is logged with its round" "$(grep -c 'escalate T-4: Tier 3 -> Tier 2 (round 4 > escalate_after_round 3)' $SCR/auto.err) $($H/bin/state get escalations.T-4 | python3 -c "import json,sys;e=json.load(sys.stdin);print(len(e),e[0]['to'],e[0]['round'])")" "1 1 [2] 4"
+check "the escalated Tier 2 implementer is recorded" "$($H/bin/state get implementers.T-4 | grep -c '"fk-f"')" "1"
+check "--no-escalate keeps Tier 3 on round 4 (merge-only round)" "$(IMPL "$B4_4" .autopilot/out/T-4-impl-4m.md --cwd "$PWD" --role fix --no-escalate)" "ok 3 fix"
+echo "custom" > "$SCR/custom-impl.md"
+check "--round 5 with --issue escalates a custom-named brief" "$(IMPL "$SCR/custom-impl.md" .autopilot/out/x-impl.md --cwd "$PWD" --issue T-4 --round 5)" "ok 2 escalate"
+check "--round 2 keeps Tier 3 whatever the output name says" "$(IMPL "$SCR/custom-impl.md" .autopilot/out/T-4-impl-9.md --cwd "$PWD" --issue T-4 --round 2)" "ok 3 implement"
+check "no --round: the output name <ISSUE>-impl-<n>.md gives the round" "$(IMPL "$SCR/custom-impl.md" .autopilot/out/T-4-impl-6.md --cwd "$PWD" --issue T-4)" "ok 2 escalate"
+check "a trivial run is never escalated" "$(IMPL "$B4_4" .autopilot/out/T-4-impl-4t.md --cwd "$PWD" --role trivial --model fk-e)" "ok 4 trivial"
+check "--round 0 refused" "$(FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B4_4" .autopilot/out/z.md --cwd "$PWD" --round 0 >/dev/null 2>&1; echo $?)" "1"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['escalate_after_round']=4;json.dump(r,open(p,'w'))"
+B4_5=$($H/bin/mkbrief impl T-4 5 .autopilot/tickets/T-1.md)
+check "escalate_after_round 4: round 4 stays Tier 3, round 5 escalates" "$(IMPL "$B4_4" .autopilot/out/T-4-impl-4.md --cwd "$PWD" --role fix); $(IMPL "$B4_5" .autopilot/out/T-4-impl-5.md --cwd "$PWD" --role fix)" "ok 3 fix; ok 2 escalate"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r.pop('escalate_after_round');json.dump(r,open(p,'w'))"
+B5=$($H/bin/mkbrief impl T-5 4 .autopilot/tickets/T-1.md)
+check "escalated round 4 on T-5 by fk-f" "$(IMPL "$B5" .autopilot/out/T-5-impl-4.md --cwd "$PWD" --prefer fk-f)" "ok 2 escalate"
+RB5=$($H/bin/mkbrief review T-5 4 .autopilot/tickets/T-1.md)
+$H/bin/run-model run review "$RB5" .autopilot/out/x.md --cwd "$PWD" --model fk-f >/dev/null 2>&1; check "the escalated Tier 2 implementer never reviews that ticket" "$?" "4"
+check "the review draw finds another Tier 2 model (fk-d, another vendor)" "$(FAKE_BEHAVIOUR=approve $H/bin/review T-5 4 "$RB5" | grep -cE '^fk-d: approve') $(ls .autopilot/out/ | grep -c 'T-5-rev-fk-f')" "1 0"
 $H/bin/harness add-model bad1 --cli opencode --model anthropic/claude-x-6 --level 2 >/dev/null 2>&1; check "vendor -> CLI: Claude through opencode refused at add-model" "$?" "1"
 $H/bin/harness add-model bad2 --cli cursor --model claude-x-6 --level 2 >/dev/null 2>&1; check "vendor -> CLI: Claude through cursor refused" "$?" "1"
 $H/bin/harness add-model bad3 --cli agy --model gpt-x-7 --level 2 >/dev/null 2>&1; check "vendor -> CLI: GPT through agy refused" "$?" "1"
