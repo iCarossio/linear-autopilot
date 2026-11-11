@@ -62,6 +62,8 @@ From promoted ideas: replace every `TODO` (the real add refuses one; `--dry-run`
 
 Then `bin/milestone add <spec> --dry-run`: fix every validation error, and show the user the stages and the ETA of every milestone with this one added. If it pushes an existing milestone's ETA, say so now.
 
+From this first `--dry-run` on, the milestone is **proposed**: `bin/eta` and `bin/pipeline status` show it as its own bar, "<name> (proposed) ... (awaiting approval)", on a what-if schedule, so the owner sees it in every progress update without asking (owner, 2026-11-10: "I don't see the new milestone"). The approval (`--approved`) turns it into a real milestone; a draft the owner drops is removed with `bin/milestone proposed --drop <id>`.
+
 ## 3. Adversarial review (pre-mortem + plan review)
 
 ```

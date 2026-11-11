@@ -32,6 +32,8 @@ Unacknowledged CRITICAL alerts (`bin/alert`, e.g. a vendor out of quota on every
 `CRITICAL:` line each, so no message that starts with the ETA can leave them out.
 
   eta [-v] [--json]      --json: one JSON object (overall + per milestone + replan + alerts) instead of the text lines
+Proposed milestones (state.json `proposed_milestones`, set by `bin/milestone add` before approval) are added on a
+what-if schedule and printed with "(proposed) ... (awaiting approval)"; such a reading writes no history and no slip.
 ETA_STATE=<file> reads that state instead (a what-if schedule: `bin/milestone add --dry-run`); no history is written.
 """
 import datetime as dt, json, os, re, subprocess, sys
@@ -53,6 +55,20 @@ def find_repo():
 
 M = find_repo()
 S = json.load(open(os.environ.get('ETA_STATE') or os.path.join(M, '.autopilot', 'state.json')))
+WITH_PROPOSALS = False  # a what-if reading: no slip signal, no history (the approved plan is the reference)
+# Proposed milestones (drafted with `bin/milestone add`, not yet approved) show as their own bars, tagged, on a what-if
+# schedule: the owner sees the effect of a milestone the moment it is drafted, not only after approval.
+if S.get('proposed_milestones') and not os.environ.get('ETA_STATE'):
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as _f:
+        _wi = _f.name
+    _r = subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'milestone'), 'whatif', '--out', _wi],
+                        cwd=M, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                        env=dict(os.environ, AUTOPILOT_REPO=M))
+    if _r.returncode == 0:
+        S = json.load(open(_wi))
+        WITH_PROPOSALS = True
+    os.unlink(_wi)
 sizes, est = S.get('sizes', {}), S.get('est', {})
 SML = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
 
@@ -158,13 +174,13 @@ except (OSError, ValueError):
     pass
 # Slip: compare with the oldest reading taken 60-180 min ago.
 past = [h for h in hist if 60 <= (now - dt.datetime.fromisoformat(h['at'])).total_seconds() / 60 <= 180]
-if past:
+if past and not WITH_PROPOSALS:
     ref = past[0]
     slip = (end - dt.datetime.fromisoformat(ref['end'])).total_seconds() / 60
     if slip > 30:
         replan.append(f"ETA slipped {slip:+.0f} min since {dt.datetime.fromisoformat(ref['at']).astimezone():%H:%M}: "
                       "find what added time, then look for work to start in parallel")
-if not os.environ.get('ETA_STATE') and (not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300):
+if not os.environ.get('ETA_STATE') and not WITH_PROPOSALS and (not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300):
     try:
         with open(hist_path, 'a') as f:
             f.write(json.dumps({'at': now.isoformat(), 'end': end.astimezone(dt.timezone.utc).isoformat(),
@@ -218,8 +234,10 @@ def spread(m):
 
 rows = []
 if milestones:
-    groups = [(m.get('id') or m.get('name'), m.get('name') or m.get('id'), m.get('linear_id'), list(dict.fromkeys(m.get('issues', []))))
+    groups = [(m.get('id') or m.get('name'), (m.get('name') or m.get('id')) + (' (proposed)' if m.get('proposed') else ''),
+               m.get('linear_id'), list(dict.fromkeys(m.get('issues', []))))
               for m in milestones]
+    proposed_ids = {m.get('id') for m in milestones if m.get('proposed')}
     claimed = {t for g in groups for t in g[3]}
     other = [t for t in list(dict.fromkeys(list(done) + list(inflight) + queue)) if t not in claimed]
     if other:
@@ -231,7 +249,8 @@ if milestones:
         rows.append({'id': mid, 'name': name, 'linear_id': lid, 'pct': round(pct, 4), 'total': len(items), 'done': len(d),
                      'inflight': len(f), 'todo': len(q), 'status': 'open' if open_ else 'done',
                      'minutes': round(m_end), 'spread_min': spread(m_end) if open_ else 0,
-                     'end': (now + dt.timedelta(minutes=m_end)).astimezone() if open_ else None})
+                     'end': (now + dt.timedelta(minutes=m_end)).astimezone() if open_ else None,
+                     'proposed': mid in proposed_ids})
 pct = progress(list(dict.fromkeys(list(done) + list(inflight) + queue)))[0]
 alerts = [] if os.environ.get('ETA_STATE') else lib.alerts(M)
 if '--json' in sys.argv:
@@ -246,6 +265,7 @@ if rows:
     w = max(len(r['name']) for r in rows)
     for r in rows:
         when = f"ETA {r['end']:%a %H:%M %Z} (±{r['spread_min']} min)" if r['end'] else 'done'
+        if r.get('proposed'): when += '  (awaiting approval)'
         print(f"{r['name']:<{w}}  [{bar(r['pct'], 20)}] {r['pct']:.0%}  {r['done']}/{r['total']} done, "
               f"{r['inflight']} in flight  |  {when}")
 print(f"[{bar(pct)}] {pct:.0%}  {len(done)} done, {len(inflight)} in flight, {len(queue)} to do  |  "

@@ -19,6 +19,8 @@ and their Linear milestone never gets a target date.
                 [--origin plan|extension] [--premortem PATH] [--plan-review PATH] --by <who> --source <kind:ref> [--dry-run]
   milestone recompute [--from-linear] [--dry-run]
   milestone sync [--decision D-n]... [--dry-run]
+  milestone proposed [--drop ID]         list (or drop) milestones drafted but not approved; bin/eta shows them
+  milestone whatif --out PATH           state with every proposed milestone added (used by bin/eta)
 
 add: extends a running project with a milestone, in this order, never skipping a step without a logged flag:
   a. validation (unknown dependencies, cycles, duplicate slugs, a KPI without target or measurement);
@@ -353,6 +355,53 @@ def what_if(st, mid, spec, resolved, ids):
     return w
 
 
+# ---------- proposed milestones (visible in bin/eta before approval) ----------
+
+def propose(repo, mid, spec_path, name):
+    """Mark a drafted milestone as proposed: bin/eta shows it (awaiting approval) until it is approved or dropped."""
+    def fn(s):
+        if any(m.get('id') == mid for m in s.get('milestones') or []): return
+        s.setdefault('proposed_milestones', {})[mid] = {'name': name, 'spec': os.path.abspath(spec_path),
+                                                        'at': lib.now().isoformat()}
+    lib.update_state(repo, fn)
+
+
+def whatif_proposed(repo, st):
+    """The state with every proposed milestone added (tickets as +slug), stages recomputed; None without proposals."""
+    props = {k: v for k, v in (st.get('proposed_milestones') or {}).items()
+             if not any(m.get('id') == k for m in st.get('milestones') or [])}
+    if not props: return None
+    w = json.loads(json.dumps(st)); w.pop('proposed_milestones', None)
+    for mid, p in props.items():
+        try: spec = lib.read_json(p['spec'])
+        except (OSError, ValueError): continue
+        status_path = os.path.join(repo, '.autopilot', 'plan', 'milestones', mid, 'status.json')
+        status = lib.read_json(status_path) if os.path.exists(status_path) else {}
+        resolved = status.get('resolved')
+        if not resolved:
+            errs, resolved = validate(spec, st, repo, mid)
+            if errs: continue
+        ids = {t['slug']: '+' + t['slug'] for t in spec['tickets']}
+        w = what_if(w, mid, spec, resolved, ids)
+        w['milestones'][-1]['proposed'] = True
+    apply_schedule(w)
+    return w
+
+
+def cmd_whatif(a):
+    repo = lib.find_repo(); w = whatif_proposed(repo, lib.load_state(repo))
+    if w is None: sys.exit(4)
+    lib.write_json_atomic(a.out, w)
+
+
+def cmd_proposed(a):
+    repo = lib.find_repo()
+    if a.drop:
+        lib.update_state(repo, lambda s: (s.get('proposed_milestones') or {}).pop(a.drop, None)); print(f'dropped {a.drop}'); return
+    for mid, p in (lib.load_state(repo).get('proposed_milestones') or {}).items():
+        print(f"{mid:<16} {p['name']:<40} proposed {p['at'][:16]}  {p['spec']}")
+
+
 # ---------- commands ----------
 
 def cmd_list(a):
@@ -387,6 +436,8 @@ def cmd_add(a):
             sys.exit(1)
         status['resolved'] = resolved
     resolved = status['resolved']
+    if not applied and not a.approved:
+        propose(repo, mid, a.spec, spec['name'])  # bin/eta shows it as proposed until approval or `milestone proposed --drop`
     if a.dry_run:
         ids = {t['slug']: '+' + t['slug'] for t in spec['tickets']}
         w = what_if(st, mid, spec, resolved, ids)
@@ -526,6 +577,7 @@ def cmd_add(a):
             for t in spec['tickets']:
                 s['blockers'][ids[t['slug']]] = [ids.get(b, b) for b in resolved[t['slug']]]
                 s['sizes'][ids[t['slug']]] = units(t.get('estimate', 1))
+            (s.get('proposed_milestones') or {}).pop(mid, None)
             return apply_schedule(s)
 
         for x in lib.update_state(repo, fn): print(f'warning: {x}')
@@ -754,12 +806,15 @@ def main():
     ao.add_argument('--description'); ao.add_argument('--why')
     ao.add_argument('--origin', choices=('plan', 'extension'), default='plan'); ao.add_argument('--premortem'); ao.add_argument('--plan-review')
     ao.add_argument('--by', required=True); ao.add_argument('--source', required=True); ao.add_argument('--dry-run', action='store_true')
+    wi = sub.add_parser('whatif'); wi.add_argument('--out', required=True)
+    pr = sub.add_parser('proposed'); pr.add_argument('--drop')
     rc = sub.add_parser('recompute'); rc.add_argument('--from-linear', action='store_true'); rc.add_argument('--dry-run', action='store_true')
     sy = sub.add_parser('sync'); sy.add_argument('--decision', action='append'); sy.add_argument('--dry-run', action='store_true')
     a = p.parse_args()
     if a.cmd == 'add' and any(x is not None and not x.strip() for x in (a.skip_premortem, a.skip_review)):
         die('--skip-premortem / --skip-review need the reason')
-    {'list': cmd_list, 'seed': cmd_seed, 'add': cmd_add, 'adopt': cmd_adopt, 'recompute': cmd_recompute, 'sync': cmd_sync}[a.cmd](a)
+    {'list': cmd_list, 'seed': cmd_seed, 'add': cmd_add, 'adopt': cmd_adopt, 'recompute': cmd_recompute, 'sync': cmd_sync,
+     'whatif': cmd_whatif, 'proposed': cmd_proposed}[a.cmd](a)
 
 
 if __name__ == '__main__':
