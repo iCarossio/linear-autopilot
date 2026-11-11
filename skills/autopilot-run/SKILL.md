@@ -45,6 +45,7 @@ Helper scripts find the project through the nearest `.autopilot/state.json` (or 
 9. **No decision unsourced.** Every change of plan is written to the Decision log of `PLAN.md` with its source (`bin/decision add`) before you act on it, and mirrored in Linear. See "Changes of plan".
 10. **Caveman everywhere.** See "Caveman, always" at the top: you invoke the `caveman` skill first and again after every resume or compaction, `run-model` puts the rule in every model prompt, every Agent-tool prompt starts with it. Persisted text stays plain prose: code, comments, docs, commits, Linear.
 11. **The owner always sees the bars.** Every turn you end shows `bin/pipeline status` (see "ETA (always shown)"), and a 10-minute progress tick keeps them coming while you wait.
+12. **Ask the owner early for what only they can unblock.** Every heartbeat and before every update, scan for limits that block or slow progress and need the owner's decision (a better or paid model, an account, an approval); list them as `DECISION NEEDED:` lines above the bars (see "Owner-decision scan").
 
 ## Setup (once per project)
 
@@ -165,6 +166,24 @@ The steps:
 
 State each re-plan in one line in the user update: what you started, or which limit stops you. A re-plan that splits, adds, reorders or defers a ticket is a change of plan: log it (see "Changes of plan") with `--source replan:<the REPLAN line or the blocker you found>`.
 
+### Owner-decision scan (what only the owner can unblock)
+
+Some limits cannot be re-planned away: only the owner can lift them. On 2026-11-11 the certification failed three times on free-model daily limits before anyone asked the owner for a paid model; one question would have saved a day. So on every heartbeat, before every user update, and at once when the owner says they are leaving, ask yourself: **what blocks or slows progress right now, and needs a decision from the owner?**
+
+Look for:
+- **Models and spend:** a free or daily quota that fails runs (429, `free-models-per-day`); a ticket past round 3 whose findings repeat, where a stronger model or tier would converge; a role waiting more than 30 min for a tier; a paid cap or a "no paid" decision that a run keeps hitting.
+- **Accounts and access:** a missing login, subscription, token, credential, export, or a repository or service the run cannot reach; an account the owner excluded that would unblock a role.
+- **Approvals and choices:** an open gate or KPI waiting for sign-off, a pending decision (`D-<n>` with a question), a scope or product choice, a merge, publish or deploy that needs the owner.
+- **Repeated slowdowns:** the same external failure twice, an ETA that slips for a reason outside the plan.
+
+For each, write one line, the recommended option first:
+
+```
+DECISION NEEDED: <what> | blocks/slows <tickets or milestones, and roughly how much time> | options: <A (recommended), cost> / <B, cost> | until then: <what you do meanwhile>
+```
+
+Keep the open asks in `.autopilot/owner-decisions.md`, one line each with the date first raised. Show them at the top of every user update, above the bars, until the owner answers; ask again only if their impact changes. When the owner announces an absence, put every open ask in one message before they go. Never act on an ask without the answer (no spending, no excluded account, no merge). Meanwhile, apply the re-plan rules above to the parts that do not depend on it. The answer is a decision: log it with `--source user:"<their words>"` and remove the line.
+
 ## Merging (cherry-pick conflicts)
 
 - `package.json` / lockfiles: take the **union** of both sides' scripts and dependencies, dedupe, then reinstall to regenerate the lockfile. `.gitignore`: union.
@@ -229,7 +248,7 @@ Watch quotas with `bin/run-model usage` (the `/autopilot-usage` skill explains t
 
 **Proposed milestones are bars too.** A milestone drafted with `/autopilot-milestone` (any `bin/milestone add` before approval) shows in `bin/eta` and `bin/pipeline status` as "<name> (proposed) ... (awaiting approval)" on a what-if schedule; it never needs a separate dry-run to be visible, and such a reading records no ETA history or slip. `bin/milestone proposed` lists them, `--drop <id>` removes a rejected draft.
 
-**Every turn you end shows the bars**: whatever woke you (a progress tick, a heartbeat, an approval, an `ATTENTION:` line, a finished background job, a merge, the owner), your last message before you go back to waiting is the output of `bin/pipeline status` in a code block, plus one line on what changed since the previous one. Never end a turn silently, never end it with only "waiting". With the 10-minute progress tick the owner sees fresh bars at least every 10 minutes.
+**Every turn you end shows the bars**: whatever woke you (a progress tick, a heartbeat, an approval, an `ATTENTION:` line, a finished background job, a merge, the owner), your last message before you go back to waiting is the open `DECISION NEEDED:` lines from `.autopilot/owner-decisions.md` (if any), then the output of `bin/pipeline status` in a code block, plus one line on what changed since the previous one. Never end a turn silently, never end it with only "waiting". With the 10-minute progress tick the owner sees fresh bars at least every 10 minutes.
 
 Every handoff comment and every Linear project summary also starts with the `bin/eta` lines before the first `REPLAN:` in a code block (one bar per milestone, then the overall line; run it, never guess). In every message to the owner, use `bin/pipeline status` for it: the same bars, preceded by one line per in-flight ticket, so the owner sees what is in progress and what is executing right now. Each heartbeat also runs `bin/milestone sync`, so Linear's milestone target dates and bars follow. The line carries the machine's timezone: convert it to the user's timezone when they differ, and say so. When the ETA moves, give the cause in one line (a review sent a ticket back, a lost run, a new ticket) and what the re-plan changed. Keep its inputs current in state.json: `stages` (ordered list of parallel groups, including your own final steps), `est` per ticket (`{"min": minutes left, "at": ISO}`, set when a round starts and re-set when a review sends the ticket back), `sizes`, and `blockers` + the milestone issue lists, from which `bin/milestone recompute` derives `queue` and `stages`. When asked for a tighter bound, name what drives the error rather than inventing precision.
 
