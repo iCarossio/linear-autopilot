@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""docker-reap [--apply] [--min-age-hours H] [--keep PATTERN ...]
+"""docker-reap [--apply] [--min-age-hours H] [--keep PATTERN ...] [--only PATTERN]
 
 Remove dead containers: ones that are no longer in use by anything running on this machine.
 A container is dead when ALL of these hold:
@@ -11,23 +11,39 @@ A RUNNING container that is a service (it belongs to a docker compose project, o
 policy other than "no") is never touched: a shared stack started with `docker compose up` has no
 owning process by design, and removing it takes the owner's app down (seen: the shared Postgres).
 Containers whose name matches a --keep regex (repeatable) are never touched.
+Scope: only containers whose name matches --only (or the project's state.json `docker_reap_only` regex) are
+candidates; other projects share the Docker daemon and their containers are never removed (seen: a reaper run
+from one project removed another project's dev proxy). Without a scope it only reports, never removes.
 Without --apply it only prints what it would remove (one line per container). With --apply it runs
 `docker rm -f <name>` on exactly those names. Never restarts or stops the Docker daemon.
 Exit 0 always unless docker itself is unreachable (exit 2).
 """
-import datetime as dt, json, re, subprocess, sys
+import datetime as dt, json, os, re, subprocess, sys
 
 args = sys.argv[1:]
 apply = '--apply' in args
 min_age = 2.0
 keep = []
+only = None
 for i, a in enumerate(args):
+    if a == '--only': only = re.compile(args[i + 1])
     if a == '--min-age-hours': min_age = float(args[i + 1])
     if a == '--keep': keep.append(re.compile(args[i + 1]))
 
 ps = subprocess.run(['docker', 'ps', '-a', '--no-trunc', '--format', '{{json .}}'], capture_output=True, text=True)
 if ps.returncode != 0:
     print(f"docker-reap: docker unreachable: {ps.stderr.strip()[:200]}"); sys.exit(2)
+if only is None:
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import autopilot_lib as lib
+        pat = (lib.load_state(lib.find_repo()) or {}).get('docker_reap_only')
+        if pat: only = re.compile(pat)
+    except Exception:
+        pass
+if only is None and apply:
+    print('docker-reap: no scope (--only or state.json docker_reap_only): report only, nothing removed')
+    apply = False
 procs = subprocess.run(['ps', '-Ao', 'command'], capture_output=True, text=True).stdout
 # Our own invocation must not count as an owner.
 procs = '\n'.join(l for l in procs.splitlines() if 'docker-reap' not in l and 'docker ps' not in l)
@@ -37,6 +53,8 @@ for line in ps.stdout.splitlines():
     c = json.loads(line)
     name, cid, state = c['Names'], c['ID'], c.get('State', '')
     if any(k.search(name) for k in keep):
+        continue
+    if only is not None and not only.search(name):
         continue
     insp = subprocess.run(['docker', 'inspect', cid], capture_output=True, text=True).stdout
     try:

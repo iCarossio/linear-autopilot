@@ -130,3 +130,7 @@ On 2026-11-08 the reaper removed `purple-postgres`, a running database of anothe
 ## The owner's running app breaks after a full check on the project branch
 
 Symptom: the app the owner uses (`next start` on a fixed port) serves HTML whose CSS and JS return 500; pages render unstyled and nothing reacts to clicks. Cause: the coordinator ran the full checks (which include `next build`) in the main checkout, the same directory the running server serves `.next` from; each build rewrote the chunk names under it (Escape Purple, 2026-11-10, broken for hours unnoticed). Fix: run project-branch checks in a dedicated detached worktree (`git worktree add --detach <wt> <branch>`, then `git checkout --detach <branch>` before each run), never in a checkout that serves a live app. After a merge that adds a startup migration or backfill, restart the owner's app only on purpose and watch its first startup: a strict backfill over old dev data can crash-loop the API.
+
+## The reaper removed another project's container
+
+Symptom: `docker-reap --apply` at a heartbeat removed `caddy-PRD-2546-m862e`, a dev proxy of an unrelated project on the same machine (Escape Purple run, 2026-11-11). Cause: the reaper considered every container on the daemon. Fix: the reaper is scoped to the project (`--only` or state.json `docker_reap_only`) and only reports without a scope; running compose services and containers with a restart policy are never removed.
