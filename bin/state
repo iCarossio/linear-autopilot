@@ -21,15 +21,26 @@ import autopilot_lib as lib
 
 def walk(st, dotted, create=False):
     # Ticket ids may contain dots (M8.3a): a path with '/' splits on '/' instead.
+    # A numeric part indexes a list (milestones.0.issues); a list is never replaced by a dict.
     parts = dotted.split('/') if '/' in dotted else dotted.split('.')
     cur = st
     for p in parts[:-1]:
-        if p not in cur or not isinstance(cur[p], dict):
+        if isinstance(cur, list):
+            cur = cur[_index(cur, p, dotted)]
+            continue
+        if not isinstance(cur.get(p), (dict, list)):
             if not create:
                 return None, None
             cur[p] = {}
         cur = cur[p]
-    return cur, parts[-1]
+    last = parts[-1]
+    return cur, (_index(cur, last, dotted) if isinstance(cur, list) else last)
+
+
+def _index(lst, part, dotted):
+    if not (part.isdigit() and int(part) < len(lst)):
+        sys.exit(f'state: {dotted}: {part!r} is not an index of a list of {len(lst)}')
+    return int(part)
 
 
 def val(s):
@@ -48,7 +59,7 @@ if cmd == 'get':
     st = lib.load_state(repo)
     if len(a) > 1:
         parent, key = walk(st, a[1])
-        print(json.dumps(parent.get(key) if parent else None, indent=2))
+        print(json.dumps((parent[key] if isinstance(parent, list) else parent.get(key)) if parent else None, indent=2))
     else:
         print(json.dumps(st, indent=2))
 elif cmd in ('set', 'del', 'push', 'pull'):
@@ -57,7 +68,10 @@ elif cmd in ('set', 'del', 'push', 'pull'):
         if cmd == 'set':
             parent[key] = val(a[2])
         elif cmd == 'del':
-            parent.pop(key, None)
+            if isinstance(parent, list):
+                parent.pop(key)
+            else:
+                parent.pop(key, None)
         elif cmd == 'push':
             lst = parent.setdefault(key, [])
             v = val(a[2])
