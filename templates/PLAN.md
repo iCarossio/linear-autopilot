@@ -14,6 +14,20 @@ Each KPI is measurable at the deadline with the command or number in the "How me
 | K2 | <e.g. performance> | <p95 < 200 ms on /api/search> | `k6 run perf/search.js` | autopilot |
 | K3 | <e.g. delivery> | <all P1 tickets Done by date> | Linear project view | owner |
 
+## Model tiers per phase
+
+Confirmed by the owner at intake (verbatim), from `bin/run-model pool <role>`:
+
+| Phase | Tier | Models and accounts now (capacity, credit left) | Excluded / last resort |
+|---|---|---|---|
+| Planning, coordination | 1 | | |
+| Pre-mortem, plan review, milestone review | 1, another vendor than the planner | | |
+| Implementation and fix rounds | 2 (3 only if pinned) | | coordinator account: last resort |
+| Ticket code review | 2, never an implementer of the ticket (fallback Tier 1) | | coordinator account: last resort |
+| Trivial tasks | 3-4 | | |
+
+Draws inside a tier are weighted by the remaining total usage of each subscription (credit left x plan capacity).
+
 ## Non-goals
 - <what is explicitly out of scope, so reviewers do not ask for it>
 

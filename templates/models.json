@@ -16,10 +16,10 @@
   "coordinator_reserve_doc": "percent of each window that must stay left on the coordinator's own account (detected per session) before any model runs on it: the coordinator must never run out of credits. Below it: refused, CRITICAL alert.",
   "roles": {
     "implement": [
-      3
+      2
     ],
     "fix": [
-      3
+      2
     ],
     "review": [
       2

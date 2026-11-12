@@ -529,9 +529,9 @@ def validate_reasons(j):
 VENDOR_CLIS = {'anthropic': ('claude',), 'openai': ('codex',), 'google': ('agy',), 'mistral': ('vibe',), 'xai': ('grok', 'cursor')}
 OTHER_VENDOR_CLIS = ('opencode',)
 LEVELS = (0, 1, 2, 3, 4)
-ROLES_DEFAULT = {'implement': [3], 'fix': [3], 'review': [2], 'plan_review': [1], 'premortem': [1], 'milestone_review': [1],
+ROLES_DEFAULT = {'implement': [2], 'fix': [2], 'review': [2], 'plan_review': [1], 'premortem': [1], 'milestone_review': [1],
                  'coordinate': [1], 'trivial': [4]}
-ROLES_ALLOWED = {'implement': {3}, 'fix': {3}, 'review': {2}, 'plan_review': {1}, 'premortem': {1}, 'milestone_review': {1},
+ROLES_ALLOWED = {'implement': {2, 3}, 'fix': {2, 3}, 'review': {2}, 'plan_review': {1}, 'premortem': {1}, 'milestone_review': {1},
                  'coordinate': {1}, 'trivial': {3, 4}}
 PLAN_ROLES = ('plan_review', 'premortem', 'milestone_review')  # review the planner's work: the planner's vendor is excluded
 REVIEW_ROLES = ('review',) + PLAN_ROLES                          # roles a `run-model run review` may take
@@ -555,7 +555,7 @@ SUB_RANK = {'paid': 0, 'paid?': 1, 'free': 2}
 FREE_ID = re.compile(r'(?:[-:/]free)(?:#.*)?$|^openrouter/openrouter/free', re.I)
 # The owner's tier table (Nov 2026), first match wins, matched on the model id. models.json `tier_table` entries come
 # first. It assigns a level to a new entry and re-levels an upgraded id; Tier 4 overrides (Mistral, free) are in code.
-# Grok 4.7 is Tier 2 (owner's rule, 2026-11-09). Speed variants have no row: they are refused (FAST_ID).
+# Speed variants have no row: they are refused (FAST_ID).
 DEFAULT_TIER_TABLE = [
     {'match': r'mythos|fable', 'level': 0}, {'match': r'gpt-[\d.]+-astra', 'level': 0}, {'match': r'gemini-[\d.]+-carbon', 'level': 0},
     {'match': r'claude-opus', 'level': 1}, {'match': r'gpt-[\d.]+-sol', 'level': 1}, {'match': r'gemini-[\d.]+-argon', 'level': 1},
@@ -677,7 +677,7 @@ def roles(r):
         if bad or not lv:
             sys.exit('models.json roles.%s = %s breaks the tier policy (allowed: %s). Tier 0 is never automatic, Tier 1 only '
                      'plans/pre-mortems/milestone reviews/coordinates, ticket reviews are Tier 2, implementation and fixes '
-                     'Tier 3, Tier 4 only trivial tasks.' % (role, lv, sorted(ROLES_ALLOWED[role])))
+                     'Tier 2 (owner, 2026-11-11) or Tier 3, Tier 4 only trivial tasks.' % (role, lv, sorted(ROLES_ALLOWED[role])))
         out[role] = list(lv)
     impl = min(out['implement'])
     out['escalate'] = [max(2, impl - 1)]  # one level up, never Tier 1
@@ -798,11 +798,14 @@ def credit_left(r, acct):
 
 
 def weight(r, m, acct):
-    """Draw weight of a candidate: its subscription (paid > paid? > free) times the credit left on its account
-    (unknown = neutral 0.5, near exhaustion = almost never), so every paid subscription is spent before its reset."""
+    """Draw weight of a candidate: its subscription (paid > paid? > free) times the remaining total usage of its
+    subscription: the fraction of credit left on its account (unknown = neutral 0.5, near exhaustion = almost never)
+    times the plan's relative size (models.json `capacity`, default 1; e.g. 12 for a plan with 12x the usage of the
+    smallest one). A big plan at half credit is drawn more often than a small plan at half credit, so every paid
+    subscription is spent in proportion to what it has left before its reset (owner, 2026-11-11)."""
     left = credit_left(r, acct)
     w = 0.5 if left is None else (0.02 if left < 0.1 else left)
-    return SUB_WEIGHT.get(m.get('subscription'), 0.7) * w
+    return SUB_WEIGHT.get(m.get('subscription'), 0.7) * w * max(0.0, float(m.get('capacity') or 1))
 
 
 def rng(r=None):

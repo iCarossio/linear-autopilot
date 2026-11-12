@@ -42,6 +42,8 @@ The milestone comes from one of:
 
 ## 1. Intake gate (no milestone without expectations)
 
+Show the project's `Model tiers per phase` table from `PLAN.md` with the pools of today (`bin/run-model pool <role>`); the owner confirms it or changes it for this milestone (a change is a decision).
+
 Ask for, and do not proceed without the following. For promoted ideas, the owner's words quoted in the skeleton are the starting point, not the answer: an idea says what, rarely how much or how it is measured. Restate each idea in one line, then ask only what it leaves open.
 1. **What exists when the milestone is done**, for whom, why now, and what is out of scope.
 2. **Milestone KPIs**: each with a target and a measurement (command, query, count, date). Push back on vague ones; if the user cannot name one, propose three and let them pick. No measurable KPI: stop here.

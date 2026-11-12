@@ -39,8 +39,9 @@ Ask for, and do not proceed without:
 1. **The user's plan**: goal, scope, deadline, repo, constraints, what is out of scope. A link, a doc, a spec or a conversation all work.
 2. **Expectations and KPIs**: how the user will know the project succeeded at the deadline. Each KPI must have a target and a measurement (a command, a query, a count, a date). Push back on vague ones ("works well", "fast enough") until each has a number or a binary check. If the user cannot name one, propose three from the goal and let them pick or edit. A plan without at least one measurable KPI stops here.
 3. **Who decides** open questions during the run (the owner), and whether pushing and opening a draft PR are allowed.
+4. **Model tiers per phase.** Run `bin/run-model usage --apply` and `bin/run-model pool <role>` for every role, then show the owner one table: phase (planning, pre-mortem, plan review, milestone review, implementation, fix rounds, ticket review, trivial tasks, coordination), the tier allowed, the models and accounts that can take it right now (with their capacity and credit left), and the accounts excluded or kept as last resort (the coordinator's own account). Defaults: Tier 1 plans, pre-mortems and reviews plans; Tier 2 implements, fixes and reviews ticket code, never the same model as implementer and reviewer of a ticket; Tier 3 implements only if the owner pins it; Tier 4 trivial tasks only. The owner confirms or changes it; their answer goes verbatim in the `Model tiers per phase` section of `PLAN.md`, and a change from the defaults is set in models.json `roles` or state.json `exclude` before the run.
 
-Record the answers verbatim in the `Expectations and KPIs` and `Constraints` sections of `PLAN.md` (from `templates/PLAN.md`).
+Record the answers verbatim in the `Expectations and KPIs`, `Constraints` and `Model tiers per phase` sections of `PLAN.md` (from `templates/PLAN.md`).
 
 ## 1. Draft the plan (you, Tier 1)
 

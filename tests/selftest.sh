@@ -65,6 +65,10 @@ for cli in sys.argv[2:] or ['claude', 'codex', 'grok', 'agy', 'opencode', 'curso
     json.dump(a, open(os.path.join(cfg, 'harnesses', cli + '.json'), 'w'))
 EOF
 $H/bin/harness init >/dev/null
+check "a fresh roster implements and fixes at Tier 2 (owner, 2026-11-11)" "$(python3 -c "import json,os;r=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['roles'];print(r['implement'],r['fix'])")" "[2] [2]"
+# The tests below were written for Tier 3 implementation with Tier 3 fake accounts (fk-c*): pin it explicitly.
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['roles']['implement']=[3];r['roles']['fix']=[3];json.dump(r,open(p,'w'))"
 python3 "$SCR/fakeads.py" $AUTOPILOT_CONFIG_DIR
 python3 -c "
 import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['models']={};r['codex_auto_reset']=False;json.dump(r,open(p,'w'))"
@@ -152,8 +156,8 @@ echo "$OUT" | grep -q "plan changed" && echo "ok   changed plan is not reused fo
 git checkout -q -- PLAN.md
 
 echo "--- tier policy: roles from levels, vendor -> CLI, escalation, Tier 0/4"
-check "implement = Tier 3 only (never 1/2/4)" "$(LV "$(POOL implement)")" "[3]"
-check "fix = Tier 3 only" "$(LV "$(POOL fix_mid)")" "[3]"
+check "implement pinned to Tier 3 (never 1/4)" "$(LV "$(POOL implement)")" "[3]"
+check "fix pinned to Tier 3" "$(LV "$(POOL fix_mid)")" "[3]"
 check "review = Tier 2 only (never 1/3/4)" "$(LV "$(POOL review)") $(POOL review_high | SORTED)" "[2] ['fk-d', 'fk-f']"
 check "legacy pool names are aliases of the roles" "$(LV "$(POOL implement_critical)") $(LV "$(POOL review_mid)") $(LV "$(POOL premortem)") $(LV "$(POOL implement_escalation)")" "[3] [2] [1] [2]"
 check "a free model added with --level 2 is Tier 4: never a reviewer" "$(POOL review | grep -c fk-e)" "0"
@@ -239,9 +243,22 @@ python3 -c "
 import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['roles']={'review':[1,2]};json.dump(r,open(p,'w'))"
 check "roles config cannot put Tier 1 in review" "$($H/bin/run-model pool review 2>&1 | grep -c 'roles.review = \[1, 2\] breaks the tier policy')" "1"
 python3 -c "
-import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r.pop('roles');json.dump(r,open(p,'w'))"
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['roles']={'implement':[3],'fix':[3]};json.dump(r,open(p,'w'))"
+check "roles config may still pin implement and fix to Tier 3" "$(LV "$(POOL implement)") $(LV "$(POOL fix)")" "[3] [3]"
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['roles']={'implement':[1]};json.dump(r,open(p,'w'))"
+check "roles config cannot put Tier 1 in implement" "$($H/bin/run-model pool implement 2>&1 | grep -c 'roles.implement = \[1\] breaks the tier policy')" "1"
+# The draws below use the Tier 3 fake accounts (fk-c*): pin implement and fix to Tier 3.
+python3 -c "
+import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['roles']={'implement':[3],'fix':[3]};json.dump(r,open(p,'w'))"
 
 echo "--- subscriptions, credit-weighted draws, coordinator account"
+check "draw weight scales with plan capacity (remaining total usage): capacity 12 at 50% outweighs capacity 1 at 100%" "$(python3 -c "
+import sys;sys.path.insert(0,'$H/bin');import autopilot_lib as L,datetime
+now=datetime.datetime.now(datetime.timezone.utc).isoformat()
+r={'usage_seen':{'big':{'used':50,'at':now},'small':{'used':0,'at':now}}}
+big=L.weight(r,{'subscription':'paid','capacity':12},'big'); small=L.weight(r,{'subscription':'paid'},'small')
+print('yes' if big>small*5 else 'no %s %s'%(big,small))")" "yes"
 check "harness pools set refused (no hand-ordered pools)" "$($H/bin/harness pools set review fk-b >/dev/null 2>&1; echo $?)" "1"
 FIRST() { for i in $(seq 1 ${2:-200}); do AUTOPILOT_SEED=$i $H/bin/run-model pool "$1" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin)[0])"; done | sort | uniq -c | awk '{print $2"="$1}' | tr '\n' ' '; }
 check "draws are reproducible with AUTOPILOT_SEED" "$(AUTOPILOT_SEED=7 POOL trivial)" "$(AUTOPILOT_SEED=7 POOL trivial)"
