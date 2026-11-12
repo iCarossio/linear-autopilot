@@ -4,7 +4,7 @@
   "vendor": "xai",
   "account_env": "GROK_HOME",
   "account_default": "~/.grok",
-  "doc": "xAI Grok CLI on a subscription. Renewal time is shown by /usage in an interactive session.",
+  "doc": "xAI Grok CLI on a subscription. Renewal time is shown by /usage in an interactive session. --no-wait-for-background: an implementer that leaves a dev server or test runner in the background must not turn a finished run into exit 1.",
   "run": {
     "argv": [
       "-p",
@@ -21,8 +21,7 @@
     "env": {
       "GROK_SANDBOX": "off"
     },
-    "output": "stdout",
-    "argv_doc": "--no-wait-for-background: an implementer that leaves a dev server or test runner in the background must not turn a finished run into exit 1 ('stopped 1 background task')."
+    "output": "stdout"
   },
   "list_models": {
     "kind": "command",
