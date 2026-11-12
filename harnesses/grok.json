@@ -15,12 +15,14 @@
       "plain",
       "--always-approve",
       "--sandbox",
-      "off"
+      "off",
+      "--no-wait-for-background"
     ],
     "env": {
       "GROK_SANDBOX": "off"
     },
-    "output": "stdout"
+    "output": "stdout",
+    "argv_doc": "--no-wait-for-background: an implementer that leaves a dev server or test runner in the background must not turn a finished run into exit 1 ('stopped 1 background task')."
   },
   "list_models": {
     "kind": "command",
@@ -42,6 +44,8 @@
     "kind": "grok_sessions",
     "path": "~/.grok/sessions"
   },
-  "coordinator_env": [],
+  "coordinator_env": [
+    "GROK_SESSION_ID"
+  ],
   "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
 }
