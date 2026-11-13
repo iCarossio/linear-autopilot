@@ -826,7 +826,7 @@ $H/bin/alert ack all >/dev/null
 check "critical: acknowledged -> gone from alert list and eta" "$($H/bin/alert list | wc -l | tr -d ' ') $(ETA_LOAD=0 $H/bin/eta | grep -c CRITICAL)" "0 0"
 # linear issues pages (a nested first:100 overflows Linear's complexity cap). Tidy: empty milestones, empty
 # autopilot projects, ticket states. Ideas, a milestone with an issue (including only an archived issue),
-# and a non-autopilot project stay.
+# and a non-autopilot project stay. An MCP-created project and a folded source project are archived.
 MR="$MR" python3 - <<'PY'
 import json, os
 scr = os.environ['SCR']
@@ -837,6 +837,8 @@ s.setdefault('projects', []).extend([
     {'id': 'proj-busy', 'name': 'Busy autopilot plan'},
     {'id': 'proj-big', 'name': 'Big'},
     {'id': 'proj-arch', 'name': 'Archived issues only'},
+    {'id': 'proj-mcp', 'name': 'MCP created'},
+    {'id': 'proj-folded-src', 'name': 'Folded source'},
 ])
 s['milestones'].extend([
     {'id': 'ms-gone', 'name': 'Leftover', 'projectId': 'proj-1', 'targetDate': None},
@@ -871,11 +873,15 @@ st['inflight']['ENG-2'] = {}
 st.setdefault('done', []).append('ENG-4')
 json.dump(st, open(os.environ['MR'] + '/.autopilot/state.json', 'w'))
 PY
-mkdir -p $MR/.autopilot/plan/folded $MR/.autopilot/plan/busy $MR/.autopilot/plan/product $MR/.autopilot/plan/arch
+mkdir -p $MR/.autopilot/plan/folded $MR/.autopilot/plan/busy $MR/.autopilot/plan/product $MR/.autopilot/plan/mcp $MR/.autopilot/plan/folded-src $MR/.autopilot/plan/arch
 echo '{"project_id": "proj-old", "project_created": true, "tickets": {}}' > $MR/.autopilot/plan/folded/tickets.created.json
 echo '{"project_id": "proj-busy", "project_created": true, "tickets": {}}' > $MR/.autopilot/plan/busy/tickets.created.json
 echo '{"project_id": "proj-product", "project_created": false, "tickets": {}}' > $MR/.autopilot/plan/product/tickets.created.json
 echo '{"project_id": "proj-arch", "project_created": true, "tickets": {}}' > $MR/.autopilot/plan/arch/tickets.created.json
+# Documented MCP checkpoint (autopilot-plan step 7): project_created true, no reserved pending id.
+echo '{"project_id": "proj-mcp", "project_url": "https://linear.test/project/proj-mcp", "project_created": true, "milestones": {"MCP": "ms-mcp"}, "tickets": {"a": {"id": "i-mcp", "identifier": "MCP-1", "url": "https://linear.test/MCP-1"}}, "relations": []}' > $MR/.autopilot/plan/mcp/tickets.created.json
+# Folded into proj-product: creation evidence kept on created_project_id, destination is not archived.
+echo '{"project_id": "proj-product", "project_url": "https://linear.test/project/proj-product", "project_created": true, "created_project_id": "proj-folded-src", "milestones": {}, "tickets": {"a": {"id": "i-fold", "identifier": "F-1", "url": "https://linear.test/F-1"}}, "relations": []}' > $MR/.autopilot/plan/folded-src/tickets.created.json
 $H/bin/linear issues proj-big > $SCR/issues.out 2>$SCR/issues.err; RC=$?
 python3 - <<'PY'
 import ast, os, sys
@@ -907,11 +913,11 @@ PY
 check "linear issues: nested first:100 is HTTP 400" "$CODE" "400"
 D0=$(NCALLS projectMilestoneDelete); A0=$(NCALLS projectArchive); U0=$(NCALLS issueUpdate)
 OUT=$(MS tidy --dry-run 2>&1); RC=$?
-check "tidy --dry-run: exit 0, would-lines, no write" "$RC $(echo "$OUT" | grep -c 'would remove empty milestone Leftover') $(echo "$OUT" | grep -c 'would archive project proj-old') $(echo "$OUT" | grep -c 'would ENG-2: Todo -> In Progress') $(echo "$OUT" | grep -c 'would ENG-4: Todo -> Done') $(echo "$OUT" | grep -c 'would ENG-5: In Progress -> Todo') $(echo "$OUT" | grep -c 'would tidy: 1 empty milestone removed, 1 project archived, 3 states updated') $(echo "$OUT" | grep -c 'would archive project proj-product') $(echo "$OUT" | grep -c 'would archive project proj-busy') $(echo "$OUT" | grep -c 'would archive project proj-arch') $(echo "$OUT" | grep -c 'would remove empty milestone Planned') $(echo "$OUT" | grep -c 'would remove empty milestone Ideas') $(echo "$OUT" | grep -c 'would remove empty milestone Has') $(echo "$OUT" | grep -c 'would remove empty milestone Archived') $(NCALLS projectMilestoneDelete) $(NCALLS projectArchive) $(NCALLS issueUpdate)" "0 1 1 1 1 1 1 0 0 0 0 0 0 0 $D0 $A0 $U0"
+check "tidy --dry-run: exit 0, would-lines, no write" "$RC $(echo "$OUT" | grep -c 'would remove empty milestone Leftover') $(echo "$OUT" | grep -c 'would archive project proj-old') $(echo "$OUT" | grep -c 'would ENG-2: Todo -> In Progress') $(echo "$OUT" | grep -c 'would ENG-4: Todo -> Done') $(echo "$OUT" | grep -c 'would ENG-5: In Progress -> Todo') $(echo "$OUT" | grep -c 'would tidy: 1 empty milestone removed, 3 projects archived, 3 states updated') $(echo "$OUT" | grep -c 'would archive project proj-product') $(echo "$OUT" | grep -c 'would archive project proj-busy') $(echo "$OUT" | grep -c 'would archive project proj-arch') $(echo "$OUT" | grep -c 'would archive project proj-mcp') $(echo "$OUT" | grep -c 'would archive project proj-folded-src') $(echo "$OUT" | grep -c 'would remove empty milestone Planned') $(echo "$OUT" | grep -c 'would remove empty milestone Ideas') $(echo "$OUT" | grep -c 'would remove empty milestone Has') $(echo "$OUT" | grep -c 'would remove empty milestone Archived') $(NCALLS projectMilestoneDelete) $(NCALLS projectArchive) $(NCALLS issueUpdate)" "0 1 1 1 1 1 1 0 0 0 1 1 0 0 0 0 $D0 $A0 $U0"
 check "tidy --dry-run: store unchanged" "$(J $SCR/linear.json "('Leftover' in [m['name'] for m in d['milestones']]) and ('proj-old' not in d.get('archived', [])) and ([i.get('stateId') for i in d['issues'] if i['identifier']=='ENG-2'][0] == 'st-todo')")" "True"
 MS sync >/dev/null; RC=$?
-check "sync runs tidy: empty milestone gone, archived-only milestone kept, one autopilot project archived" "$RC $(J $SCR/linear.json "' '.join(sorted({m['name'] for m in d['milestones'] if m['name'] in ('Leftover','Ideas (unscheduled)','Has issues','Planned empty','Archived only')}))") $(J $SCR/linear.json "sorted(d.get('archived', []))") $(J $SCR/linear.json "sorted((i['identifier'], i.get('stateId')) for i in d['issues'] if i['identifier'] in ('ENG-1','ENG-2','ENG-4','ENG-5'))")" "0 Archived only Has issues Ideas (unscheduled) Planned empty ['proj-old'] [('ENG-1', 'st-backlog'), ('ENG-2', 'st-progress'), ('ENG-4', 'st-done'), ('ENG-5', 'st-todo')]"
-check "sync project update logs the tidy line" "$(J $SCR/linear.json "sum(1 for u in d['updates'] if 'tidy: 1 empty milestone removed, 1 project archived, 3 states updated' in u['body'])")" "1"
+check "sync runs tidy: empty milestone gone, archived-only milestone kept, MCP and folded projects archived, import destination kept" "$RC $(J $SCR/linear.json "' '.join(sorted({m['name'] for m in d['milestones'] if m['name'] in ('Leftover','Ideas (unscheduled)','Has issues','Planned empty','Archived only')}))") $(J $SCR/linear.json "sorted(d.get('archived', []))") $(J $SCR/linear.json "sorted((i['identifier'], i.get('stateId')) for i in d['issues'] if i['identifier'] in ('ENG-1','ENG-2','ENG-4','ENG-5'))")" "0 Archived only Has issues Ideas (unscheduled) Planned empty ['proj-folded-src', 'proj-mcp', 'proj-old'] [('ENG-1', 'st-backlog'), ('ENG-2', 'st-progress'), ('ENG-4', 'st-done'), ('ENG-5', 'st-todo')]"
+check "sync project update logs the tidy line" "$(J $SCR/linear.json "sum(1 for u in d['updates'] if 'tidy: 1 empty milestone removed, 3 projects archived, 3 states updated' in u['body'])")" "1"
 python3 -c "import json;p='$SCR/linear.json';s=json.load(open(p));s['milestones'].append({'id':'ms-gone-2','name':'Leftover 2','projectId':'proj-1','targetDate':None});json.dump(s,open(p,'w'))"
 MS tidy >/dev/null
 check "tidy: deletes the new empty milestone and logs one line" "$(J $SCR/linear.json "'Leftover 2' in [m['name'] for m in d['milestones']]") $(J $SCR/linear.json "d['updates'][-1]['body'].strip()")" "False tidy: 1 empty milestone removed, 0 projects archived, 0 states updated"

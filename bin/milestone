@@ -71,8 +71,9 @@ tidy (also run by sync):
   a. deletes this project's milestones that have no issues and are not in state.json `milestones` (matched by
      linear_id or name). Never the "Ideas (unscheduled)" milestone, never one with any issue.
   b. archives empty projects this autopilot created for the repo, excluding the current project. Creation is
-     recorded in `.autopilot/plan/**/tickets.created.json` or state.json `autopilot_project_ids`; imported project
-     destinations are not evidence of creation.
+     `project_created: true` on `.autopilot/plan/**/tickets.created.json` (that file's `project_id`, or
+     `created_project_id` when a plan was folded into another project), a legacy reserved `pending` project id, or
+     state.json `autopilot_project_ids`. An imported destination (`project_created: false`) is not evidence.
   c. ticket states follow state.json: `inflight` -> In Progress (else the team's started state), `done` -> Done
      (completed type), tickets waiting in `queue` or `stages` stay in an unstarted or backlog state. Only a state
      that differs is written. One line per change. --dry-run prints the same lines with a `would ` prefix and writes
@@ -760,7 +761,14 @@ def cmd_recompute(a):
 
 
 def autopilot_project_ids(repo, st):
-    """Return projects with evidence of creation by this autopilot, never mere import destinations."""
+    """Return projects with evidence of creation by this autopilot, never mere import destinations.
+
+    `project_created: true` is that evidence (`bin/linear import`, or the MCP checkpoint documented in
+    autopilot-plan step 7). When the plan is folded into another project, `project_id` may name the
+    destination and `created_project_id` keeps the project this autopilot created: only the latter is
+    a candidate. A missing flag still counts for a legacy reserved `pending` project id. `project_created:
+    false` is an imported destination and is ignored.
+    """
     ids = set(st.get('autopilot_project_ids') or [])
     base = os.path.join(repo, '.autopilot', 'plan')
     for root, _, files in os.walk(base):
@@ -771,8 +779,14 @@ def autopilot_project_ids(repo, st):
         except (OSError, ValueError):
             continue
         pid = ck.get('project_id')
+        created_pid = ck.get('created_project_id')
         reserved = [v for k, v in (ck.get('pending') or {}).items() if k.startswith('project:')]
-        if pid and (ck.get('project_created') is True or (ck.get('project_created') is not False and pid in reserved)):
+        flag = ck.get('project_created')
+        if flag is True:
+            src = created_pid or pid
+            if isinstance(src, str) and src:
+                ids.add(src)
+        elif flag is not False and isinstance(pid, str) and pid in reserved:
             ids.add(pid)
     return sorted(x for x in ids if isinstance(x, str) and x and not x.startswith('<'))
 
