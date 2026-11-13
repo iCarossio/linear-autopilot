@@ -85,6 +85,18 @@ def connection(items, q, v):
     return chunk, {'hasNextPage': has_next, 'endCursor': str(end) if has_next else None}
 
 
+def wants_archived(q):
+    """Linear hides archived issues unless the field asks includeArchived: true."""
+    return re.search(r'includeArchived\s*:\s*true', q) is not None
+
+
+def issues_for(s, q, pred):
+    items = [i for i in s['issues'] if pred(i)]
+    if not wants_archived(q):
+        items = [i for i in items if not i.get('archived')]
+    return items
+
+
 def list_issue(s, i):
     st = next((x for x in s.get('states', STATES) if x['id'] == i.get('stateId')), None)
     ms = next((m for m in s['milestones'] if m['id'] == i.get('projectMilestoneId')), None)
@@ -182,7 +194,7 @@ def answer(q, v):
         raw = [m for m in s['milestones'] if m['projectId'] == v['id']]
         nodes = []
         for m in raw:
-            hit = [i for i in s['issues'] if i.get('projectMilestoneId') == m['id']]
+            hit = issues_for(s, q, lambda i, m=m: i.get('projectMilestoneId') == m['id'])
             nodes.append({'id': m['id'], 'name': m['name'], 'targetDate': m.get('targetDate'),
                           'issues': {'nodes': [{'id': hit[0]['id']}] if hit else []}})
         chunk, info = connection(nodes, q, v)
@@ -196,13 +208,13 @@ def answer(q, v):
     if 'issues(' in q and 'project(' in q and 'identifier' in q:
         if not project_known(s, v.get('id')):
             return {'errors': [{'message': 'not found'}]}
-        items = [list_issue(s, i) for i in s['issues'] if i.get('projectId') == v['id']]
+        items = [list_issue(s, i) for i in issues_for(s, q, lambda i: i.get('projectId') == v['id'])]
         chunk, info = connection(items, q, v)
         return {'data': {'project': {'issues': {'nodes': chunk, 'pageInfo': info}}}}
     if 'archivedAt' in q and 'project(' in q:
         if not project_known(s, v.get('id')):
             return {'errors': [{'message': 'not found'}]}
-        items = [i for i in s['issues'] if i.get('projectId') == v['id']]
+        items = issues_for(s, q, lambda i: i.get('projectId') == v['id'])
         return {'data': {'project': {'id': v['id'],
                                     'archivedAt': '2020-01-01T00:00:00.000Z' if v['id'] in s.get('archived', []) else None,
                                     'issues': {'nodes': [{'id': items[0]['id']}] if items else []}}}}

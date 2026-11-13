@@ -240,7 +240,7 @@ def milestones_detailed(project_id):
     """Project milestones plus whether each has at least one issue (issues(first:1), not a full list)."""
     nodes = paginate(
         'query($id:String!,$after:String){project(id:$id){projectMilestones(first:50,after:$after){nodes{id name '
-        'issues(first:1){nodes{id}}} pageInfo{hasNextPage endCursor}}}}',
+        'issues(first:1,includeArchived:true){nodes{id}}} pageInfo{hasNextPage endCursor}}}}',
         'project.projectMilestones', {'id': project_id})
     return [{'id': m['id'], 'name': m['name'],
              'empty': m.get('issues') is not None and not (m.get('issues') or {}).get('nodes')} for m in nodes]
@@ -249,7 +249,7 @@ def milestones_detailed(project_id):
 def project_status(project_id):
     """{'archived': bool, 'issues': bool}, or None when Linear has no such project."""
     try:
-        p = gql('query($id:String!){project(id:$id){id archivedAt issues(first:1){nodes{id}}}}', {'id': project_id})['project']
+        p = gql('query($id:String!){project(id:$id){id archivedAt issues(first:1,includeArchived:true){nodes{id}}}}', {'id': project_id})['project']
     except SystemExit as ex:
         if 'not found' in str(getattr(ex, 'code', ex)).lower():
             return None

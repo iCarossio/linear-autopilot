@@ -97,7 +97,7 @@ bin/milestone add <spec> --approved --by <owner> --source user:"<their approval,
 ```
 It logs the decision, creates the Linear milestone, issues and `blocks` relations in the existing project (checkpointed: a rerun never duplicates), appends the milestone section to `PLAN.md`, updates `state.json` (milestones, blockers, sizes) and recomputes `queue`, `stages`, `critical_path`, then syncs the target dates and bars to Linear and marks the decision synced. After any failure, rerun the same command: it resumes after the last completed step.
 
-When this milestone was first created as its own Linear project and then folded into the existing one, that project is left empty. Sync runs tidy, which archives it. Tidy also deletes an empty milestone that is not in state.json, except the "Ideas (unscheduled)" milestone and any milestone that still has an issue.
+When this milestone was first created as its own Linear project and then folded into the existing one, that project is left empty. Sync runs tidy, which archives it. Tidy also deletes an empty milestone that is not in state.json, except the "Ideas (unscheduled)" milestone and any milestone that still has an issue, including one whose only issues are archived.
 
 A step is skipped only with `--skip-premortem "<why>"` / `--skip-review "<why>"`, with the user's consent; the reason is written into the decision.
 
