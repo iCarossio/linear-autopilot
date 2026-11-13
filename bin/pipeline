@@ -6,7 +6,9 @@ checkout) and never starts a live gate: it only runs model rounds through run-mo
 ticket's worktree, and bin/review.
 
   pipeline run [--interval S] [--once]           # the loop; start it under bin/bgrun (one `tick` line per pass)
-  pipeline start <ISSUE> [--wt PATH] [--pool P]  # put a planned ticket in flight: round 1 brief + Tier 3 implementer
+  pipeline start <ISSUE> [--wt PATH] [--pool P]  # put a planned ticket in flight: round 1 brief + Tier 3 implementer.
+                                                  # Sets the Linear state to In Progress (or the team's started state);
+                                                  # a Linear failure is a warning and never blocks the start.
   pipeline fix <ISSUE> <findings.md>             # the coordinator's own next round (after triage, or instead of a stuck step)
   pipeline retry <ISSUE>                         # a stuck ticket: redo the step that got stuck
   pipeline merge <ISSUE> "<subject>" "<body>"    # merge an approved ticket: rebase, squash, bin/finish (exit 3: conflict)
@@ -205,6 +207,28 @@ def run_args(t, v):
     if v.get('stage') == 'merge' or (v.get('stage') == 'stuck' and v.get('stuck_from') == 'merge'):
         return '%s-impl-%sm%s' % (t, r, v.get('merges', 1)), ['--role', 'fix', '--no-escalate']
     return '%s-impl-%s' % (t, r), (['--role', 'fix'] if r > 1 else [])
+
+
+def linear_in_progress(t):
+    """Best effort: Linear state In Progress, else the team's started state. A failure warns and never blocks the start."""
+    try:
+        st = lib.load_state(M)
+        env = dict(os.environ)
+        if not env.get('LINEAR_API_KEY'):
+            kf = os.path.expanduser(st.get('linear_key_file') or '')
+            if kf and os.path.exists(kf):
+                env['LINEAR_API_KEY'] = open(kf).read().strip()
+        if not env.get('LINEAR_API_KEY'):
+            print('pipeline start: WARNING Linear state not updated for %s: LINEAR_API_KEY is not set' % t, file=sys.stderr)
+            return
+        p = subprocess.run([os.path.join(os.path.dirname(SELF), 'linear'), 'state', t, 'In Progress', 'started'],
+                           capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        if p.returncode != 0:
+            msg = [x for x in (p.stderr or p.stdout or '').splitlines() if x.strip()]
+            print('pipeline start: WARNING Linear state not updated for %s: %s' % (t, (msg[-1] if msg else 'linear state failed')[:300]),
+                  file=sys.stderr)
+    except Exception as ex:
+        print('pipeline start: WARNING Linear state not updated for %s: %s' % (t, ex), file=sys.stderr)
 
 
 def dispatch(t, wt, name, extra):
@@ -546,6 +570,7 @@ def cmd_start(t, a):
         sys.exit('pipeline start: %s' % e)
     lib.update_state(M, lambda s: s.setdefault('inflight', {}).__setitem__(t, entry))
     log('%s r1: started (%s)' % (t, entry['wt']))
+    linear_in_progress(t)
     dispatch(t, entry['wt'], '%s-impl-1' % t, [])
     print('STARTED %s round 1 in %s' % (t, entry['wt']))
 

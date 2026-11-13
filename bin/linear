@@ -280,6 +280,18 @@ def pick_state(states, name, kind=None):
     return sorted(pool, key=lambda s: s.get('position') or 0)[0]
 
 
+def set_issue_state(identifier, name, kind=None):
+    """Move an issue to the state `name` (else type `kind`). Returns False when it is already there."""
+    i = issue(identifier)
+    s = pick_state(states_of(i['team']['id']), name, kind)
+    if not s:
+        sys.exit('linear: no state %r in team %s' % (name, i['team']['key']))
+    if ((i.get('state') or {}).get('name') or '').lower() == s['name'].lower():
+        return False
+    update_issue(i['id'], {'stateId': s['id']})
+    return True
+
+
 def cmd_issues(a):
     for i in project_issues(a[0]):
         blocked = [r['issue']['identifier'] for r in i['inverseRelations']['nodes'] if r['type'] == 'blocks']
@@ -402,10 +414,10 @@ def cmd_comment(a):
 
 
 def cmd_state(a):
-    i = issue(a[0])
-    states = states_of(i['team']['id'])
-    s = next((s for s in states if s['name'].lower() == a[1].lower()), None) or sys.exit(f'linear: no state {a[1]!r} in team {i["team"]["key"]}')
-    gql('mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}', {'id': i['id'], 'i': {'stateId': s['id']}}); print('ok')
+    """linear state <IDENTIFIER> "<name>" [type]. Type is the fallback when the team has no state of that name
+    (started for In Progress, completed for Done)."""
+    set_issue_state(a[0], a[1], a[2] if len(a) > 2 else None)
+    print('ok')
 
 
 def cmd_project_update(a):

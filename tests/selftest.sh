@@ -953,7 +953,9 @@ export AUTOPILOT_REPO=$PR PIPELINE_SYNC=1 PIPELINE_RUN_MODEL=$SCR/fake/fake-rm P
 PL=$H/bin/pipeline; TICK() { $PL run --once >> $PLD/ticks.log 2>&1; }
 ST() { $H/bin/state get inflight.$1 | python3 -c "import json,sys;v=json.load(sys.stdin);print(v['round'], v['stage']) if v else print('gone')"; }
 O=$PR/.autopilot/out; W1=$SCR/prepo-wt/P-1
+python3 -c "import json;p='$SCR/linear.json';s=json.load(open(p));s['issues'].append({'id':'p1','identifier':'P-1','title':'P-1','projectId':'proj-1','stateId':'st-backlog'});json.dump(s,open(p,'w'))"
 $PL start P-1 >/dev/null; check "start: round 1 dispatched as <ISSUE>-impl-1, Tier 3 role (no --role fix)" "$(ST P-1) $(tail -1 $PLD/rm.log | grep -c 'P-1-impl-1.md --cwd .* --issue P-1$')" "1 implement 1"
+check "start: Linear state In Progress" "$(J $SCR/linear.json "[i.get('stateId') for i in d['issues'] if i['identifier']=='P-1'][0]")" "st-progress"
 $PL start P-1 >/dev/null 2>&1; check "start refuses a ticket already in flight" "$?" "1"
 $H/bin/state set inflight.P-1.pool '"review_high"' >/dev/null
 echo 1 > $PLD/review.rcs; TICK
@@ -1042,5 +1044,9 @@ $H/bin/state set pipeline.max_jobs 0 >/dev/null; $PL start P-7 >/dev/null; TICK
 check "no free check slot (max_jobs): the ticket waits in rebase, status says so" "$(ST P-7) $($PL status | grep -c '^P-7 .* rebase (check slot) ')" "1 rebase 1"
 $H/bin/state set pipeline.max_jobs 3 >/dev/null; TICK
 check "a slot frees up: checks + review run" "$(ST P-7)" "1 review"
+printf '# P-warn\n\nDo it.\n\n**Acceptance**\n- works\n' > .autopilot/tickets/P-warn.md
+git worktree add -q -b autopilot/P-warn $SCR/prepo-wt/P-warn HEAD
+OUT=$($PL start P-warn 2>&1); RC=$?
+check "start: Linear failure warns and does not block" "$RC $(echo "$OUT" | grep -c 'WARNING Linear state') $(ST P-warn)" "0 1 1 implement"
 unset AUTOPILOT_REPO PIPELINE_SYNC PIPELINE_RUN_MODEL PIPELINE_REVIEW
 echo "=== $PASS passed, $FAIL failed"
