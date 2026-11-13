@@ -594,7 +594,8 @@ def cmd_add(a):
                                 'flight change). A ticket that is too big or shares a hot file is a major finding: name the '
                                 'split.\n\n'
                                 + section)
-                rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp])
+                rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp],
+                                     {'WT': review_wt})  # the brief names the worktree the reviewer reads
                 if rc != 0: die(f'mkbrief failed: {err.strip()}')
                 extra = {'POOL': 'plan_review', 'WT': review_wt}
                 if a.planner and a.planner != st.get('coordinator'):
