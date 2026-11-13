@@ -918,6 +918,9 @@ check "tidy --dry-run: store unchanged" "$(J $SCR/linear.json "('Leftover' in [m
 MS sync >/dev/null; RC=$?
 check "sync runs tidy: empty milestone gone, archived-only milestone kept, MCP and folded projects archived, import destination kept" "$RC $(J $SCR/linear.json "' '.join(sorted({m['name'] for m in d['milestones'] if m['name'] in ('Leftover','Ideas (unscheduled)','Has issues','Planned empty','Archived only')}))") $(J $SCR/linear.json "sorted(d.get('archived', []))") $(J $SCR/linear.json "sorted((i['identifier'], i.get('stateId')) for i in d['issues'] if i['identifier'] in ('ENG-1','ENG-2','ENG-4','ENG-5'))")" "0 Archived only Has issues Ideas (unscheduled) Planned empty ['proj-folded-src', 'proj-mcp', 'proj-old'] [('ENG-1', 'st-backlog'), ('ENG-2', 'st-progress'), ('ENG-4', 'st-done'), ('ENG-5', 'st-todo')]"
 check "sync project update logs the tidy line" "$(J $SCR/linear.json "sum(1 for u in d['updates'] if 'tidy: 1 empty milestone removed, 3 projects archived, 3 states updated' in u['body'])")" "1"
+NUP=$(J $SCR/linear.json "len(d['updates'])")
+MS sync >/dev/null; RC=$?
+check "unchanged sync keeps the prior tidy line on the same update" "$RC $(J $SCR/linear.json "len(d['updates'])") $(J $SCR/linear.json "sum(1 for u in d['updates'] if 'tidy: 1 empty milestone removed, 3 projects archived, 3 states updated' in u['body'])")" "0 $NUP 1"
 python3 -c "import json;p='$SCR/linear.json';s=json.load(open(p));s['milestones'].append({'id':'ms-gone-2','name':'Leftover 2','projectId':'proj-1','targetDate':None});json.dump(s,open(p,'w'))"
 MS tidy >/dev/null
 check "tidy: deletes the new empty milestone and logs one line" "$(J $SCR/linear.json "'Leftover 2' in [m['name'] for m in d['milestones']]") $(J $SCR/linear.json "d['updates'][-1]['body'].strip()")" "False tidy: 1 empty milestone removed, 0 projects archived, 0 states updated"

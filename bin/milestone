@@ -65,7 +65,8 @@ scope from Linear. A state with no `blockers` at all is refused without --from-l
 sync: sets each Linear milestone's target date to its ETA, runs tidy, then posts one project update with every
 milestone bar (edits the previous one when it is less than 24 h old). --decision D-n (repeatable) adds that decision
 to the update and marks it synced with the update's url. A tidy that changed something adds one line to that update
-("tidy: 4 empty milestones removed, 1 project archived, 6 states updated").
+("tidy: 4 empty milestones removed, 1 project archived, 6 states updated"). A later sync that edits the same update
+keeps every prior tidy line, so a heartbeat that changes nothing does not erase the record of deletions and archives.
 
 tidy (also run by sync): 
   a. deletes this project's milestones that have no issues and are not in state.json `milestones` (matched by
@@ -893,10 +894,15 @@ def do_sync(repo, decisions=(), dry=False):
     n_ideas = len((st.get('ideas') or {}).get('issues') or [])
     if n_ideas:
         body += f'\n{(st.get("ideas") or {}).get("name") or "Ideas (unscheduled)"}: {n_ideas} ideas, not scheduled (`bin/idea list`)\n'
-    line, counts = tidy(repo, dry=dry)
-    if any(counts):
-        body += '\n' + line + '\n'
     prev = st.get('milestone_update') or {}
+    line, counts = tidy(repo, dry=dry)
+    # Editing the recent update replaces its whole body. Keep every tidy line already recorded, or the
+    # next unchanged sync is the only Linear copy of those deletions and archives and it erases them.
+    history = [x for x in (prev.get('tidy') or []) if isinstance(x, str) and x.startswith('tidy: ')]
+    if any(counts):
+        history.append(line)
+    if history:
+        body += '\n' + '\n'.join(history) + '\n'
     fresh = prev.get('id') and (lib.now() - lib.parse_time(prev['at'])).total_seconds() < 24 * 3600
     if dry:
         for mid, date in targets.items(): print(f'would set {ms[mid]["name"]} target date {date}')
@@ -910,7 +916,8 @@ def do_sync(repo, decisions=(), dry=False):
     def fn(s):
         for m in s.get('milestones') or []:
             if m['id'] in targets: m['target_date'] = targets[m['id']]
-        s['milestone_update'] = {'id': up['id'], 'url': up.get('url'), 'at': prev['at'] if fresh else lib.now().isoformat()}
+        s['milestone_update'] = {'id': up['id'], 'url': up.get('url'), 'at': prev['at'] if fresh else lib.now().isoformat(),
+                                 'tidy': history}
 
     lib.update_state(repo, fn)
     print(f'project update {"edited" if fresh else "posted"}: {up.get("url")}')
