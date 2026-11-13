@@ -70,9 +70,9 @@ to the update and marks it synced with the update's url. A tidy that changed som
 tidy (also run by sync): 
   a. deletes this project's milestones that have no issues and are not in state.json `milestones` (matched by
      linear_id or name). Never the "Ideas (unscheduled)" milestone, never one with any issue.
-  b. archives projects this autopilot created for the repo (ids in `.autopilot/plan/**/tickets.created.json` or in
-     state.json `project_id` fields) that are not the current `project_id` and have no issues. A project id that is
-     not in those files is left alone.
+  b. archives empty projects this autopilot created for the repo, excluding the current project. Creation is
+     recorded in `.autopilot/plan/**/tickets.created.json` or state.json `autopilot_project_ids`; imported project
+     destinations are not evidence of creation.
   c. ticket states follow state.json: `inflight` -> In Progress (else the team's started state), `done` -> Done
      (completed type), tickets waiting in `queue` or `stages` stay in an unstarted or backlog state. Only a state
      that differs is written. One line per change. --dry-run prints the same lines with a `would ` prefix and writes
@@ -760,34 +760,21 @@ def cmd_recompute(a):
 
 
 def autopilot_project_ids(repo, st):
-    """Project ids this autopilot created: every `project_id` in state.json and in `.autopilot/plan/**/tickets.created.json`."""
-    ids = []
-
-    def add(pid):
-        if isinstance(pid, str) and pid and not pid.startswith('<') and pid not in ids:
-            ids.append(pid)
-
-    def walk(o):
-        if isinstance(o, dict):
-            if 'project_id' in o:
-                add(o['project_id'])
-            for v in o.values():
-                walk(v)
-        elif isinstance(o, list):
-            for v in o:
-                walk(v)
-
-    walk(st)
+    """Return projects with evidence of creation by this autopilot, never mere import destinations."""
+    ids = set(st.get('autopilot_project_ids') or [])
     base = os.path.join(repo, '.autopilot', 'plan')
-    if os.path.isdir(base):
-        for root, _, files in os.walk(base):
-            if 'tickets.created.json' not in files:
-                continue
-            try:
-                walk(lib.read_json(os.path.join(root, 'tickets.created.json')))
-            except (OSError, ValueError):
-                pass
-    return ids
+    for root, _, files in os.walk(base):
+        if 'tickets.created.json' not in files:
+            continue
+        try:
+            ck = lib.read_json(os.path.join(root, 'tickets.created.json'))
+        except (OSError, ValueError):
+            continue
+        pid = ck.get('project_id')
+        reserved = [v for k, v in (ck.get('pending') or {}).items() if k.startswith('project:')]
+        if pid and (ck.get('project_created') is True or (ck.get('project_created') is not False and pid in reserved)):
+            ids.add(pid)
+    return sorted(x for x in ids if isinstance(x, str) and x and not x.startswith('<'))
 
 
 def tidy_summary(nm, np, ns):

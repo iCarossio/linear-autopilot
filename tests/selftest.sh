@@ -865,8 +865,10 @@ st.setdefault('done', []).append('ENG-4')
 json.dump(st, open(os.environ['MR'] + '/.autopilot/state.json', 'w'))
 PY
 mkdir -p $MR/.autopilot/plan/folded $MR/.autopilot/plan/busy
-echo '{"project_id": "proj-old", "tickets": {}}' > $MR/.autopilot/plan/folded/tickets.created.json
-echo '{"project_id": "proj-busy", "tickets": {}}' > $MR/.autopilot/plan/busy/tickets.created.json
+echo '{"project_id": "proj-old", "project_created": true, "tickets": {}}' > $MR/.autopilot/plan/folded/tickets.created.json
+echo '{"project_id": "proj-busy", "project_created": true, "tickets": {}}' > $MR/.autopilot/plan/busy/tickets.created.json
+mkdir -p $MR/.autopilot/plan/product
+echo '{"project_id": "proj-product", "project_created": false, "tickets": {}}' > $MR/.autopilot/plan/product/tickets.created.json
 $H/bin/linear issues proj-big > $SCR/issues.out 2>$SCR/issues.err; RC=$?
 python3 - <<'PY'
 import ast, os, sys

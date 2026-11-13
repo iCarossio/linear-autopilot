@@ -269,7 +269,7 @@ def archive_project(project_id):
 
 def pick_state(states, name, kind=None):
     """The state named `name`, else the first of type `kind` (unstarted falls through to backlog)."""
-    s = next((s for s in states if s['name'].lower() == name.lower()), None)
+    s = next((s for s in states if s['name'].lower() == name.lower() and (not kind or s['type'] == kind)), None)
     if s:
         return s
     pool = [s for s in states if kind and s['type'] == kind]
@@ -346,7 +346,7 @@ def cmd_import(a):
         sys.exit(f"linear import: checkpoint {created_path} belongs to project {created['project_id']}, not {flag_pid}")
     pid = flag_pid or created['project_id']
     if flag_pid and not created['project_id'] and not dry:
-        created['project_id'] = flag_pid; persist()
+        created['project_id'] = flag_pid; created['project_created'] = False; persist()
     if not pid:
         p = spec['project']; cid = reserve('project', p['name']) if not dry else None
         print(f"create project {p['name']!r}")
@@ -355,7 +355,7 @@ def cmd_import(a):
             if not found:
                 found = gql('mutation($i:ProjectCreateInput!){projectCreate(input:$i){project{id url}}}',
                             {'i': {'id': cid, 'name': p['name'], 'description': p.get('description', '')[:255], 'content': p.get('content', ''), 'teamIds': [t['id']]}})['projectCreate']['project']
-            pid = found['id']; created['project_id'] = pid; created['project_url'] = found.get('url'); persist()
+            pid = found['id']; created['project_id'] = pid; created['project_created'] = True; created['project_url'] = found.get('url'); persist()
     for m in spec.get('milestones', []):
         if m['name'] in created['milestones']: continue
         print(f"create milestone {m['name']!r}")
