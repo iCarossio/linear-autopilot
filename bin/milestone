@@ -482,11 +482,15 @@ def make_review_worktree(repo, mid):
     if p.returncode != 0:
         drop_review_worktree(repo, wt)
         die('review worktree: %s' % ((p.stderr or p.stdout or 'git worktree add failed').strip()))
-    src = os.path.join(repo, '.autopilot', 'state.json')
-    if os.path.exists(src):
-        os.makedirs(os.path.join(wt, '.autopilot'), exist_ok=True)
-        with open(src) as f, open(os.path.join(wt, '.autopilot', 'state.json'), 'w') as g:
-            g.write(f.read())
+    try:
+        src = os.path.join(repo, '.autopilot', 'state.json')
+        if os.path.exists(src):
+            os.makedirs(os.path.join(wt, '.autopilot'), exist_ok=True)
+            with open(src) as f, open(os.path.join(wt, '.autopilot', 'state.json'), 'w') as g:
+                g.write(f.read())
+    except BaseException:
+        drop_review_worktree(repo, wt)
+        raise
     return wt
 
 
