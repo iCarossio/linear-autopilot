@@ -16,7 +16,7 @@ You are the **master planner**. The user is present for this phase: ask what you
 | `bin/premortem` | `premortem <PLAN.md> --planner <key>`: pre-mortem by a Tier 1 model of another vendor, two passes, `.autopilot/plan/premortem.md`. `--out-dir` for a milestone's own. |
 | `bin/decision` | `decision add|list|check|synced`: the sourced Decision log in `PLAN.md`. |
 | `bin/linear` | `linear import <tickets.json> --team KEY`: project, milestones, issues, relations; idempotent checkpoint. |
-| `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later, driven by `/autopilot-milestone`), `recompute`, `sync` (milestone target dates + bars in a project update), `list`. |
+| `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later, driven by `/autopilot-milestone`), `recompute`, `sync` (milestone target dates + bars in a project update, and tidy), `tidy [--dry-run]`, `list`. |
 | `bin/eta` | One progress bar + ETA per milestone, then overall; `--json`. |
 | `bin/idea` | `/autopilot-idea`: owner ideas parked unscheduled in the "Ideas (unscheduled)" milestone; `promote` writes a milestone spec skeleton from ideas for `/autopilot-milestone` (see "Extending a project"). |
 
@@ -105,6 +105,8 @@ From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the p
 ## Extending a project (a milestone added later)
 
 Adding a major milestone to a project that already exists is `/autopilot-milestone`: the same intake gate, pre-mortem, plan review and approval, scoped to the new milestone, through `bin/milestone add`. Never hand-edit state, `PLAN.md` or Linear for it. It also takes ideas parked with `/autopilot-idea` as input (`/autopilot-milestone ENG-40,ENG-41`): it promotes them into the milestone and, on approval, closes them as duplicates of the new tickets.
+
+When a plan is folded into an existing project as a milestone, the Linear project created for that plan is left with no issues. The next `bin/milestone sync` archives it: tidy archives a project only when its id is recorded in `.autopilot/plan/**/tickets.created.json` or in state.json, the id is not the current `project_id`, and the project has no issues.
 
 ## Rules
 
