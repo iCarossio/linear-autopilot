@@ -623,6 +623,14 @@ w('shape-ord', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["src/x.
                  {"slug": "b", "title": "B", "estimate": "S", "touches": ["src/x.py"], "blocked_by": ["a"]}])
 w('shape-tests', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["tests/test_x.py"]},
                    {"slug": "b", "title": "B", "estimate": "S", "touches": ["tests/test_x.py"]}])
+w('shape-nested', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["web/test/x.test.tsx"]},
+                    {"slug": "b", "title": "B", "estimate": "S", "touches": ["web/test/x.test.tsx"]}])
+w('shape-pkg', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["packages/a/tests/"]},
+                 {"slug": "b", "title": "B", "estimate": "S", "touches": ["packages/a/tests/"]}])
+w('shape-fname', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["src/foo.test.ts", "src/foo.spec.ts", "src/test_bar.py", "src/bar_test.py"]},
+                   {"slug": "b", "title": "B", "estimate": "S", "touches": ["src/foo.test.ts", "src/foo.spec.ts", "src/test_bar.py", "src/bar_test.py"]}])
+w('shape-near', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["src/testing/app.py"]},
+                  {"slug": "b", "title": "B", "estimate": "S", "touches": ["src/testing/app.py"]}])
 json.dump({"project": {"name": "P"}, "milestones": [],
            "tickets": [{"slug": "big", "title": "Big", "estimate": "L", "touches": ["src/big.py"]}]},
           open(os.path.join(p, 'import-bad.json'), 'w'))
@@ -633,6 +641,10 @@ check "shape: >8 touches refused" "$(MS add $SCR/shape-many.json --dry-run 2>&1 
 check "shape: parallel tickets sharing src/x.py refused" "$(MS add $SCR/shape-par.json --dry-run 2>&1 | grep -c 'both change src/x.py')" "1"
 check "shape: shared file allowed once one blocks the other" "$(MS add $SCR/shape-ord.json --dry-run --approved >/dev/null; echo $?)" "0"
 check "shape: shared tests/ allowed" "$(MS add $SCR/shape-tests.json --dry-run --approved >/dev/null; echo $?)" "0"
+check "shape: web/test/x.test.tsx shared at any depth" "$(MS add $SCR/shape-nested.json --dry-run --approved >/dev/null; echo $?)" "0"
+check "shape: packages/a/tests/ shared at any depth" "$(MS add $SCR/shape-pkg.json --dry-run --approved >/dev/null; echo $?)" "0"
+check "shape: *.test.* *.spec.* test_*.py *_test.py shared" "$(MS add $SCR/shape-fname.json --dry-run --approved >/dev/null; echo $?)" "0"
+check "shape: src/testing/app.py is not a test path" "$(MS add $SCR/shape-near.json --dry-run 2>&1 | grep -c 'both change src/testing/app.py')" "1"
 N=$(NCALLS)
 OUT=$(AUTOPILOT_REPO=$MR $H/bin/linear import $SCR/import-bad.json --team ENG --dry-run 2>&1); RC=$?
 check "linear import --dry-run: non-atomic refused before any request" "$RC $(echo "$OUT" | grep -c 'not atomic') $(NCALLS)" "1 1 $N"

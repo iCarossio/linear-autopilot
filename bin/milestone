@@ -52,7 +52,8 @@ spec.json:
                 "blocked_by": ["other-slug", "ENG-12", "slug-of-an-existing-ticket"], "labels": [], "from_idea": "ENG-40"}],
   Ticket shape (refused otherwise): estimate at most M (one concern, about 400 changed lines); `touches` lists
   the files or modules the ticket changes (max 8); two tickets that can run in parallel never change the same
-  file outside tests/ and docs/ (order them with blocked_by or split by file).
+  file outside a shared test or docs path (a directory named tests, test, __tests__ or docs at any depth, or a
+  file named *.test.*, *.spec.*, test_*.py or *_test.py). Order them with blocked_by or split by file.
    "from_ideas": ["ENG-40"]}   (optional: ideas promoted into this milestone, see g2)
 
 adopt: groups tickets that already exist (a project planned before milestones, or a second plan already imported)

@@ -5,7 +5,7 @@ Config: $AUTOPILOT_CONFIG_DIR (default ~/.config/linear-autopilot): models.json 
 harnesses/ (adapter overrides), prompts/ (template overrides). Per project: <repo>/.autopilot/state.json.
 Python 3.9+ (no match statements, no nested same-quote f-strings).
 """
-import contextlib, datetime as dt, fcntl, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile
+import contextlib, datetime as dt, fcntl, fnmatch, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 HOME = os.path.dirname(HERE)
@@ -949,7 +949,9 @@ def resolve_alert(repo, kind, key):
 TICKET_SIZES = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
 MAX_TICKET_UNITS = 2.0       # M: one concern, about 400 changed lines at most
 MAX_TICKET_TOUCHES = 8       # files or modules one ticket may change
-SHARED_OK = ('tests/', 'test/', 'docs/', 'e2e/artifacts/')  # adding tests or notes side by side is fine
+SHARED_DIR_SEGMENTS = {'tests', 'test', '__tests__', 'docs'}  # any path segment, not only the repo root
+SHARED_FILE_GLOBS = ('*.test.*', '*.spec.*', 'test_*.py', '*_test.py')
+SHARED_PREFIXES = ('e2e/artifacts',)  # side-by-side artifacts are not a collision
 
 
 def ticket_units(v):
@@ -964,12 +966,32 @@ def _overlap(a, b):
     return a == b or a.startswith(b + '/') or b.startswith(a + '/')
 
 
+def shared_touch(path):
+    """A path parallel tickets may both change.
+
+    Shared at any depth when a segment is tests, test, __tests__ or docs (so web/test/x.test.tsx and
+    packages/a/tests/ are shared), or when the file name matches *.test.*, *.spec.*, test_*.py or *_test.py.
+    """
+    parts = [p for p in str(path).strip().replace('\\', '/').split('/') if p not in ('', '.')]
+    if not parts:
+        return False
+    if any(seg in SHARED_DIR_SEGMENTS for seg in parts):
+        return True
+    name = parts[-1]
+    if any(fnmatch.fnmatch(name, g) for g in SHARED_FILE_GLOBS):
+        return True
+    raw = '/'.join(parts)
+    return any(raw == pre or raw.startswith(pre + '/') for pre in SHARED_PREFIXES)
+
+
 def ticket_shape_errors(tickets, deps=None):
     """Errors that make a ticket list unfit to run: too big, no declared footprint, or two tickets
     that may run in parallel while changing the same file.
 
     `deps` maps slug -> slugs it waits on (inside this list); tickets ordered by it never run in
-    parallel, so their shared files are allowed. Paths under tests/, docs/ are never a collision.
+    parallel, so their shared files are allowed. A test or docs path is never a collision: any
+    directory named tests, test, __tests__ or docs, or a file named *.test.*, *.spec.*, test_*.py
+    or *_test.py.
     """
     errs = []
     by = {t.get('slug'): t for t in tickets}
@@ -1002,8 +1024,8 @@ def ticket_shape_errors(tickets, deps=None):
         for b in slugs[i + 1:]:
             if a in anc[b] or b in anc[a]:
                 continue
-            ta = [p for p in by[a].get('touches') or [] if not str(p).startswith(SHARED_OK)]
-            tb = [p for p in by[b].get('touches') or [] if not str(p).startswith(SHARED_OK)]
+            ta = [p for p in by[a].get('touches') or [] if not shared_touch(p)]
+            tb = [p for p in by[b].get('touches') or [] if not shared_touch(p)]
             hit = sorted({x for x in ta for y in tb if _overlap(str(x), str(y))})
             if hit:
                 errs.append(f'{a} and {b} can run in parallel but both change {", ".join(hit)}: order them with '

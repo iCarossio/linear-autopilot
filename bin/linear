@@ -27,7 +27,8 @@ tickets.json:
                 "estimate": 2, "priority": 2, "touches": ["src/api/app.py"], "blocked_by": ["other-slug"], "labels": ["autopilot"]}]}
   Refused before anything is created unless every ticket is atomic: estimate at most M, `touches` lists the files
   or modules it changes (max 8), and two tickets that can run in parallel never change the same file outside
-  tests/ and docs/. `touches` is appended to the issue description.
+  a shared test or docs path (a directory named tests, test, __tests__ or docs at any depth, or a file named
+  *.test.*, *.spec.*, test_*.py or *_test.py). `touches` is appended to the issue description.
   A `blocked_by` entry that is not a slug of the file but an issue identifier (ENG-12) names an existing issue: the
   relation is created against it (used by `bin/milestone add` to extend a running project).
   A label that does not exist is skipped with a WARNING on stderr (create it first; `bin/idea` creates its own).
