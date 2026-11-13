@@ -236,6 +236,50 @@ def project_issues(project_id, with_relations=True):
     return nodes
 
 
+def milestones_detailed(project_id):
+    """Project milestones plus whether each has at least one issue (issues(first:1), not a full list)."""
+    nodes = paginate(
+        'query($id:String!,$after:String){project(id:$id){projectMilestones(first:50,after:$after){nodes{id name '
+        'issues(first:1){nodes{id}}} pageInfo{hasNextPage endCursor}}}}',
+        'project.projectMilestones', {'id': project_id})
+    return [{'id': m['id'], 'name': m['name'],
+             'empty': m.get('issues') is not None and not (m.get('issues') or {}).get('nodes')} for m in nodes]
+
+
+def project_status(project_id):
+    """{'archived': bool, 'issues': bool}, or None when Linear has no such project."""
+    try:
+        p = gql('query($id:String!){project(id:$id){id archivedAt issues(first:1){nodes{id}}}}', {'id': project_id})['project']
+    except SystemExit as ex:
+        if 'not found' in str(getattr(ex, 'code', ex)).lower():
+            return None
+        raise
+    if not p:
+        return None
+    return {'archived': bool(p.get('archivedAt')), 'issues': bool((p.get('issues') or {}).get('nodes'))}
+
+
+def delete_milestone(milestone_id):
+    gql('mutation($id:String!){projectMilestoneDelete(id:$id){success}}', {'id': milestone_id})
+
+
+def archive_project(project_id):
+    gql('mutation($id:String!){projectArchive(id:$id){success}}', {'id': project_id})
+
+
+def pick_state(states, name, kind=None):
+    """The state named `name`, else the first of type `kind` (unstarted falls through to backlog)."""
+    s = next((s for s in states if s['name'].lower() == name.lower()), None)
+    if s:
+        return s
+    pool = [s for s in states if kind and s['type'] == kind]
+    if not pool and kind == 'unstarted':
+        pool = [s for s in states if s['type'] == 'backlog']
+    if not pool:
+        return None
+    return sorted(pool, key=lambda s: s.get('position') or 0)[0]
+
+
 def cmd_issues(a):
     for i in project_issues(a[0]):
         blocked = [r['issue']['identifier'] for r in i['inverseRelations']['nodes'] if r['type'] == 'blocks']

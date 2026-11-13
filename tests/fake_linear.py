@@ -35,9 +35,10 @@ def find_issue(s, ref):
 
 STATES = [{'id': 'st-backlog', 'name': 'Backlog', 'type': 'backlog', 'position': 0},
           {'id': 'st-todo', 'name': 'Todo', 'type': 'unstarted', 'position': 1},
-          {'id': 'st-done', 'name': 'Done', 'type': 'completed', 'position': 2},
-          {'id': 'st-canceled', 'name': 'Canceled', 'type': 'canceled', 'position': 3},
-          {'id': 'st-duplicate', 'name': 'Duplicate', 'type': 'canceled', 'position': 4}]
+          {'id': 'st-progress', 'name': 'In Progress', 'type': 'started', 'position': 2},
+          {'id': 'st-done', 'name': 'Done', 'type': 'completed', 'position': 3},
+          {'id': 'st-canceled', 'name': 'Canceled', 'type': 'canceled', 'position': 4},
+          {'id': 'st-duplicate', 'name': 'Duplicate', 'type': 'canceled', 'position': 5}]
 
 
 def view_issue(s, i):
@@ -50,7 +51,7 @@ def view_issue(s, i):
     labels = [l for l in s.get('labels', []) if l['id'] in (i.get('labelIds') or [])]
     return {'id': i['id'], 'identifier': i['identifier'], 'url': 'https://linear.test/' + i['identifier'], 'title': i['title'],
             'estimate': i.get('estimate'),
-            'state': {'name': st['name'], 'type': st['type']} if st else {'name': 'Todo', 'type': i.get('state', 'unstarted')},
+            'state': {'id': st['id'], 'name': st['name'], 'type': st['type']} if st else {'id': None, 'name': 'Todo', 'type': i.get('state', 'unstarted')},
             'team': {'id': 'team-1', 'key': s['team']}, 'project': {'id': i.get('projectId'), 'name': 'P'},
             'projectMilestone': {'id': ms['id'], 'name': ms['name']} if ms else None,
             'labels': {'nodes': [{'id': l['id'], 'name': l['name']} for l in labels]},
@@ -156,6 +157,17 @@ def answer(q, v):
             out = {'success': True, 'projectUpdate': {'id': u['id'], 'url': 'https://linear.test/update/' + u['id']}}
         elif op == 'projectUpdate':
             s['content'] = inp.get('content'); out = {'success': True}
+        elif op == 'projectMilestoneDelete':
+            before = len(s['milestones'])
+            s['milestones'] = [m for m in s['milestones'] if m['id'] != v.get('id')]
+            if len(s['milestones']) == before:
+                return {'errors': [{'message': 'not found'}]}
+            out = {'success': True}
+        elif op == 'projectArchive':
+            s.setdefault('archived', [])
+            if v.get('id') not in s['archived']:
+                s['archived'].append(v['id'])
+            out = {'success': True}
         else:
             return {'errors': [{'message': 'fake: unsupported mutation ' + op}]}
         save(s)
@@ -167,8 +179,14 @@ def answer(q, v):
     if 'states(' in q:
         return {'data': {'team': {'states': {'nodes': s.get('states', STATES), 'pageInfo': page}}}}
     if 'projectMilestones' in q:
-        ms = [{'id': m['id'], 'name': m['name'], 'targetDate': m['targetDate']} for m in s['milestones'] if m['projectId'] == v['id']]
-        return {'data': {'project': {'projectMilestones': {'nodes': ms, 'pageInfo': page}}}}
+        raw = [m for m in s['milestones'] if m['projectId'] == v['id']]
+        nodes = []
+        for m in raw:
+            hit = [i for i in s['issues'] if i.get('projectMilestoneId') == m['id']]
+            nodes.append({'id': m['id'], 'name': m['name'], 'targetDate': m.get('targetDate'),
+                          'issues': {'nodes': [{'id': hit[0]['id']}] if hit else []}})
+        chunk, info = connection(nodes, q, v)
+        return {'data': {'project': {'projectMilestones': {'nodes': chunk, 'pageInfo': info}}}}
     if 'projectMilestone(' in q:
         m = next((m for m in s['milestones'] if m['id'] == v['id']), None)
         return {'data': {'projectMilestone': {'id': m['id']}}} if m else {'errors': [{'message': 'not found'}]}
@@ -181,6 +199,13 @@ def answer(q, v):
         items = [list_issue(s, i) for i in s['issues'] if i.get('projectId') == v['id']]
         chunk, info = connection(items, q, v)
         return {'data': {'project': {'issues': {'nodes': chunk, 'pageInfo': info}}}}
+    if 'archivedAt' in q and 'project(' in q:
+        if not project_known(s, v.get('id')):
+            return {'errors': [{'message': 'not found'}]}
+        items = [i for i in s['issues'] if i.get('projectId') == v['id']]
+        return {'data': {'project': {'id': v['id'],
+                                    'archivedAt': '2020-01-01T00:00:00.000Z' if v['id'] in s.get('archived', []) else None,
+                                    'issues': {'nodes': [{'id': items[0]['id']}] if items else []}}}}
     if 'inverseRelations' in q and 'pageInfo' in q:
         i = find_issue(s, v.get('id'))
         if not i:
