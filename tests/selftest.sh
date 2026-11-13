@@ -20,6 +20,9 @@ if [ -f "$f" ] && grep -q 'Reply with exactly: AUTOPILOT_OK' "$f"; then  # a smo
 fi
 case " ${FAKE_QUOTA_MODELS:-} " in *" $4 "*) echo 'You have exhausted your capacity on this model. Upgrade your subscription to increase your limits. Resets in 162h57m57s.","status":"RESOURCE_EXHAUSTED","error_code":429'; exit 1;; esac
 case " ${FAKE_MUTE_MODELS:-} " in *" $4 "*) echo "I could not finish the review."; exit 0;; esac
+if [ -n "${FAKE_TOUCH_REPO:-}" ] && [ -n "${AUTOPILOT_REPO:-}" ]; then
+  printf '%s\n' touched > "$AUTOPILOT_REPO/$FAKE_TOUCH_REPO"
+fi
 case "${FAKE_BEHAVIOUR:-approve}" in
   approve) echo '```json'; echo '{"verdict":"approve","unmet_criteria":[],"findings":[],"summary":"fine"}'; echo '```';;
   approve_major) echo '```json'; echo '{"verdict":"approve","unmet_criteria":[],"findings":[{"severity":"major","file":"a.py","line":1,"problem":"bug","fix":"fix"}],"summary":"approve but major"}'; echo '```';;
@@ -665,12 +668,21 @@ check "add --dry-run: valid, exit 0" "$RC" "0"
 check "add --dry-run: new tickets scheduled after their blockers" "$(echo "$DRY" | grep -E '^  stage (4|5):' | tr '\n' '|')" "  stage 4: ENG-5, +api|  stage 5: +ui|"
 check "add --dry-run: ETA bar for the new milestone" "$(echo "$DRY" | grep -c '^  Extension  *\[░*\]   0%  0/2 done  |  ETA ')" "1"
 check "add --dry-run: no external call, nothing written" "$(NCALLS) $([ -d $MR/.autopilot/plan/milestones ] && echo dir || echo none)" "0 none"
-OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/ext.json --review-k 1 2>&1); RC=$?
+OUT=$(FAKE_BEHAVIOUR=auto FAKE_TOUCH_REPO=coordinator-new.txt MS add $SCR/ext.json --review-k 1 2>&1); RC=$?
 check "add: pre-mortem + plan review, then stops for approval (exit 3)" "$RC" "3"
 check "add: findings printed for approval" "$(echo "$OUT" | grep -cE '^(NEEDS APPROVAL|--- premortem: .*premortem.md|--- review: .*plan-review.md)')" "3"
 check "add: milestone pre-mortem kept apart from the project's" "$(ls $MR/.autopilot/plan/milestones/ext/ | grep -cE '^(premortem.md|premortem.json|plan-review.md)$') $([ -e $MR/.autopilot/plan/premortem.md ] && echo leak || echo apart)" "3 apart"
 check "add: pre-mortem scoped to the milestone, plan as context" "$(grep -c '^# Existing plan (context)' $MR/.autopilot/plan/milestones/ext/premortem-input.md)" "1"
 check "add: nothing applied before approval" "$(NCALLS) $(J $MR/.autopilot/state.json "len(d['milestones'])")" "0 3"
+check "add: a file created in the main checkout during review stays, and the review result is kept" "$(cat $MR/coordinator-new.txt 2>/dev/null) $(test -d $MR/.autopilot/review-wt/ext && echo wt || echo gone) $(grep -c 'reason from m' $MR/.autopilot/plan/milestones/ext/premortem.md) $(grep -c 'approve -> approve' $MR/.autopilot/plan/milestones/ext/plan-review.md)" "touched gone 1 1"
+python3 -c "
+import json
+s=json.load(open('$SCR/ext.json'))
+s['id']='revfail'; s['name']='Revfail'
+json.dump(s, open('$SCR/revfail.json','w'))
+"
+OUT=$(FAKE_BEHAVIOUR=weird FAKE_TOUCH_REPO=coordinator-fail.txt MS add $SCR/revfail.json --review-k 1 2>&1); RC=$?
+check "add: a failed review drops the worktree and keeps a file written in the main checkout" "$RC $(cat $MR/coordinator-fail.txt 2>/dev/null) $(test -d $MR/.autopilot/review-wt/revfail && echo wt || echo gone)" "2 touched gone"
 OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/ext.json --review-k 1 2>&1); check "add: rerun without --approved still stops (no review rerun)" "$? $(echo "$OUT" | grep -c 'pre-mortem of milestone')" "3 0"
 OUT=$(MS add $SCR/ext.json --approved --by owner --source 'user:"ship it"' 2>&1); RC=$?
 check "add --approved: applied" "$RC" "0"

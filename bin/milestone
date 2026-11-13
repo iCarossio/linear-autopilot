@@ -28,6 +28,8 @@ add: extends a running project with a milestone, in this order, never skipping a
   b. pre-mortem of the milestone delta (`bin/premortem`, the existing PLAN.md as context) into
      .autopilot/plan/milestones/<id>/premortem.md;
   c. adversarial plan review of the milestone section (`bin/review`, POOL=plan_review) into .../plan-review.md;
+     b and c run in a detached worktree `.autopilot/review-wt/<id>` (removed afterwards, also on failure),
+     not in the main checkout. The milestone input, PLAN.md text and --out-dir stay absolute paths in the main repo.
   d. STOP, exit 3: the findings are printed for the owner and coordinator to fold into the spec. A second invocation
      with --approved --by <who> --source <kind:ref> continues (it stops again if b or c had to run in it);
   e. `bin/decision add` "milestone <name> added: N tickets", with that source;
@@ -435,6 +437,59 @@ def cmd_list(a):
         print(f"(no milestones: one implicit scope) {e['done']} done, {e['todo']} to do  ETA {when(e['end'])}")
 
 
+def drop_review_worktree(repo, wt):
+    """Remove a throwaway review worktree. Safe when it is already gone."""
+    if not wt:
+        return
+    subprocess.run(['git', '-C', repo, 'worktree', 'remove', '--force', wt], capture_output=True, text=True)
+    subprocess.run(['git', '-C', repo, 'worktree', 'prune'], capture_output=True, text=True)
+
+
+def ensure_autopilot_ignored(repo):
+    """The review worktree lives under .autopilot/ and must not show up as an untracked tree."""
+    if subprocess.run(['git', '-C', repo, 'check-ignore', '-q', '.autopilot/review-wt'], capture_output=True).returncode == 0:
+        return
+    p = subprocess.run(['git', '-C', repo, 'rev-parse', '--absolute-git-dir'], capture_output=True, text=True)
+    git_dir = (p.stdout or '').strip()
+    if p.returncode != 0 or not git_dir:
+        return
+    excl = os.path.join(git_dir, 'info', 'exclude')
+    os.makedirs(os.path.dirname(excl), exist_ok=True)
+    prev = open(excl).read() if os.path.exists(excl) else ''
+    if '.autopilot/' not in prev.splitlines() and '.autopilot' not in prev.splitlines():
+        if prev and not prev.endswith('\n'):
+            prev += '\n'
+        open(excl, 'w').write(prev + '.autopilot/\n')
+
+
+def make_review_worktree(repo, mid):
+    """Detached checkout at <repo>/.autopilot/review-wt/<id>.
+
+    The pre-mortem and the plan review run here. A file the coordinator writes in the main checkout during
+    the run is then not part of the reviewer's tree, and restoring that tree cannot delete it. premortem
+    reads state.json from --repo, so the main state is copied in; the milestone input, the plan text and
+    --out-dir stay absolute paths in the main repo.
+    """
+    ensure_autopilot_ignored(repo)
+    wt = os.path.join(repo, '.autopilot', 'review-wt', mid)
+    if os.path.lexists(wt):
+        drop_review_worktree(repo, wt)
+    if os.path.lexists(wt):
+        die('review worktree %s already exists and could not be removed' % wt)
+    os.makedirs(os.path.dirname(wt), exist_ok=True)
+    p = subprocess.run(['git', '-C', repo, 'worktree', 'add', '--detach', '--quiet', wt, 'HEAD'],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        drop_review_worktree(repo, wt)
+        die('review worktree: %s' % ((p.stderr or p.stdout or 'git worktree add failed').strip()))
+    src = os.path.join(repo, '.autopilot', 'state.json')
+    if os.path.exists(src):
+        os.makedirs(os.path.join(wt, '.autopilot'), exist_ok=True)
+        with open(src) as f, open(os.path.join(wt, '.autopilot', 'state.json'), 'w') as g:
+            g.write(f.read())
+    return wt
+
+
 def cmd_add(a):
     repo = lib.find_repo(); st = lib.load_state(repo)
     try: spec = lib.read_json(a.spec)
@@ -491,61 +546,69 @@ def cmd_add(a):
     # A spec edited before approval (findings folded in) is the expected flow; a spec edited and run again WITHOUT
     # --approved asks for a new review round of the new delta.
     stale = not a.approved and status.get('reviewed_digest') not in (None, digest)
-    if not applied and (stale or not status.get('premortem')):
-        if a.skip_premortem:
-            status['premortem'] = {'skipped': a.skip_premortem}
-        else:
-            if not planner: die('no planner: pass --planner <roster key> or set `coordinator` in state.json')
-            ctx = open(plan_path).read()
-            write_text(os.path.join(d, 'premortem-input.md'),
-                       f'# Pre-mortem scope: milestone "{spec["name"]}", added to a running project\n\n'
-                       'Only the milestone below is under review. The existing plan after the separator is context: it was '
-                       'already pre-mortem\'d and is being executed. Raise a reason about it only when this milestone makes '
-                       'it fail (shared files, a dependency, a KPI it moves, the deadline).\n\n'
-                       f'{section}\n---\n\n# Existing plan (context)\n\n{ctx}')
-            cmd = [os.path.join(BIN, 'premortem'), os.path.join(d, 'premortem-input.md'), '--repo', repo,
-                   '--planner', planner, '--out-dir', d]
-            print(f'pre-mortem of milestone {mid} (10-40 min) ...', flush=True)
-            rc, out, err = run(repo, cmd)
-            open(os.path.join(d, 'premortem.log'), 'w').write(out + err)
-            if rc == 2 or not os.path.exists(os.path.join(d, 'premortem.md')):
-                print(out[-1500:] + err[-500:]); die('pre-mortem gave no usable result (see premortem.log); rerun later', 2)
-            status['premortem'] = {'path': os.path.join(d, 'premortem.md'), 'exit': rc, 'degraded': rc == 1}
-            ran_review_now = True
-        status['reviewed_digest'] = digest; save()
-    if not applied and (stale or not status.get('review')):
-        if a.skip_review:
-            status['review'] = {'skipped': a.skip_review}
-        else:
-            n = status.get('review_round', 0) + 1
-            inp = os.path.join(d, f'review-input-{n}.md')
-            write_text(inp, f'# Milestone {spec["name"]} (extension of a running project)\n\n'
-                            f'Review this milestone plan as an addition to {plan_path} (read it: the existing plan is '
-                            'being executed). Check it fits the existing architecture, tickets and KPIs, that its '
-                            'dependencies on existing tickets are real and complete, and that its KPIs are measurable. '
-                            'Check that every ticket is atomic: one concern, at most about 400 changed lines, a '
-                            '`touches` list that matches what the instructions really change, and no two tickets that '
-                            'can run in parallel changing the same file (including files that tickets already in '
-                            'flight change). A ticket that is too big or shares a hot file is a major finding: name the '
-                            'split.\n\n'
-                            + section)
-            rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp])
-            if rc != 0: die(f'mkbrief failed: {err.strip()}')
-            extra = {'POOL': 'plan_review'}
-            if a.planner and a.planner != st.get('coordinator'):
-                reg = lib.load_reg(); ad = lib.adapters(); m = reg['models'].get(a.planner) or die(f'unknown planner {a.planner}')
-                extra['EXCLUDE'] = a.planner; extra['EXCLUDE_VENDOR'] = lib.vendor_of(m, ad.get(m['cli']))
-            print(f'plan review of milestone {mid} ...', flush=True)
-            rc, out, err = run(repo, [os.path.join(BIN, 'review'), f'milestone-{mid}', f'm{n}', brief.strip(), str(a.review_k)], extra)
-            status['review_round'] = n
-            if rc in (2, 3):
-                print(out[-1500:] + err[-500:]); save(); die('plan review gave no usable verdict; rerun later', 2)
-            path = os.path.join(d, 'plan-review.md')
-            write_text(path, f'# Plan review of milestone {spec["name"]}, round m{n}: '
-                             f'{"approve" if rc == 0 else "changes required"}\n\n{out}')
-            status['review'] = {'path': path, 'exit': rc, 'verdict': 'approve' if rc == 0 else 'changes_required'}
-            ran_review_now = True
-        status['reviewed_digest'] = digest; save()
+    run_pm = not applied and (stale or not status.get('premortem')) and not a.skip_premortem
+    run_rv = not applied and (stale or not status.get('review')) and not a.skip_review
+    review_wt = None
+    try:
+        if run_pm or run_rv:
+            review_wt = make_review_worktree(repo, mid)
+        if not applied and (stale or not status.get('premortem')):
+            if a.skip_premortem:
+                status['premortem'] = {'skipped': a.skip_premortem}
+            else:
+                if not planner: die('no planner: pass --planner <roster key> or set `coordinator` in state.json')
+                ctx = open(plan_path).read()
+                write_text(os.path.join(d, 'premortem-input.md'),
+                           f'# Pre-mortem scope: milestone "{spec["name"]}", added to a running project\n\n'
+                           'Only the milestone below is under review. The existing plan after the separator is context: it was '
+                           'already pre-mortem\'d and is being executed. Raise a reason about it only when this milestone makes '
+                           'it fail (shared files, a dependency, a KPI it moves, the deadline).\n\n'
+                           f'{section}\n---\n\n# Existing plan (context)\n\n{ctx}')
+                cmd = [os.path.join(BIN, 'premortem'), os.path.join(d, 'premortem-input.md'), '--repo', review_wt,
+                       '--planner', planner, '--out-dir', d]
+                print(f'pre-mortem of milestone {mid} (10-40 min) ...', flush=True)
+                rc, out, err = run(repo, cmd)
+                open(os.path.join(d, 'premortem.log'), 'w').write(out + err)
+                if rc == 2 or not os.path.exists(os.path.join(d, 'premortem.md')):
+                    print(out[-1500:] + err[-500:]); die('pre-mortem gave no usable result (see premortem.log); rerun later', 2)
+                status['premortem'] = {'path': os.path.join(d, 'premortem.md'), 'exit': rc, 'degraded': rc == 1}
+                ran_review_now = True
+            status['reviewed_digest'] = digest; save()
+        if not applied and (stale or not status.get('review')):
+            if a.skip_review:
+                status['review'] = {'skipped': a.skip_review}
+            else:
+                n = status.get('review_round', 0) + 1
+                inp = os.path.join(d, f'review-input-{n}.md')
+                write_text(inp, f'# Milestone {spec["name"]} (extension of a running project)\n\n'
+                                f'Review this milestone plan as an addition to {plan_path} (read it: the existing plan is '
+                                'being executed). Check it fits the existing architecture, tickets and KPIs, that its '
+                                'dependencies on existing tickets are real and complete, and that its KPIs are measurable. '
+                                'Check that every ticket is atomic: one concern, at most about 400 changed lines, a '
+                                '`touches` list that matches what the instructions really change, and no two tickets that '
+                                'can run in parallel changing the same file (including files that tickets already in '
+                                'flight change). A ticket that is too big or shares a hot file is a major finding: name the '
+                                'split.\n\n'
+                                + section)
+                rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp])
+                if rc != 0: die(f'mkbrief failed: {err.strip()}')
+                extra = {'POOL': 'plan_review', 'WT': review_wt}
+                if a.planner and a.planner != st.get('coordinator'):
+                    reg = lib.load_reg(); ad = lib.adapters(); m = reg['models'].get(a.planner) or die(f'unknown planner {a.planner}')
+                    extra['EXCLUDE'] = a.planner; extra['EXCLUDE_VENDOR'] = lib.vendor_of(m, ad.get(m['cli']))
+                print(f'plan review of milestone {mid} ...', flush=True)
+                rc, out, err = run(repo, [os.path.join(BIN, 'review'), f'milestone-{mid}', f'm{n}', brief.strip(), str(a.review_k)], extra)
+                status['review_round'] = n
+                if rc in (2, 3):
+                    print(out[-1500:] + err[-500:]); save(); die('plan review gave no usable verdict; rerun later', 2)
+                path = os.path.join(d, 'plan-review.md')
+                write_text(path, f'# Plan review of milestone {spec["name"]}, round m{n}: '
+                                 f'{"approve" if rc == 0 else "changes required"}\n\n{out}')
+                status['review'] = {'path': path, 'exit': rc, 'verdict': 'approve' if rc == 0 else 'changes_required'}
+                ran_review_now = True
+            status['reviewed_digest'] = digest; save()
+    finally:
+        drop_review_worktree(repo, review_wt)
     if not applied and (ran_review_now or not a.approved):
         print(f'NEEDS APPROVAL: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets')
         for k in ('premortem', 'review'):
