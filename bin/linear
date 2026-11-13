@@ -5,7 +5,9 @@ Needs LINEAR_API_KEY (Settings > API > Personal API keys). No other dependency.
   linear teams                                      # id, key, name
   linear projects <TEAM_KEY>                        # projects of a team: id, name, state, url
   linear states <TEAM_KEY>                          # workflow states: id, name, type
-  linear issues <PROJECT_ID>                        # every issue of a project (paginated): identifier, state, milestone, title, blockedBy
+  linear issues <PROJECT_ID>                        # every issue of a project (paginated): identifier, state, milestone, title, blockedBy.
+                                                    # Pages of 50, relations fetched per issue: nesting issues(first:100) with
+                                                    # inverseRelations(first:100) is ~30,000 complexity points and Linear answers HTTP 400.
   linear issue <IDENTIFIER>                         # one issue, full description
   linear import <tickets.json> --team KEY [--project-id ID] [--dry-run]
                                                     # create the project (unless --project-id), its milestones, every ticket and the
@@ -33,7 +35,7 @@ Helpers used by bin/milestone and bin/idea: retry() (backoff while Linear answer
 creation), ensure_label(), state_id(), update_issue(), relate(), comment(), issue_view().
 LINEAR_API_URL overrides the endpoint (tests point it at a local fake).
 """
-import json, os, re, sys, time, urllib.request, uuid
+import json, os, re, sys, time, urllib.error, urllib.request, uuid
 
 API = os.environ.get('LINEAR_API_URL') or 'https://api.linear.app/graphql'
 IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+$')
@@ -44,8 +46,11 @@ def gql(query, variables=None):
     if not key: sys.exit('linear: LINEAR_API_KEY is not set')
     req = urllib.request.Request(API, data=json.dumps({'query': query, 'variables': variables or {}}).encode(),
                                  headers={'Content-Type': 'application/json', 'Authorization': key})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        body = json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = json.load(r)
+    except urllib.error.HTTPError as ex:
+        sys.exit('linear: HTTP %s %s' % (ex.code, ex.read()[:400].decode('utf-8', 'replace')))
     if body.get('errors'): sys.exit('linear: ' + json.dumps(body['errors'])[:800])
     return body['data']
 
@@ -209,10 +214,30 @@ def cmd_states(a):
         print(f"{s['id']}  {s['type']:<10} {s['name']}")
 
 
+# Linear rejects a query over 10,000 complexity points with HTTP 400. A page of
+# issues(first:100) that also asks for inverseRelations(first:100) is about 30,000
+# (100 issues x 100 relations x the fields inside) and fails on a project of ~200
+# issues. Keep the issue page small and fetch relations in their own pages.
+ISSUE_PAGE = 50
+REL_PAGE = 50
+
+
+def project_issues(project_id, with_relations=True):
+    """Every issue of a project. Relations are a second paged query per issue, not nested in the list."""
+    nodes = paginate(
+        'query($id:String!,$after:String){project(id:$id){issues(first:%d,after:$after){nodes{id identifier title '
+        'state{id name type} projectMilestone{name}} pageInfo{hasNextPage endCursor}}}}' % ISSUE_PAGE,
+        'project.issues', {'id': project_id})
+    if with_relations:
+        q = ('query($id:String!,$after:String){issue(id:$id){inverseRelations(first:%d,after:$after){nodes{type '
+             'issue{identifier}} pageInfo{hasNextPage endCursor}}}}' % REL_PAGE)
+        for i in nodes:
+            i['inverseRelations'] = {'nodes': paginate(q, 'issue.inverseRelations', {'id': i['id']})}
+    return nodes
+
+
 def cmd_issues(a):
-    nodes = paginate('query($id:String!,$after:String){project(id:$id){issues(first:100,after:$after){nodes{identifier title state{name} projectMilestone{name} '
-                     'inverseRelations(first:100){nodes{type issue{identifier}}}} pageInfo{hasNextPage endCursor}}}}', 'project.issues', {'id': a[0]})
-    for i in nodes:
+    for i in project_issues(a[0]):
         blocked = [r['issue']['identifier'] for r in i['inverseRelations']['nodes'] if r['type'] == 'blocks']
         print(f"{i['identifier']:<10} {i['state']['name']:<12} {(i['projectMilestone'] or {}).get('name', '-'):<20} {i['title']}  blockedBy={blocked or '-'}")
 

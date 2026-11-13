@@ -824,6 +824,51 @@ $H/bin/run-model alerts >/dev/null 2>&1
 check "critical: resolved once a key is back, still listed until acknowledged" "$($H/bin/alert list | grep -c 'resolved')" "1"
 $H/bin/alert ack all >/dev/null
 check "critical: acknowledged -> gone from alert list and eta" "$($H/bin/alert list | wc -l | tr -d ' ') $(ETA_LOAD=0 $H/bin/eta | grep -c CRITICAL)" "0 0"
+# linear issues pages (a nested first:100 overflows Linear's complexity cap).
+python3 - <<'PY'
+import json, os
+scr = os.environ['SCR']
+s = json.load(open(os.path.join(scr, 'linear.json')))
+s.setdefault('projects', []).append({'id': 'proj-big', 'name': 'Big'})
+big = []
+for n in range(1, 251):
+    big.append({'id': 'big-%d' % n, 'identifier': 'BIG-%d' % n, 'title': 'big %d' % n,
+                'projectId': 'proj-big', 'stateId': 'st-backlog'})
+s['issues'].extend(big)
+s['relations'].append({'issueId': 'big-1', 'relatedIssueId': 'big-2', 'type': 'blocks'})
+for k in range(10, 70):
+    s['relations'].append({'issueId': 'big-%d' % k, 'relatedIssueId': 'big-3', 'type': 'blocks'})
+json.dump(s, open(os.path.join(scr, 'linear.json'), 'w'))
+PY
+$H/bin/linear issues proj-big > $SCR/issues.out 2>$SCR/issues.err; RC=$?
+python3 - <<'PY'
+import ast, os, sys
+scr = os.environ['SCR']
+out = open(os.path.join(scr, 'issues.out')).read().splitlines()
+def row(prefix):
+    return next((l for l in out if l.startswith(prefix)), '')
+b3 = row('BIG-3 ')
+n3 = len(ast.literal_eval(b3.split('blockedBy=', 1)[1])) if 'blockedBy=' in b3 else -1
+err = open(os.path.join(scr, 'issues.err')).read()
+open(os.path.join(scr, 'issues.verdict'), 'w').write(
+    'ok' if (len(out) == 250 and row('BIG-250') and "['BIG-1']" in row('BIG-2 ') and n3 == 60 and not err)
+    else 'bad lines=%s n3=%s err=%r b2=%r' % (len(out), n3, err[:180], row('BIG-2 ')[-90:]))
+PY
+check "linear issues: 250 issues, relations paged" "$RC $(cat $SCR/issues.verdict)" "0 ok"
+CODE=$(python3 - <<'PY'
+import json, os, urllib.request, urllib.error
+port = open(os.environ['SCR'] + '/linear.port').read().strip()
+q = ('query($id:String!,$after:String){project(id:$id){issues(first:100,after:$after){nodes{identifier '
+     'inverseRelations(first:100){nodes{type issue{identifier}}}} pageInfo{hasNextPage endCursor}}}}')
+req = urllib.request.Request('http://127.0.0.1:%s/graphql' % port, data=json.dumps({'query': q, 'variables': {'id': 'proj-big'}}).encode(),
+                             headers={'Content-Type': 'application/json', 'Authorization': 'fake-key'})
+try:
+    urllib.request.urlopen(req); print('200')
+except urllib.error.HTTPError as e:
+    print(e.code)
+PY
+)
+check "linear issues: nested first:100 is HTTP 400" "$CODE" "400"
 unset AUTOPILOT_REPO
 echo "--- pipeline: implement -> rebase -> checks -> one review -> fix, approvals, merge rounds, merge helper"
 PLD=$SCR/pl; mkdir -p $PLD

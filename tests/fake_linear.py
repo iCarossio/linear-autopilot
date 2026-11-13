@@ -57,6 +57,66 @@ def view_issue(s, i):
             'description': i.get('description', ''), 'inverseRelations': {'nodes': rels}, 'relations': {'nodes': out_rels}}
 
 
+def project_known(s, pid):
+    if not pid:
+        return False
+    if pid == s.get('project_id'):
+        return True
+    if any(p.get('id') == pid for p in s.get('projects') or []):
+        return True
+    if any(i.get('projectId') == pid for i in s.get('issues') or []):
+        return True
+    if any(m.get('projectId') == pid for m in s.get('milestones') or []):
+        return True
+    return False
+
+
+def connection(items, q, v):
+    """Honor first/after. The cursor is the index of the last item returned (Linear returns an opaque cursor;
+    the client only threads it back as $after)."""
+    firsts = [int(x) for x in re.findall(r'first:\s*(\d+)', q)]
+    first = firsts[0] if firsts else (len(items) or 1)
+    after = (v or {}).get('after')
+    start = int(after) + 1 if after not in (None, '') else 0
+    chunk = items[start:start + first]
+    has_next = start + len(chunk) < len(items)
+    end = start + len(chunk) - 1
+    return chunk, {'hasNextPage': has_next, 'endCursor': str(end) if has_next else None}
+
+
+def list_issue(s, i):
+    st = next((x for x in s.get('states', STATES) if x['id'] == i.get('stateId')), None)
+    ms = next((m for m in s['milestones'] if m['id'] == i.get('projectMilestoneId')), None)
+    if st:
+        state = {'id': st['id'], 'name': st['name'], 'type': st['type']}
+    else:
+        state = {'id': None, 'name': 'Todo', 'type': i.get('state', 'unstarted')}
+    return {'id': i['id'], 'identifier': i['identifier'], 'title': i['title'], 'state': state,
+            'projectMilestone': {'name': ms['name']} if ms else None}
+
+
+def inverse_rels(s, i):
+    out = []
+    for r in s['relations']:
+        if r.get('relatedIssueId') != i['id']:
+            continue
+        other = find_issue(s, r.get('issueId'))
+        if other:
+            out.append({'type': r['type'], 'issue': {'identifier': other['identifier']}})
+    return out
+
+
+def too_complex(q):
+    """Linear's cap is 10,000. issues(first:N) nested with inverseRelations(first:M) costs about N*(8+3*M).
+    The old issues query (100 x 100) is ~30,000 and the real API answers HTTP 400."""
+    if 'issues(' not in q or 'inverseRelations' not in q:
+        return False
+    firsts = [int(x) for x in re.findall(r'first:\s*(\d+)', q)]
+    n = firsts[0] if firsts else 50
+    m = firsts[1] if len(firsts) > 1 else 50
+    return n * (8 + m * 3) > 10000
+
+
 def answer(q, v):
     s = load()
     page = {'hasNextPage': False, 'endCursor': None}
@@ -115,8 +175,20 @@ def answer(q, v):
     if 'issueRelation(' in q:
         r = next((r for r in s['relations'] if r.get('id') == v['id']), None)
         return {'data': {'issueRelation': {'id': r['id']}}} if r else {'errors': [{'message': 'not found'}]}
+    if 'issues(' in q and 'project(' in q and 'identifier' in q:
+        if not project_known(s, v.get('id')):
+            return {'errors': [{'message': 'not found'}]}
+        items = [list_issue(s, i) for i in s['issues'] if i.get('projectId') == v['id']]
+        chunk, info = connection(items, q, v)
+        return {'data': {'project': {'issues': {'nodes': chunk, 'pageInfo': info}}}}
+    if 'inverseRelations' in q and 'pageInfo' in q:
+        i = find_issue(s, v.get('id'))
+        if not i:
+            return {'errors': [{'message': 'not found'}]}
+        chunk, info = connection(inverse_rels(s, i), q, v)
+        return {'data': {'issue': {'inverseRelations': {'nodes': chunk, 'pageInfo': info}}}}
     if 'project(' in q:
-        return {'data': {'project': {'id': v['id'], 'url': 'https://linear.test/project/' + v['id']}}} if v['id'] == s['project_id'] \
+        return {'data': {'project': {'id': v['id'], 'url': 'https://linear.test/project/' + v['id']}}} if project_known(s, v.get('id')) \
             else {'errors': [{'message': 'not found'}]}
     if 'issue(' in q:
         i = find_issue(s, v['id'])
@@ -127,8 +199,15 @@ def answer(q, v):
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        q = body.get('query') or ''
+        if too_complex(q):
+            data = json.dumps({'errors': [{'message': 'Query too complex'}]}).encode()
+            self.send_response(400)
+            self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(data)))
+            self.end_headers(); self.wfile.write(data)
+            return
         with LOCK:
-            out = answer(body['query'], body.get('variables') or {})
+            out = answer(q, body.get('variables') or {})
         data = json.dumps(out).encode()
         self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(data)))
         self.end_headers(); self.wfile.write(data)
