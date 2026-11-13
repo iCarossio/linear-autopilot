@@ -938,3 +938,74 @@ def resolve_alert(repo, kind, key):
         return
     t = now().isoformat()
     update_alerts(repo, lambda al: [a.__setitem__('resolved_at', t) for a in al if a['kind'] == kind and a['key'] == key and not a.get('resolved_at')])
+
+
+# --- ticket shape (plan time) ------------------------------------------------------------------
+# Owner, 2026-11-12: "the goal of the autopilot-plan phase is also to split the work in smaller taks
+# (more atomic) and avoid very large tickets like this that could createc complex merge conflicts or
+# long convergence. this is where it must be fixed." A ticket of size L took 18 rounds (22 files,
+# +2051/-638 lines) while parallel tickets edited the same files. The plan is where it is prevented.
+
+TICKET_SIZES = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
+MAX_TICKET_UNITS = 2.0       # M: one concern, about 400 changed lines at most
+MAX_TICKET_TOUCHES = 8       # files or modules one ticket may change
+SHARED_OK = ('tests/', 'test/', 'docs/', 'e2e/artifacts/')  # adding tests or notes side by side is fine
+
+
+def ticket_units(v):
+    if isinstance(v, str) and v.strip().upper() in TICKET_SIZES:
+        return TICKET_SIZES[v.strip().upper()]
+    return float(v)
+
+
+def _overlap(a, b):
+    """Two touched paths collide when equal or when one is a directory prefix of the other."""
+    a, b = a.strip().rstrip('/'), b.strip().rstrip('/')
+    return a == b or a.startswith(b + '/') or b.startswith(a + '/')
+
+
+def ticket_shape_errors(tickets, deps=None):
+    """Errors that make a ticket list unfit to run: too big, no declared footprint, or two tickets
+    that may run in parallel while changing the same file.
+
+    `deps` maps slug -> slugs it waits on (inside this list); tickets ordered by it never run in
+    parallel, so their shared files are allowed. Paths under tests/, docs/ are never a collision.
+    """
+    errs = []
+    by = {t.get('slug'): t for t in tickets}
+    deps = deps if deps is not None else {s: [b for b in (t.get('blocked_by') or []) if b in by] for s, t in by.items()}
+    for s, t in by.items():
+        try:
+            u = ticket_units(t.get('estimate', 1))
+        except (TypeError, ValueError):
+            continue  # the caller reports a bad estimate
+        if u > MAX_TICKET_UNITS:
+            errs.append(f'{s}: size {t.get("estimate")} is larger than M: split it into tickets of one concern '
+                        f'(about 400 changed lines each), chained with blocked_by where they share files')
+        touches = t.get('touches')
+        if not isinstance(touches, list) or not [p for p in touches if str(p).strip()]:
+            errs.append(f'{s}: `touches` is required: the files or modules this ticket changes (e.g. '
+                        f'["purple/api/app.py", "web/src/components/drawer/"])')
+        elif len(touches) > MAX_TICKET_TOUCHES:
+            errs.append(f'{s}: touches {len(touches)} files or modules (max {MAX_TICKET_TOUCHES}): split it')
+
+    def ancestors(s, seen=None):
+        seen = set() if seen is None else seen
+        for b in deps.get(s, []):
+            if b not in seen:
+                seen.add(b); ancestors(b, seen)
+        return seen
+
+    anc = {s: ancestors(s) for s in by}
+    slugs = list(by)
+    for i, a in enumerate(slugs):
+        for b in slugs[i + 1:]:
+            if a in anc[b] or b in anc[a]:
+                continue
+            ta = [p for p in by[a].get('touches') or [] if not str(p).startswith(SHARED_OK)]
+            tb = [p for p in by[b].get('touches') or [] if not str(p).startswith(SHARED_OK)]
+            hit = sorted({x for x in ta for y in tb if _overlap(str(x), str(y))})
+            if hit:
+                errs.append(f'{a} and {b} can run in parallel but both change {", ".join(hit)}: order them with '
+                            f'blocked_by, or split so each file has one owner per stage')
+    return errs

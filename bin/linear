@@ -22,7 +22,10 @@ tickets.json:
   {"project": {"name": "...", "description": "one paragraph", "content": "markdown body (the plan)"},
    "milestones": [{"name": "M1 ...", "description": "..."}],
    "tickets": [{"slug": "scaffold", "title": "...", "description": "markdown", "milestone": "M1 ...",
-                "estimate": 2, "priority": 2, "blocked_by": ["other-slug"], "labels": ["autopilot"]}]}
+                "estimate": 2, "priority": 2, "touches": ["src/api/app.py"], "blocked_by": ["other-slug"], "labels": ["autopilot"]}]}
+  Refused before anything is created unless every ticket is atomic: estimate at most M, `touches` lists the files
+  or modules it changes (max 8), and two tickets that can run in parallel never change the same file outside
+  tests/ and docs/. `touches` is appended to the issue description.
   A `blocked_by` entry that is not a slug of the file but an issue identifier (ENG-12) names an existing issue: the
   relation is created against it (used by `bin/milestone add` to extend a running project).
   A label that does not exist is skipped with a WARNING on stderr (create it first; `bin/idea` creates its own).
@@ -230,6 +233,10 @@ def cmd_import(a):
     if bad_m: sys.exit(f'linear import: tickets with an unknown milestone: {bad_m}')
     bad_d = [(tk['slug'], b) for tk in spec['tickets'] for b in tk.get('blocked_by', []) if b not in slugs and not IDENT.match(b)]
     if bad_d: sys.exit(f'linear import: unresolved blocked_by references: {bad_d}')
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    import autopilot_lib  # ticket shape: the plan is where large tickets are prevented (owner, 2026-11-12)
+    shape = autopilot_lib.ticket_shape_errors(spec['tickets'])
+    if shape: sys.exit('linear import: tickets are not atomic, split them before anything is created:\n  ' + '\n  '.join(shape))
     t = team(a[a.index('--team') + 1])
     created_path = path.rsplit('.', 1)[0] + '.created.json'
     created = json.load(open(created_path)) if os.path.exists(created_path) else {}
@@ -291,7 +298,10 @@ def cmd_import(a):
         cid = reserve('issue', tk['slug'])
         found = exists('issue', cid)
         if not found:
-            inp = {'id': cid, 'teamId': t['id'], 'projectId': pid, 'title': tk['title'], 'description': tk.get('description', '')}
+            desc = tk.get('description', '')
+            if tk.get('touches') and 'Touches:' not in desc:
+                desc += '\n\nTouches: ' + ', '.join(f'`{p}`' for p in tk['touches'])
+            inp = {'id': cid, 'teamId': t['id'], 'projectId': pid, 'title': tk['title'], 'description': desc}
             if tk.get('milestone'): inp['projectMilestoneId'] = created['milestones'][tk['milestone']]
             if tk.get('estimate') is not None: inp['estimate'] = tk['estimate']
             if tk.get('priority') is not None: inp['priority'] = tk['priority']

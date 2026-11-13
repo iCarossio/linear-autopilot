@@ -47,7 +47,11 @@ spec.json:
    "kpis": [{"id": "K1", "kpi": "...", "target": "...", "measure": "command / query / count"}],
    "plan": "markdown: goal, architecture, rules and guardrails of this milestone",
    "tickets": [{"slug": "api", "title": "...", "description": "markdown", "estimate": 2 | "M", "priority": 2,
+                "touches": ["purple/api/app.py", "web/src/components/drawer/"],
                 "blocked_by": ["other-slug", "ENG-12", "slug-of-an-existing-ticket"], "labels": [], "from_idea": "ENG-40"}],
+  Ticket shape (refused otherwise): estimate at most M (one concern, about 400 changed lines); `touches` lists
+  the files or modules the ticket changes (max 8); two tickets that can run in parallel never change the same
+  file outside tests/ and docs/ (order them with blocked_by or split by file).
    "from_ideas": ["ENG-40"]}   (optional: ideas promoted into this milestone, see g2)
 
 adopt: groups tickets that already exist (a project planned before milestones, or a second plan already imported)
@@ -301,6 +305,7 @@ def validate(spec, st, repo, mid):
         resolved[s] = out
     cyc = find_cycle(slugs, resolved)
     if cyc: errs.append('dependency cycle: ' + ' -> '.join(cyc))
+    else: errs += lib.ticket_shape_errors(tickets, {s: [b for b in resolved.get(s, []) if b in slugs] for s in slugs})
     return errs, resolved
 
 
@@ -316,10 +321,10 @@ def render_section(spec, mid, ids=None, meta=None):
     lines += [f'| {cell(k.get("id") or f"K{i}")} | {cell(k["kpi"])} | {cell(k["target"])} | {cell(k["measure"])} |'
               for i, k in enumerate(spec.get('kpis') or [], 1)]
     if spec.get('plan'): lines += ['', spec['plan'].strip()]
-    lines += ['', '| slug | issue | title | size | blocked by |', '|---|---|---|---|---|']
+    lines += ['', '| slug | issue | title | size | touches | blocked by |', '|---|---|---|---|---|---|']
     for t in spec['tickets']:
         deps = ', '.join(ids.get(b, b) for b in t.get('blocked_by') or []) or '-'
-        lines.append(f'| {t["slug"]} | {ids.get(t["slug"], "-")} | {cell(t["title"])} | {cell(t.get("estimate", 1))} | {cell(deps)} |')
+        lines.append(f'| {t["slug"]} | {ids.get(t["slug"], "-")} | {cell(t["title"])} | {cell(t.get("estimate", 1))} | {cell(", ".join(t.get("touches") or []))} | {cell(deps)} |')
     return '\n'.join(lines).replace('\n\n\n', '\n\n') + '\n'
 
 
@@ -501,7 +506,12 @@ def cmd_add(a):
             write_text(inp, f'# Milestone {spec["name"]} (extension of a running project)\n\n'
                             f'Review this milestone plan as an addition to {plan_path} (read it: the existing plan is '
                             'being executed). Check it fits the existing architecture, tickets and KPIs, that its '
-                            'dependencies on existing tickets are real and complete, and that its KPIs are measurable.\n\n'
+                            'dependencies on existing tickets are real and complete, and that its KPIs are measurable. '
+                            'Check that every ticket is atomic: one concern, at most about 400 changed lines, a '
+                            '`touches` list that matches what the instructions really change, and no two tickets that '
+                            'can run in parallel changing the same file (including files that tickets already in '
+                            'flight change). A ticket that is too big or shares a hot file is a major finding: name the '
+                            'split.\n\n'
                             + section)
             rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp])
             if rc != 0: die(f'mkbrief failed: {err.strip()}')

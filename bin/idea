@@ -338,6 +338,7 @@ def cmd_promote(a):
         s = slug(title)[:40].strip('-')
         while any(x['slug'] == s for x in tickets): s += '-2'
         tickets.append({'slug': s, 'title': title, 'estimate': 'M', 'blocked_by': [], 'from_idea': t,
+                        'touches': ['src/%s/' % s],
                         'description': f'{TODO}: split into tickets a cheap implementer can do in one commit (instructions, '
                                        f'CHECKS:, **Acceptance**, guardrails). Source: idea {t}.'})
     spec = {'id': a.id, 'name': a.name,

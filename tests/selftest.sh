@@ -37,7 +37,7 @@ chmod +x "$SCR/fake/fakecli"; export PATH="$SCR/fake:$PATH"; export SCR
 # Hermetic: no real model CLI, no real Linear, never the real codex-reset, no daily model discovery. The vendor -> CLI
 # rule means a fake model runs through its vendor's CLI name: the adapters of the real CLIs are overridden in the test
 # config dir to call the fake binary (stubs shadow the real binaries anyway).
-unset LINEAR_API_KEY LINEAR_API_URL CLAUDECODE CLAUDE_CONFIG_DIR CODEX_HOME AUTOPILOT_COORDINATOR AUTOPILOT_SEED; export AUTOPILOT_NO_DISCOVER=1
+unset LINEAR_API_KEY LINEAR_API_URL CLAUDECODE CLAUDE_CONFIG_DIR CODEX_HOME AUTOPILOT_COORDINATOR AUTOPILOT_SEED AUTOPILOT_REPO GROK_SESSION_ID; export AUTOPILOT_NO_DISCOVER=1
 for c in codex claude agy opencode grok cursor-agent gemini vibe; do printf '#!/bin/sh\nexit 1\n' > "$SCR/fake/$c"; chmod +x "$SCR/fake/$c"; done
 cat > "$SCR/fake/fake-reset" <<'EOF'
 #!/bin/bash
@@ -605,12 +605,43 @@ NCALLS() { [ -f $SCR/linear.json.log ] && grep -c "${1:-.}" $SCR/linear.json.log
 python3 -c "import json;p='$MR/.autopilot/state.json';s=json.load(open(p));s.pop('blockers');s['stages']=[];s['milestones'][0]['linear_id']='lm1';json.dump(s,open(p,'w'))"
 MS recompute --from-linear >/dev/null
 check "recompute --from-linear: blockers reloaded, same stages" "$(J $MR/.autopilot/state.json "json.dumps(d['stages'])")" '[["ENG-1", "ENG-4"], ["ENG-2"], ["ENG-3"], ["ENG-5"]]'
+# Ticket shape: L, missing touches, too many touches, and two parallel tickets on one file are refused.
+# tests/ may be shared, and the same file is allowed once one ticket blocks the other.
+python3 - <<'PY'
+import json, os
+p = os.environ['SCR']
+base = {"id": "shape", "name": "Shape", "description": "d",
+        "kpis": [{"id": "S1", "kpi": "k", "target": "t", "measure": "m"}]}
+def w(name, tickets):
+    json.dump(dict(base, tickets=tickets), open(os.path.join(p, name + '.json'), 'w'))
+w('shape-l', [{"slug": "big", "title": "Big", "estimate": "L", "touches": ["src/big.py"]}])
+w('shape-notouch', [{"slug": "bare", "title": "Bare", "estimate": "S"}])
+w('shape-many', [{"slug": "wide", "title": "Wide", "estimate": "S", "touches": ["src/f%d.py" % i for i in range(9)]}])
+w('shape-par', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["src/x.py"]},
+                 {"slug": "b", "title": "B", "estimate": "S", "touches": ["src/x.py"]}])
+w('shape-ord', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["src/x.py"]},
+                 {"slug": "b", "title": "B", "estimate": "S", "touches": ["src/x.py"], "blocked_by": ["a"]}])
+w('shape-tests', [{"slug": "a", "title": "A", "estimate": "S", "touches": ["tests/test_x.py"]},
+                   {"slug": "b", "title": "B", "estimate": "S", "touches": ["tests/test_x.py"]}])
+json.dump({"project": {"name": "P"}, "milestones": [],
+           "tickets": [{"slug": "big", "title": "Big", "estimate": "L", "touches": ["src/big.py"]}]},
+          open(os.path.join(p, 'import-bad.json'), 'w'))
+PY
+check "shape: L refused" "$(MS add $SCR/shape-l.json --dry-run 2>&1 | grep -c 'size L is larger than M')" "1"
+check "shape: missing touches refused" "$(MS add $SCR/shape-notouch.json --dry-run 2>&1 | grep -c 'is required: the files')" "1"
+check "shape: >8 touches refused" "$(MS add $SCR/shape-many.json --dry-run 2>&1 | grep -c 'touches 9 files')" "1"
+check "shape: parallel tickets sharing src/x.py refused" "$(MS add $SCR/shape-par.json --dry-run 2>&1 | grep -c 'both change src/x.py')" "1"
+check "shape: shared file allowed once one blocks the other" "$(MS add $SCR/shape-ord.json --dry-run --approved >/dev/null; echo $?)" "0"
+check "shape: shared tests/ allowed" "$(MS add $SCR/shape-tests.json --dry-run --approved >/dev/null; echo $?)" "0"
+N=$(NCALLS)
+OUT=$(AUTOPILOT_REPO=$MR $H/bin/linear import $SCR/import-bad.json --team ENG --dry-run 2>&1); RC=$?
+check "linear import --dry-run: non-atomic refused before any request" "$RC $(echo "$OUT" | grep -c 'not atomic') $(NCALLS)" "1 1 $N"
 # milestone add: validation, dry run, approval stop, then the approved run.
 cat > $SCR/ext.json <<'EOF'
 {"id": "ext", "name": "Extension", "description": "Adds the API and its UI.", "why": "the owner extends the project",
  "kpis": [{"id": "X1", "kpi": "API answers", "target": "200 on /health", "measure": "curl -f localhost:8000/health"}],
- "tickets": [{"slug": "api", "title": "API", "estimate": "M", "blocked_by": ["ENG-3"]},
-             {"slug": "ui", "title": "UI", "estimate": 1, "blocked_by": ["api", "ENG-4"]}]}
+ "tickets": [{"slug": "api", "title": "API", "estimate": "M", "touches": ["purple/api/app.py"], "blocked_by": ["ENG-3"]},
+             {"slug": "ui", "title": "UI", "estimate": 1, "touches": ["web/src/ui/"], "blocked_by": ["api", "ENG-4"]}]}
 EOF
 BAD() { python3 -c "import json;s=json.load(open('$SCR/ext.json'));$1;json.dump(s,open('$SCR/bad.json','w'))"; MS add $SCR/bad.json --dry-run 2>&1 | grep -c "$2"; }
 check "add: unknown dependency refused" "$(BAD "s['tickets'][0]['blocked_by']=['ENG-99']" "INVALID: api: blocked_by 'ENG-99'")" "1"
@@ -634,7 +665,7 @@ check "add --approved: applied" "$RC" "0"
 check "add: Linear milestone, 2 issues, 3 relations (2 on existing issues)" "$(NCALLS projectMilestoneCreate) $(NCALLS issueCreate) $(NCALLS issueRelationCreate)" "1 2 3"
 check "add: issues assigned to the Linear milestone" "$(J $SCR/linear.json "sorted(i['identifier'] for i in d['issues'] if i.get('projectMilestoneId') == [m for m in d['milestones'] if m['name'] == 'Extension'][0]['id'])")" "['ENG-6', 'ENG-7']"
 check "add: state milestones, blockers, recomputed stages" "$(J $MR/.autopilot/state.json "' '.join(m['id'] for m in d['milestones']) + ' ' + json.dumps(d['blockers']['ENG-7']) + ' ' + json.dumps(d['stages'][-2:])")" 'm1 m2 m3 ext ["ENG-6", "ENG-4"] [["ENG-5", "ENG-6"], ["ENG-7"]]'
-check "add: milestone section appended in the Milestones section of PLAN.md" "$(awk '/<!-- milestone:ext -->/{m=NR} /^## Milestones/{s=NR} /^## Pre-mortem/{p=NR} END{print (s<m && m<p)}' $MR/PLAN.md) $(grep -c '| ui | ENG-7 | UI | 1 | ENG-6, ENG-4 |' $MR/PLAN.md)" "1 1"
+check "add: milestone section appended in the Milestones section of PLAN.md" "$(awk '/<!-- milestone:ext -->/{m=NR} /^## Milestones/{s=NR} /^## Pre-mortem/{p=NR} END{print (s<m && m<p)}' $MR/PLAN.md) $(grep -c '| ui | ENG-7 | UI | 1 | web/src/ui/ | ENG-6, ENG-4 |' $MR/PLAN.md)" "1 1"
 check "add: decision logged and mirrored (decision check passes)" "$(AUTOPILOT_REPO=$MR $H/bin/decision list | grep -c 'milestone Extension added: 2 tickets  <- user:"ship it"') $(AUTOPILOT_REPO=$MR $H/bin/decision check >/dev/null; echo $?)" "1 0"
 check "add: Linear target dates and one project update with every bar" "$(J $SCR/linear.json "sum(1 for m in d['milestones'] if m['targetDate'])") $(J $SCR/linear.json "len(d['updates'])") $(J $SCR/linear.json "d['updates'][0]['body'].count('done  |'), d['updates'][0]['body'].count('Overall')")" "2 1 4 1"
 check "add: PLAN.md pushed as project content" "$(J $SCR/linear.json "'milestone:ext' in (d.get('content') or '')")" "True"
@@ -647,7 +678,7 @@ MS sync >/dev/null
 check "sync: edits the recent project update instead of posting another" "$(NCALLS projectUpdateUpdate) $(J $SCR/linear.json "len(d['updates'])")" "1 1"
 cat > $SCR/ext2.json <<'EOF'
 {"name": "Docs", "description": "Docs.", "kpis": [{"kpi": "docs build", "target": "0 warnings", "measure": "mkdocs build --strict"}],
- "tickets": [{"slug": "docs", "title": "Docs", "estimate": "S", "blocked_by": ["ui"]}]}
+ "tickets": [{"slug": "docs", "title": "Docs", "estimate": "S", "touches": ["docs/guide.md"], "blocked_by": ["ui"]}]}
 EOF
 MS add $SCR/ext2.json --skip-premortem "" >/dev/null 2>&1; check "add: a skip without its reason is refused" "$?" "1"
 OUT=$(MS add $SCR/ext2.json --skip-premortem "one docs ticket" --skip-review "one docs ticket" --approved --by owner --source 'user:"docs too"' 2>&1); RC=$?
@@ -699,9 +730,9 @@ N=$(NCALLS); MS add $SPEC --approved --by owner --source 'user:"go"' >/dev/null 
 SD=$SCR/seed-repo; mkdir -p $SD/.autopilot/plan && echo '{"branch": "x", "queue": [], "done": []}' > $SD/.autopilot/state.json
 cat > $SD/.autopilot/plan/tickets.json <<'EOF'
 {"project": {"name": "P"}, "milestones": [{"name": "M1 Base"}, {"name": "M2 More"}],
- "tickets": [{"slug": "a", "title": "A", "milestone": "M1 Base", "estimate": 1},
-             {"slug": "b", "title": "B", "milestone": "M2 More", "estimate": "L", "blocked_by": ["a"]},
-             {"slug": "c", "title": "C", "milestone": "M1 Base", "estimate": 2}]}
+ "tickets": [{"slug": "a", "title": "A", "milestone": "M1 Base", "estimate": 1, "touches": ["src/a.py"]},
+             {"slug": "b", "title": "B", "milestone": "M2 More", "estimate": "M", "touches": ["src/b.py"], "blocked_by": ["a"]},
+             {"slug": "c", "title": "C", "milestone": "M1 Base", "estimate": 2, "touches": ["src/c.py"]}]}
 EOF
 echo '{"milestones": {"M1 Base": "l1", "M2 More": "l2"}, "tickets": {"a": {"identifier": "E-1"}, "b": {"identifier": "E-2"}, "c": {"identifier": "E-3"}}}' > $SD/.autopilot/plan/tickets.created.json
 AUTOPILOT_REPO=$SD $H/bin/milestone seed $SD/.autopilot/plan/tickets.json >/dev/null

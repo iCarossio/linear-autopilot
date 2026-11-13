@@ -17,6 +17,7 @@ You are READ-ONLY: do not edit, create or delete any file, do not run git comman
 2. **Wrong assumptions about the repo**: claims in the plan that the code, data or tooling disprove (name the file or command).
 3. **Scope and sequencing**: the critical path, hidden dependencies, tickets too big for one round, integration work nobody owns, work that needs a human (credentials, a product decision, data) and is not flagged.
 4. **Shortcut traps**: places where a cheap implementer will satisfy the acceptance criteria without doing the real work (copied fixtures, per-case lists, test-only code, weakened checks), because the plan does not forbid it or the checks cannot tell.
+3b. **Ticket atomicity**: name every ticket that is not one concern of about 400 changed lines, whose `touches` hides files its instructions change, or that runs in parallel with another ticket changing the same file. Large tickets converge slowly (each new reviewer finds new bugs in a big diff) and shared hot files force merge rounds; give the split.
 5. **Verification gaps**: checks that pass by construction, missing end-to-end or real-data tests, flaky or environment-dependent checks, no regression safety net for the thing later tickets build on.
 6. **Operational risks**: quotas and model availability over a long unattended run, parallel tickets colliding (ports, generated files, shared manifests), merges, environment (Docker, services, secrets).
 
