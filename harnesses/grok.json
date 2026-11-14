@@ -36,8 +36,16 @@
     "argv": [],
     "steps": [
       {
-        "wait_for": "❯",
-        "timeout": 25
+        "wait_for": "\u276f|Do you trust",
+        "timeout": 50
+      },
+      {
+        "if_screen": "Do you trust",
+        "type": "y"
+      },
+      {
+        "wait_for": "\u276f",
+        "timeout": 30
       },
       {
         "sleep": 1
@@ -59,9 +67,9 @@
         "sleep": 1
       }
     ],
-    "timeout": 70,
+    "timeout": 110,
     "flags": "S",
-    "regex": "(Weekly|Monthly|Daily|Session|5-hour) limit(?: \\(([^)\\n]+)\\))?[^%]*?(\\d+)%.*?(Resets?:[^│\\n]+)",
+    "regex": "(Weekly|Monthly|Daily|Session|5-hour) limit(?: \\(([^)\\n]+)\\))?[^%]*?(\\d+)%.*?(Resets?:[^\u2502\\n]+)",
     "groups": [
       "window",
       "plan",

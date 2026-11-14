@@ -688,6 +688,11 @@ def tui_capture(argv, env, steps, timeout=60, rows=50, cols=160, cwd=None):
                     if not pump(0.5): diag = 'tui: process exited'; break
                 if diag: break
             elif 'sleep' in st: pump(float(st['sleep']))
+            elif 'if_screen' in st:  # {"if_screen": REGEX, "type": TEXT | "key": NAME}: only when the screen shows it (e.g. a trust prompt)
+                if re.search(st['if_screen'], screen_text(bytes(buf), rows, cols), re.M):
+                    if 'type' in st: os.write(fd, st['type'].encode())
+                    elif 'key' in st: os.write(fd, keys[st['key']])
+                    pump(0.8)
             elif 'type' in st:
                 for ch in st['type']: os.write(fd, ch.encode()); pump(0.04)
             elif 'key' in st: os.write(fd, keys[st['key']]); pump(0.3)
@@ -722,6 +727,12 @@ def interpreter_of(exe):
     return parts[0] if parts and 'python' in parts[0] else (parts[1] if len(parts) > 1 and parts[0].endswith('env') and 'python' in parts[1] else None)
 
 
+def probe_dir():
+    """Empty directory the TUI probes start in: CLIs that ask to trust a folder ask once about this one, never about a project."""
+    d = os.path.join(lib.CONFIG_DIR, 'probe'); os.makedirs(d, exist_ok=True)
+    return d
+
+
 def unknown(note):
     return [{'window': 'unknown', 'used': None, 'reset': '', 'note': note}]
 
@@ -734,7 +745,9 @@ def usage_probe(a, env):
     exe = shutil.which(spec.get('binary') or a.get('binary', a['name'])) or spec.get('binary') or a.get('binary', a['name'])  # usage.binary: a probe through another CLI (pi -> opencode)
     if kind in ('command', 'tui'):
         if kind == 'tui':
-            txt, diag = tui_capture([exe] + spec.get('argv', []), env, spec['steps'], timeout=spec.get('timeout', 60), cwd=tempfile.gettempdir())
+            for _try in range(2):  # a cold TUI start can miss its first prompt: one retry
+                txt, diag = tui_capture([exe] + spec.get('argv', []), env, spec['steps'], timeout=spec.get('timeout', 60), cwd=probe_dir())
+                if re.search(spec['regex'], txt, re.M | (re.S if 'S' in spec.get('flags', '') else 0)): break
         else:
             txt, diag = sh([exe] + spec['argv'], env, timeout=90)
         flags = re.M | (re.S if 'S' in spec.get('flags', '') else 0) | (re.I if 'I' in spec.get('flags', '') else 0)
