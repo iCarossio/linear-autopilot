@@ -16,6 +16,7 @@ model's CLI, stores the full output in a file and prints ONE json line.
   run-model usage [--apply]             # exact quota + reset times per harness and account; --apply cools exhausted models until their reset,
                                         # claims a Codex weekly reset first (models.json codex_auto_reset), records the credit left per account
                                         # (weights of the draws), runs `discover --apply` once a day, and raises CRITICAL alerts
+  run-model status [--json]    # every configured model: subscription and, per window (short-term, weekly, monthly), percent used and reset
   run-model alerts                      # recompute the CRITICAL alerts now (bin/alert lists and acknowledges them)
   run-model vendor <KEY>                # vendor of a roster key (anthropic, openai, ...), for reviewer diversity
 
@@ -56,7 +57,7 @@ Quota (owner's standing rule, 2026-11-09):
 
 Roster, accounts and health: $AUTOPILOT_CONFIG_DIR/models.json. CLI invocation: harnesses/<cli>.json adapters.
 """
-import datetime as dt, glob, json, os, re, shutil, subprocess, sys, time
+import datetime as dt, glob, json, os, re, shutil, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import autopilot_lib as lib
@@ -444,7 +445,8 @@ def list_models(a, env):
     spec = a.get('list_models', {'kind': 'none'}); kind = spec.get('kind', 'none')
     exe = shutil.which(a.get('binary', a['name'])) or a.get('binary', a['name'])
     if kind == 'command':
-        return re.findall(spec['regex'], sh([exe] + spec['argv'], env)[0], re.M), kind
+        found = re.findall(spec['regex'], sh([exe] + spec['argv'], env)[0], re.M)
+        return ['/'.join(f) if isinstance(f, tuple) else f for f in found], kind  # several groups: provider/id
     if kind == 'json_file':
         try:
             data = lib.read_json(lib.expand_path(spec['path'], a, env))
@@ -562,7 +564,7 @@ def reset_from_text(text):
     'resets Oct 25 at 3:29am (America/New_York)', 'renews on October 26 at 15:45', 'try again at 3:00 PM',
     'in 2 hours 5 minutes', 'Resets in 162h57m57s' (Antigravity). Times without a zone are local; a date-less time already past means tomorrow."""
     from zoneinfo import ZoneInfo
-    t = text.lower()
+    t = re.sub(r'\b(resets?|renews?)\s*:', r'\1', text.lower())
     m = re.search(r'(?:reset|renew|available|again)\w*[^\n]{0,40}?(\d{4}-\d\d-\d\dt\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:z|[+-]\d\d:?\d\d))', t)
     if m: return dt.datetime.fromisoformat(m.group(1).upper().replace('Z', '+00:00'))
     m = re.search(r'(?:reset|renew|again)\w*(?: on| at)?\s+(?:([a-z]{3})[a-z]*\.? (\d{1,2})(?:st|nd|rd|th)?,?(?: \d{4})?\s+(?:at\s+)?)?(\d{1,2})(?::(\d\d))?\s*([ap]\.?m\.?)?(?:\s*\(([\w/+-]+)\))?', t)
@@ -583,6 +585,143 @@ def reset_from_text(text):
     return None
 
 
+def screen_text(data, rows=50, cols=160):
+    """The text a terminal of rows x cols shows after `data` (bytes a TUI wrote): a minimal VT renderer for the
+    absolute-positioning full-screen TUIs (cursor moves, erases, scrolling). Colours, OSC/DCS/APC strings and modes are
+    dropped; wide glyphs take one cell. Returns the lines, right-stripped, joined by newlines."""
+    g = [[' '] * cols for _ in range(rows)]; y = x = 0
+    s = data.decode('utf-8', errors='ignore'); i = 0; n = len(s)
+    def scroll():
+        g.pop(0); g.append([' '] * cols)
+    while i < n:
+        c = s[i]
+        if c == '\x1b' and i + 1 < n:
+            k = s[i + 1]
+            if k == '[':
+                j = i + 2
+                while j < n and not ('@' <= s[j] <= '~'): j += 1
+                if j >= n: break
+                prm, fin = s[i + 2:j], s[j]; i = j + 1
+                q = prm.lstrip('?>=<'); nums = [int(v) if v.isdigit() else 0 for v in q.split(';')] if q else []
+                arg = lambda k, d: nums[k] if len(nums) > k and nums[k] else d
+                a1 = arg(0, 1)
+                if fin in 'Hf': y = min(rows - 1, arg(0, 1) - 1); x = min(cols - 1, arg(1, 1) - 1)
+                elif fin == 'A': y = max(0, y - a1)
+                elif fin == 'B': y = min(rows - 1, y + a1)
+                elif fin == 'C': x = min(cols - 1, x + a1)
+                elif fin == 'D': x = max(0, x - a1)
+                elif fin == 'G': x = min(cols - 1, a1 - 1)
+                elif fin == 'd': y = min(rows - 1, a1 - 1)
+                elif fin == 'E': y = min(rows - 1, y + a1); x = 0
+                elif fin == 'F': y = max(0, y - a1); x = 0
+                elif fin == 'J':
+                    mode = arg(0, 0)
+                    if mode == 0: g[y][x:] = [' '] * (cols - x); [g.__setitem__(r, [' '] * cols) for r in range(y + 1, rows)]
+                    elif mode == 1: g[y][:x + 1] = [' '] * (x + 1); [g.__setitem__(r, [' '] * cols) for r in range(0, y)]
+                    else: g[:] = [[' '] * cols for _ in range(rows)]
+                elif fin == 'K':
+                    mode = arg(0, 0)
+                    if mode == 0: g[y][x:] = [' '] * (cols - x)
+                    elif mode == 1: g[y][:x + 1] = [' '] * (x + 1)
+                    else: g[y] = [' '] * cols
+                elif fin == 'X': g[y][x:x + a1] = [' '] * len(g[y][x:x + a1])
+                elif fin == 'h' and prm in ('?1049', '?47', '?1047'): g[:] = [[' '] * cols for _ in range(rows)]; y = x = 0
+                continue
+            if k in ']P_^X':  # OSC / DCS / APC / PM / SOS: skip to BEL or ST
+                j = i + 2
+                while j < n and s[j] != '\x07' and not (s[j] == '\x1b' and j + 1 < n and s[j + 1] == '\\'): j += 1
+                i = j + (1 if j < n and s[j] == '\x07' else 2); continue
+            if k in '()*+': i += 3; continue
+            i += 2; continue
+        i += 1
+        if c == '\r': x = 0
+        elif c == '\n':
+            if y == rows - 1: scroll()
+            else: y += 1
+        elif c == '\b': x = max(0, x - 1)
+        elif c == '\t': x = min(cols - 1, (x // 8 + 1) * 8)
+        elif c >= ' ' and c != '\x7f':
+            if x >= cols:
+                x = 0
+                if y == rows - 1: scroll()
+                else: y += 1
+            g[y][x] = c; x += 1
+    return '\n'.join(''.join(r).rstrip() for r in g)
+
+
+def tui_capture(argv, env, steps, timeout=60, rows=50, cols=160, cwd=None):
+    """Drive an interactive CLI in a pseudo-terminal and return (screen text, diagnostic or None). `steps` (adapter
+    `usage.steps`): {"wait_for": REGEX, "timeout": S} waits until the rendered screen matches, {"sleep": S},
+    {"type": TEXT} types it, {"key": "enter"|"esc"|"tab"|"up"|"down"}. Local slash commands only: nothing here may be
+    sent to a model. The process is killed at the end; the screen is what the last step saw."""
+    import pty, select, signal, fcntl, termios, struct
+    keys = {'enter': b'\r', 'esc': b'\x1b', 'tab': b'\t', 'up': b'\x1b[A', 'down': b'\x1b[B'}
+    try: pid, fd = pty.fork()
+    except OSError as e: return '', 'pty: %s' % e
+    if pid == 0:
+        try:
+            if cwd: os.chdir(cwd)
+            e = dict(env or os.environ); e['TERM'] = 'xterm-256color'; e['COLUMNS'] = str(cols); e['LINES'] = str(rows)
+            os.execvpe(argv[0], argv, e)
+        finally: os._exit(127)
+    buf = bytearray(); start = time.time(); diag = None
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+        def pump(sec):
+            end = time.time() + sec
+            while time.time() < end:
+                r, _, _ = select.select([fd], [], [], 0.1)
+                if not r: continue
+                try: d = os.read(fd, 65536)
+                except OSError: return False
+                if not d: return False
+                buf.extend(d)
+                if b'\x1b[6n' in d: os.write(fd, b'\x1b[%d;1R' % rows)  # cursor position report
+                if b'\x1b[c' in d or b'\x1b[0c' in d: os.write(fd, b'\x1b[?62;22c')  # device attributes
+            return True
+        for st in steps:
+            if time.time() - start > timeout: diag = 'tui timeout after %ss' % timeout; break
+            if 'wait_for' in st:
+                rx = re.compile(st['wait_for'], re.M); lim = time.time() + float(st.get('timeout', 20))
+                while not rx.search(screen_text(bytes(buf), rows, cols)):
+                    if time.time() > lim: diag = 'tui: %r never appeared' % st['wait_for']; break
+                    if not pump(0.5): diag = 'tui: process exited'; break
+                if diag: break
+            elif 'sleep' in st: pump(float(st['sleep']))
+            elif 'type' in st:
+                for ch in st['type']: os.write(fd, ch.encode()); pump(0.04)
+            elif 'key' in st: os.write(fd, keys[st['key']]); pump(0.3)
+    except OSError as e:
+        diag = 'tui: %s' % e
+    finally:
+        try: os.kill(pid, signal.SIGKILL); os.waitpid(pid, 0)
+        except Exception: pass
+        try: os.close(fd)
+        except Exception: pass
+    return screen_text(bytes(buf), rows, cols), diag
+
+
+VIBE_BILLING = r"""
+import asyncio, json
+from vibe.core.config.vibe_schema import DEFAULT_MISTRAL_API_ENV_KEY, DEFAULT_MISTRAL_API_BASE
+from vibe.core.platform_auth._mistral import api_key_credentials
+from vibe.app_server._billing import HttpBillingGateway
+r = asyncio.run(HttpBillingGateway().read(api_base=DEFAULT_MISTRAL_API_BASE, credentials=api_key_credentials(DEFAULT_MISTRAL_API_ENV_KEY), with_budget=True))
+print(json.dumps({'subscription': r.subscription and r.subscription.model_dump(), 'budget': r.budget and r.budget.model_dump()}))
+"""
+
+
+def interpreter_of(exe):
+    """The Python a console script runs with (its shebang), or None."""
+    try:
+        line = open(os.path.realpath(exe), 'rb').readline().decode(errors='ignore').strip()
+    except OSError:
+        return None
+    if not line.startswith('#!'): return None
+    parts = line[2:].split()
+    return parts[0] if parts and 'python' in parts[0] else (parts[1] if len(parts) > 1 and parts[0].endswith('env') and 'python' in parts[1] else None)
+
+
 def unknown(note):
     return [{'window': 'unknown', 'used': None, 'reset': '', 'note': note}]
 
@@ -592,10 +731,14 @@ def usage_probe(a, env):
     `observed` (when the reading was taken). Kinds: command+regex, codex_sessions, none. A probe that fails or
     matches nothing returns one `unknown` window with the diagnostic: never an empty list."""
     spec = a.get('usage', {'kind': 'none'}); kind = spec.get('kind', 'none'); out = []
-    exe = shutil.which(a.get('binary', a['name'])) or a.get('binary', a['name'])
-    if kind == 'command':
-        txt, diag = sh([exe] + spec['argv'], env, timeout=90)
-        for mt in re.finditer(spec['regex'], txt, re.M):
+    exe = shutil.which(spec.get('binary') or a.get('binary', a['name'])) or spec.get('binary') or a.get('binary', a['name'])  # usage.binary: a probe through another CLI (pi -> opencode)
+    if kind in ('command', 'tui'):
+        if kind == 'tui':
+            txt, diag = tui_capture([exe] + spec.get('argv', []), env, spec['steps'], timeout=spec.get('timeout', 60), cwd=tempfile.gettempdir())
+        else:
+            txt, diag = sh([exe] + spec['argv'], env, timeout=90)
+        flags = re.M | (re.S if 'S' in spec.get('flags', '') else 0) | (re.I if 'I' in spec.get('flags', '') else 0)
+        for mt in re.finditer(spec['regex'], txt, flags):
             g = dict(zip(spec['groups'], mt.groups()))
             try:
                 used = int(g['used']) if 'used' in g else 100 - int(g['remaining'])
@@ -604,7 +747,10 @@ def usage_probe(a, env):
                 return unknown('usage regex groups must capture window and an integer used|remaining on every match: %r' % (g,))
             rt = reset_from_text(g['reset_text']) if g.get('reset_text') else None
             reset = g.get('reset_iso') or (rt.isoformat() if rt else '')
-            out.append({'window': g['window'].strip(), 'used': used, 'reset': reset, 'observed': now().isoformat()})
+            name = g['window'].strip() + (' (%s)' % g['period'].strip() if g.get('period') and g['period'].strip() else '')
+            w = {'window': name, 'used': used, 'reset': reset, 'observed': now().isoformat()}
+            if g.get('plan'): w['plan'] = g['plan'].strip()
+            out.append(w)
         if not out:
             return unknown(f"usage command gave no parsable window ({diag or 'regex matched nothing'}): {txt[-120:].strip()!r}" if txt else f'usage command failed: {diag}')
     elif kind == 'codex_sessions':
@@ -632,22 +778,57 @@ def usage_probe(a, env):
                                 'reset': dt.datetime.fromtimestamp(best[w]['resets_at'], dt.timezone.utc).isoformat(), 'observed': best_t.isoformat()})
         if not out:
             return unknown(f'no rate_limits record in the last sessions under {root}' if logs else f'no session logs under {root}')
+    elif kind == 'opencode_limits':
+        # `opencode api` asks a private local server (--standalone, so the account of this env) for the OpenCode Go
+        # allowance of the signed-in Console workspace: rolling (5 h), weekly and monthly percent used with reset times.
+        txt, diag = sh([exe] + spec['argv'], env, timeout=60)
+        try: data = (json.loads(txt) or {}).get('data')
+        except ValueError: return unknown(f"opencode usage limits unreadable ({diag or 'not JSON'}): {txt[-120:].strip()!r}")
+        if not data: return unknown('opencode: not signed in to an OpenCode Console workspace (`opencode auth login`)' + (f' ({diag})' if diag else ''))
+        names = spec.get('windows', {})
+        for k, w in (data.get('go') or {}).items():
+            if not isinstance(w, dict) or w.get('percent') is None: continue
+            ra = w.get('resetsAt')
+            out.append({'window': names.get(k, k), 'used': round(w['percent']), 'plan': spec.get('plan', 'OpenCode Go'), 'observed': now().isoformat(),
+                        'reset': dt.datetime.fromtimestamp(ra / 1000, dt.timezone.utc).isoformat() if ra else ''})
+        for b in data.get('budgets') or []:
+            if isinstance(b, dict) and b.get('percent') is not None:
+                ra = b.get('resetsAt')
+                out.append({'window': 'budget %s' % (b.get('name') or b.get('period') or ''), 'used': round(b['percent']), 'observed': now().isoformat(),
+                            'reset': dt.datetime.fromtimestamp(ra / 1000, dt.timezone.utc).isoformat() if ra else ''})
+        if not out: return unknown('opencode: no OpenCode Go allowance on workspace %s (free models only)' % ((data.get('workspace') or {}).get('name') or '?'))
+    elif kind == 'vibe_billing':
+        # Mistral's billing API through Vibe's own Python and stored sign-in: the monthly Vibe budget (percent used,
+        # reset) and the plan name. Private Vibe modules: an upgrade that moves them reads as `unknown`, never as 0%.
+        py = interpreter_of(exe)
+        if not py: return unknown(f'vibe: cannot find the Python behind {exe}')
+        txt, diag = sh([py, '-I', '-c', VIBE_BILLING], env, timeout=30)
+        try: d = json.loads(txt.strip().splitlines()[-1])
+        except (ValueError, IndexError): return unknown(f"vibe billing unreadable ({diag or 'not JSON'}): {txt[-120:].strip()!r}")
+        b = (d.get('budget') or {}).get('vibe_budget'); plan = (d.get('subscription') or {}).get('plan_name')
+        if not b: return unknown('vibe: no Vibe budget on this account (plan %s; /v1/billing/budget needs the see_org_inference_usage permission)' % (plan or '?'))
+        out.append({'window': spec.get('window', 'monthly'), 'used': round(b['usage_percentage']), 'reset': b.get('reset_at') or '', 'observed': now().isoformat(),
+                    **({'plan': plan.title() if plan and plan.isupper() else plan} if plan else {})})
     else:
         return unknown(spec.get('note', 'no usage probe for this harness'))
     return out
 
 
 def usage(r, ad):
-    """Usage per (harness, account) for every account present in the roster."""
-    res = []; seen = set()
+    """Usage per (harness, account) for every account present in the roster, probed in parallel (a TUI probe takes
+    10-20 s), listed in roster order."""
+    from concurrent.futures import ThreadPoolExecutor
+    jobs = []; seen = set()
     for key, m in r['models'].items():
         a = ad.get(m['cli'])
         if not a: continue
         acc = lib.account_of(m, a)
         if (m['cli'], acc) in seen: continue
         seen.add((m['cli'], acc))
-        res.append({'cli': m['cli'], 'account': acc, 'windows': usage_probe(a, lib.effective_env(m, a))})
-    return res
+        jobs.append((m['cli'], acc, a, lib.effective_env(m, a)))
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        probes = [ex.submit(usage_probe, a, env) for _, _, a, env in jobs]
+        return [{'cli': cli, 'account': acc, 'windows': f.result()} for (cli, acc, _, _), f in zip(jobs, probes)]
 
 
 def account_keys(r, ad, cli, account):
@@ -893,6 +1074,69 @@ def cmd_usage(args):
                       'discovery': upgrades}))
 
 
+def window_kind(name):
+    """short | weekly | monthly | other, from a window name as the probes report it (5h, rolling, Current session,
+    Current week (all models), weekly, monthly, budget ..., Gemini Models (Weekly Limit))."""
+    n = name.lower()
+    if re.search(r'month|budget', n): return 'monthly'
+    if re.search(r'week', n): return 'weekly'
+    if re.search(r'\b\d+\s*(h|hr|hour|min)|session|rolling|5h|daily|day|hour', n): return 'short'
+    return 'other'
+
+
+def fmt_reset(iso):
+    if not iso: return '-'
+    try: t = lib.parse_time(iso)
+    except Exception: return iso
+    d = t - now()
+    if d.total_seconds() <= 0: return 'now'
+    h = int(d.total_seconds() // 3600)
+    left = '%dd%02dh' % (h // 24, h % 24) if h >= 24 else '%dh%02dm' % (h, int(d.total_seconds() % 3600 // 60))
+    return '%s (in %s)' % (t.astimezone().strftime('%a %d %b %H:%M'), left)
+
+
+def status_rows(r, ad, u):
+    """One row per roster model: subscription, plan, account, then the windows that apply to it grouped short/weekly/monthly."""
+    by = {(e['cli'], e['account']): e for e in u}
+    rows = []
+    for k, m in r['models'].items():
+        a = ad.get(m['cli'])
+        if not a: continue
+        acc = lib.account_of(m, a); e = by.get((m['cli'], acc)) or {'windows': []}
+        mine = [w for w in e['windows'] if k in set(window_keys(r, ad, e, w['window'] if w.get('window') else ''))] if e['windows'] else []
+        wins = {'short': None, 'weekly': None, 'monthly': None}; extra = []; notes = []; plan = m.get('plan')
+        for w in mine:
+            if w.get('plan') and not plan: plan = w['plan']
+            if w.get('used') is None: notes.append(w.get('note') or 'unknown'); continue
+            kind = window_kind(w['window'])
+            slot = kind if kind in wins and wins[kind] is None else None
+            item = {'window': w['window'], 'used': w['used'], 'reset': w.get('reset') or '', 'observed': w.get('observed'), 'stale': bool(w.get('stale'))}
+            if slot: wins[slot] = item
+            else: extra.append(item)
+        h = r['health'].get(k); cooled = bool(h and lib.parse_time(h['until']) > now())
+        rows.append({'key': k, 'cli': m['cli'], 'model': m['model'], 'account': m.get('account_label') or acc, 'subscription': m.get('subscription') or '?',
+                     'plan': plan or '', 'windows': wins, 'other_windows': extra, 'notes': notes,
+                     'cooldown_until': h['until'] if cooled else None, 'cooldown_reason': h['reason'] if cooled else None})
+    return rows
+
+
+def cmd_status(args):
+    r = lib.load_reg(); ad = lib.adapters(); u = usage(r, ad)
+    for e in u: mark_stale(r, ad, e)
+    rows = status_rows(r, ad, u)
+    if '--json' in args: print(json.dumps(rows)); return
+    def cell(w):
+        if not w: return '-'
+        return '%3d%% -> %s%s' % (w['used'], fmt_reset(w['reset']), ' STALE' if w['stale'] else '')
+    print('%-24s %-9s %-34s %-12s | %-34s | %-34s | %s' % ('model', 'cli', 'account / plan', 'subscription', 'short-term (5h/session)', 'weekly', 'monthly'))
+    for x in rows:
+        who = ('%s (%s)' % (x['account'], x['plan']) if x['plan'] and x['plan'] not in x['account'] else x['account'])[:34]
+        print('%-24s %-9s %-34s %-12s | %-34s | %-34s | %s' % (x['key'][:24], x['cli'], who, x['subscription'], cell(x['windows']['short']), cell(x['windows']['weekly']), cell(x['windows']['monthly'])))
+        for w in x['other_windows']: print('%-24s %-9s   also: %s' % ('', '', '%s %s' % (w['window'], cell(w))))
+        for n in x['notes']: print('%-24s %-9s   note: %s' % ('', '', n[:150]))
+        if x['cooldown_until']: print('%-24s %-9s   COOLDOWN until %s: %s' % ('', '', lib.parse_time(x['cooldown_until']).astimezone().strftime('%a %d %H:%M'), (x['cooldown_reason'] or '')[:100]))
+
+
 def cmd_wait(args):
     """Sleep until the role (or legacy pool name) has an eligible healthy model, then print the keys picked (one per
     vendor, `--vendors N`, default 1). EXCLUDE keys (comma list) are expanded to every account and harness of the same
@@ -918,6 +1162,7 @@ if __name__ == '__main__':
     elif a[0] == 'smoke': cmd_smoke(a[1:])
     elif a[0] == 'discover': cmd_discover(a[1:])
     elif a[0] == 'usage': cmd_usage(a[1:])
+    elif a[0] == 'status': cmd_status(a[1:])
     elif a[0] == 'wait': cmd_wait(a[1:])
     elif a[0] == 'alerts': print(json.dumps([x['id'] for x in critical_check(lib.find_repo(required=False))]))
     elif a[0] == 'health': print(json.dumps(lib.load_reg()['health'], indent=2))

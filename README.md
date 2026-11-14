@@ -2,7 +2,7 @@
 
 Plan a software project adversarially, create it in Linear, then let cheap models implement it ticket by ticket, reviewed by stronger models, unattended, on the AI coding CLIs you already pay for. Every role has its tier (see Tiers): flagships plan, balanced models review, fast and cheap models write the code.
 
-Six skills for Claude Code (or any harness that reads `~/.claude/skills`):
+Eight skills for Claude Code (or any harness that reads `~/.claude/skills`):
 
 | Skill | When | What it does |
 |---|---|---|
@@ -10,7 +10,9 @@ Six skills for Claude Code (or any harness that reads `~/.claude/skills`):
 | `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by one Tier 1 model of another vendor, guardrails, then the Linear project with all tickets |
 | `/autopilot-milestone` | when the project grows | `/autopilot-plan` for an existing project: a new major milestone from new scope or from parked ideas (`/autopilot-milestone ENG-40,ENG-41`), its KPIs, a pre-mortem and plan review of the delta, your approval, then the Linear milestone, tickets and ETA bar |
 | `/autopilot-run` | per project, for hours | one ticket at a time: Tier 1 plan review, a Tier 3 implementer, one Tier 2 reviewer, again until approved, one commit, Linear updated; one progress bar and ETA per major milestone, mirrored on the Linear milestones |
+| `/autopilot-continue` | after a session ends | resumes a run exactly where it stopped: no setup questions, account and quotas refreshed, pipeline restarted, interrupted tickets recovered, then the `/autopilot-run` loop |
 | `/autopilot-idea` | any time | captures the owner's quick ideas, verbatim, in the project's "Ideas (unscheduled)" Linear milestone, out of the queue and every ETA; later promotes one or several into a real milestone (pre-mortem, plan review, approval) |
+| `/autopilot-status` | any time | every configured model with its subscription, the share of its short-term (5 h), weekly and monthly quota used and when each window resets, for every harness |
 | `/autopilot-usage` | any time | what quota is left on every CLI and account, which pools can run now, and how many tokens went through every harness and account (per day, month, year; terminal chart or HTML page) |
 
 ## Tiers
@@ -31,7 +33,7 @@ The owner's tier table (November 2026) decides who does what. `bin/autopilot_lib
 
 **Selection.** A role's candidates are the valid roster entries of its tier whose CLI is installed and that are not excluded. `run-model` draws one at random, weighted by the credit left on its account (the latest `usage` reading; unknown is neutral, an account near exhaustion is almost never drawn) and by its subscription (paid 1, unconfirmed 0.7, free plan 0.25). The draw order is the fallback chain. `AUTOPILOT_SEED` makes it reproducible.
 
-**Vendor -> CLI.** A model is reached only through its vendor's own CLI: Anthropic through `claude`, OpenAI through `codex`, Google through `agy`, Mistral through `vibe`, xAI through `grok` or `cursor`, every other vendor through `opencode` (OpenCode Go or OpenRouter). An entry that breaks it is refused at load, in every pool and by `--model`; `bin/harness add-model` will not create one.
+**Vendor -> CLI.** A model is reached only through its vendor's own CLI: Anthropic through `claude`, OpenAI through `codex`, Google through `agy`, Mistral through `vibe`, xAI through `grok`, every other vendor through `pi` (OpenCode Go subscription: pi spends far fewer tokens than opencode on it) or `opencode` (reserved for opencode free models and OpenRouter `:free`). An entry that breaks it is refused at load, in every pool and by `--model`; `bin/harness add-model` will not create one.
 
 **Coordinator account.** Detected per session, never configured: an adapter's `coordinator_env` (Claude Code sets `CLAUDECODE`) names the CLI the coordinator runs in, its `account_env` in the coordinator's process names the account (unset = the CLI's default home); `AUTOPILOT_COORDINATOR=<cli>[/<account>]` overrides. `bin/run-model whoami --record` stores it in `state.json`. Entries on that exact account (another login of the same CLI is a normal account) run last, for cheap roles only, and only while the account keeps `coordinator_reserve` (default 30% of the 5-hour window and 20% of the weekly window left); below it the run is refused and a CRITICAL alert raised.
 
@@ -49,8 +51,8 @@ One JSON adapter per CLI in `harnesses/`. "Accounts" means several logins of the
 |---|---|---|---|---|
 | OpenAI Codex | `codex` | `CODEX_HOME`: `~/.codex`, `~/.codex-b`, ... | rate limits in the session logs | session rollouts |
 | Claude Code | `claude` | `CLAUDE_CONFIG_DIR`: `~/.claude`, `~/.claude-b`, ... | `/usage` | project transcripts |
+| pi | `pi` | `PI_CODING_AGENT_DIR`: `~/.pi/agent`, `~/.pi/agent-b`, ... | OpenCode Go limits (shared with opencode) | session JSONL |
 | opencode | `opencode` | `XDG_DATA_HOME`: `~/.local/share`, `~/.local/share-b`, ... | none (quota errors) | SQLite store |
-| Cursor | `cursor-agent` | one login (an API key per extra account) | none (cursor.com) | none |
 | xAI Grok | `grok` | one login | interactive `/usage` only | session usage files |
 | Google Antigravity | `agy` | one login | `/usage` | brain transcripts |
 | Google Gemini CLI | `gemini` | one login | `/stats` only | chat recordings (untested); not used for models: Google models run only through `agy` |

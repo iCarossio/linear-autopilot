@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh [--agents] [--import <models.json>]
-# Symlinks the six skills into ~/.claude/skills (and ~/.agents/skills with --agents, for other harnesses that read
+# Symlinks the eight skills into ~/.claude/skills (and ~/.agents/skills with --agents, for other harnesses that read
 # the Agent Skills layout), then creates the user config ($AUTOPILOT_CONFIG_DIR, default ~/.config/linear-autopilot)
 # from templates/models.json, or from an existing roster with --import.
 set -euo pipefail
@@ -9,7 +9,7 @@ IMPORT=""; AGENTS=0
 while [ $# -gt 0 ]; do case "$1" in --agents) AGENTS=1;; --import) IMPORT="$2"; shift;; *) echo "unknown flag $1"; exit 1;; esac; shift; done
 for dir in "$HOME/.claude/skills" $([ "$AGENTS" = 1 ] && echo "$HOME/.agents/skills"); do
   mkdir -p "$dir"
-  for s in autopilot-init autopilot-plan autopilot-milestone autopilot-run autopilot-usage autopilot-idea; do
+  for s in autopilot-init autopilot-plan autopilot-milestone autopilot-run autopilot-usage autopilot-idea autopilot-continue autopilot-status; do
     ln -sfn "$HERE/skills/$s" "$dir/$s"; echo "linked $dir/$s -> $HERE/skills/$s"
   done
 done

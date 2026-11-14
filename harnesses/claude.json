@@ -34,7 +34,14 @@
       "window",
       "used",
       "reset_text"
-    ]
+    ],
+    "window_groups": {
+      "session|all models": ".",
+      "fable": "fable",
+      "opus": "opus",
+      "sonnet": "sonnet",
+      "haiku": "haiku"
+    }
   },
   "quota_patterns": [
     "usage limit",

@@ -1,0 +1,61 @@
+{
+  "name": "pi",
+  "binary": "pi",
+  "vendor": "by_model",
+  "doc": "pi (pi.dev coding agent): reaches every vendor except the five that own a CLI (Anthropic, OpenAI, Google, Mistral, xAI), like opencode. Model ids are `provider/id` as `pi --list-models` prints them (opencode-go/deepseek-v4-pro, openrouter/... :free ids). Credentials live in $PI_CODING_AGENT_DIR/auth.json (default ~/.pi/agent), so a second login is another directory (~/.pi/agent-b, standard <default>-<letter>). `-p` is non-interactive; `--approve` trusts the project's local files; sessions stay on disk because the token report reads them.",
+  "run": {
+    "argv": [
+      "-p",
+      "--model",
+      "{model}",
+      "--approve",
+      "{prompt}"
+    ],
+    "env": {},
+    "output": "stdout"
+  },
+  "account_env": "PI_CODING_AGENT_DIR",
+  "account_default": "~/.pi/agent",
+  "account_detect": "~/.pi/agent-[a-z]",
+  "list_models": {
+    "kind": "command",
+    "argv": [
+      "--list-models"
+    ],
+    "regex": "^([a-z][\\w.-]*)\\s+([\\w][\\w.:/#-]*)\\s+\\d"
+  },
+  "usage": {
+    "kind": "opencode_limits",
+    "binary": "opencode",
+    "note": "pi has no usage command. Its opencode-go provider spends the same OpenCode Go allowance (rolling 5 h, weekly, monthly) as opencode, so the probe asks opencode for the default account's limits. Other providers (OpenRouter :free) have no tracked window.",
+    "argv": [
+      "api",
+      "--standalone",
+      "GET",
+      "/api/experimental/usage/limits"
+    ],
+    "windows": {
+      "rolling": "5h",
+      "weekly": "weekly",
+      "monthly": "monthly"
+    },
+    "window_groups": {
+      ".": "^opencode-go/(?!.*free)"
+    }
+  },
+  "quota_patterns": [
+    "usage limit",
+    "Go usage limit exceeded",
+    "rate limit",
+    "insufficient"
+  ],
+  "account_login": {
+    "file": "auth.json"
+  },
+  "tokens": {
+    "kind": "pi_sessions",
+    "path": "$PI_CODING_AGENT_DIR/sessions"
+  },
+  "coordinator_env": [],
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
+}

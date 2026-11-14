@@ -28,8 +28,22 @@
     "regex": "^\\s*(\\S+/\\S+)\\s*$"
   },
   "usage": {
-    "kind": "none",
-    "note": "limits only in the interactive /usage; the reset time in the quota error is parsed by run-model"
+    "kind": "opencode_limits",
+    "note": "OpenCode Go allowance (rolling 5 h, weekly, monthly) from `opencode api --standalone GET /api/experimental/usage/limits`, on the account of the entry env (XDG_DATA_HOME). Free models (opencode/*-free, OpenRouter :free) have no tracked window.",
+    "argv": [
+      "api",
+      "--standalone",
+      "GET",
+      "/api/experimental/usage/limits"
+    ],
+    "windows": {
+      "rolling": "5h",
+      "weekly": "weekly",
+      "monthly": "monthly"
+    },
+    "window_groups": {
+      ".": "^opencode-go/(?!.*free)"
+    }
   },
   "quota_patterns": [
     "usage limit",

@@ -15,7 +15,8 @@ similarity), ranks by probability x impact and writes:
 
 Hard rules (fail closed):
 - --planner <roster key> is required (or --exclude-vendor): the planner's vendor and model id are excluded on every
-  account, so a model never reviews its own plan;
+  account, so a model never reviews its own plan. The recorded project coordinator (state.json `coordinator`) is
+  excluded the same way `run-model` excludes it for a plan role: picker and runner must refuse the same keys;
 - reviewers are Tier 1 only (roles premortem / plan_review, drawn at random weighted by the credit left on each
   account), k distinct vendors; when fewer are available the run is degraded, never filled with a second model of the
   same vendor nor with another tier (the old --allow-mid is refused);
@@ -70,6 +71,11 @@ if planner:
     ex_keys.append(planner); ex_vendors.append(lib.vendor_of(reg['models'][planner], ad.get(reg['models'][planner]['cli'])))
 if not ex_vendors:
     sys.exit('premortem: --planner <roster key> (or --exclude-vendor <vendor>) is required: a model must not review its own plan')
+# Same exclusion run-model applies for a plan role (bin/run-model, PLAN_ROLES): the recorded coordinator's vendor.
+# Without it the weighted draw can select that vendor and the runner returns status "excluded" immediately.
+coord = lib.load_state(repo).get('coordinator')
+if coord in reg['models']:
+    ex_keys.append(coord); ex_vendors.append(lib.vendor_of(reg['models'][coord], ad.get(reg['models'][coord]['cli'])))
 EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, ad=ad)
 if '--allow-mid' in args:
     sys.exit('premortem: --allow-mid was removed by the tier policy: pre-mortems are Tier 1 only (run-model wait premortem, or tell the owner)')

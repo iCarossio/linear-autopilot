@@ -526,8 +526,8 @@ def validate_reasons(j):
 # Vendor -> CLI is fixed: a model is only ever reached through its vendor's own CLI (VENDOR_CLIS); any other vendor
 # goes through opencode (OpenCode Go or OpenRouter). An entry that breaks it is refused, not repaired.
 
-VENDOR_CLIS = {'anthropic': ('claude',), 'openai': ('codex',), 'google': ('agy',), 'mistral': ('vibe',), 'xai': ('grok', 'cursor')}
-OTHER_VENDOR_CLIS = ('opencode',)
+VENDOR_CLIS = {'anthropic': ('claude',), 'openai': ('codex',), 'google': ('agy',), 'mistral': ('vibe',), 'xai': ('grok',)}
+OTHER_VENDOR_CLIS = ('opencode', 'pi')
 LEVELS = (0, 1, 2, 3, 4)
 ROLES_DEFAULT = {'implement': [2], 'fix': [2], 'review': [2], 'plan_review': [1], 'premortem': [1], 'milestone_review': [1],
                  'coordinate': [1], 'trivial': [4]}

@@ -17,8 +17,9 @@
     "kind": "none"
   },
   "usage": {
-    "kind": "none",
-    "note": "interactive /usage only"
+    "kind": "vibe_billing",
+    "note": "monthly Vibe budget and plan from Mistral's billing API (/v1/billing/budget, /v1/billing/subscription) through Vibe's own Python and sign-in; no model call",
+    "window": "monthly"
   },
   "quota_patterns": [
     "quota",

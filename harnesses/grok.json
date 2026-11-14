@@ -31,8 +31,43 @@
     "regex": "^\\s*[*-]\\s+(grok[\\w.-]*)"
   },
   "usage": {
-    "kind": "none",
-    "note": "interactive /usage only (the CLI `grok usage` needs a session id); set the cooldown from the reset shown there or in the quota error"
+    "kind": "tui",
+    "note": "`grok usage --json` needs Grok's background service, `grok -p /usage` sends /usage to the model: the probe opens the TUI in a pseudo-terminal, types the local /usage command, reads the Usage limit tab (percent of the plan's credit used, reset, plan name) and kills the TUI. No model call.",
+    "argv": [],
+    "steps": [
+      {
+        "wait_for": "❯",
+        "timeout": 25
+      },
+      {
+        "sleep": 1
+      },
+      {
+        "type": "/usage"
+      },
+      {
+        "sleep": 1
+      },
+      {
+        "key": "enter"
+      },
+      {
+        "wait_for": "Resets?:|No usage limit|managed by your team",
+        "timeout": 25
+      },
+      {
+        "sleep": 1
+      }
+    ],
+    "timeout": 70,
+    "flags": "S",
+    "regex": "(Weekly|Monthly|Daily|Session|5-hour) limit(?: \\(([^)\\n]+)\\))?[^%]*?(\\d+)%.*?(Resets?:[^│\\n]+)",
+    "groups": [
+      "window",
+      "plan",
+      "used",
+      "reset_text"
+    ]
   },
   "quota_patterns": [
     "402",

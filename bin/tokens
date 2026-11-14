@@ -11,7 +11,7 @@ glyphs; claude, opencode, ... have their own hues). The total on the period, and
 (input, of which cached, output, total, share), follow the chart. `--models` adds the split per model id.
 
 Sources: the `tokens` spec of each adapter (harnesses/<cli>.json): codex_sessions, claude_projects, opencode_db,
-grok_sessions, agy_brain, gemini_chats, or none (the CLI keeps no local count: the report says so). Nothing is run,
+pi_sessions, grok_sessions, agy_brain, gemini_chats, or none (the CLI keeps no local count: the report says so). Nothing is run,
 no quota is spent. Parsed files are cached in $AUTOPILOT_CONFIG_DIR/tokens-cache.json by size and mtime.
 Numbers: input = everything sent (cached included), cached = the part served from the prompt cache, output =
 everything generated (reasoning included), total = input + output. They are what the CLI logged, not an invoice.
@@ -23,8 +23,8 @@ import autopilot_lib as lib
 
 CACHE = os.path.join(lib.CONFIG_DIR, 'tokens-cache.json')
 # One hue per harness, in a fixed order (never cycled): the first eight slots of the validated categorical palette.
-HUES = [('codex', '#2a78d6', '#3987e5'), ('claude', '#eb6834', '#d95926'), ('opencode', '#1baf7a', '#199e70'),
-        ('cursor', '#eda100', '#c98500'), ('grok', '#e87ba4', '#d55181'), ('agy', '#008300', '#008300'),
+HUES = [('codex', '#2a78d6', '#3987e5'), ('claude', '#eb6834', '#d95926'), ('opencode', '#1baf7a', '#199e70'), ('pi', '#b8860b', '#d4a017'),
+        ('grok', '#e87ba4', '#d55181'), ('agy', '#008300', '#008300'),
         ('gemini', '#6250d6', '#9085e9'), ('vibe', '#e34948', '#e66767')]
 OTHER = ('#898781', '#898781')
 GLYPHS = ['█', '▓', '▒', '░', '■']
@@ -257,9 +257,26 @@ def rows_opencode(path):
     return []
 
 
+def rows_pi(path):
+    """pi session (JSONL): assistant messages with usage {input, output, cacheRead, cacheWrite, reasoning}; input
+    excludes the cache, output already holds the reasoning."""
+    rows = {}
+    for line in open(path, errors='ignore'):
+        if '"usage"' not in line: continue
+        try: e = json.loads(line)
+        except ValueError: continue
+        m = e.get('message') or {}; u = m.get('usage')
+        if e.get('type') != 'message' or m.get('role') != 'assistant' or not isinstance(u, dict): continue
+        day = day_of(e.get('timestamp') or os.path.getmtime(path)); model = m.get('model') or ''
+        cr = u.get('cacheRead', 0) or 0
+        r = rows.setdefault((day, model), [day, model, 0, 0, 0, 0])
+        r[2] += (u.get('input', 0) or 0) + cr + (u.get('cacheWrite', 0) or 0); r[3] += cr; r[4] += u.get('output', 0) or 0; r[5] += 1
+    return list(rows.values())
+
+
 KINDS = {
     'codex_sessions': ('**/*.jsonl', rows_codex), 'claude_projects': ('**/*.jsonl', rows_claude), 'grok_sessions': ('*/*/usage.json', rows_grok),
-    'agy_brain': ('*/.system_generated/logs/transcript.jsonl', rows_agy), 'gemini_chats': ('*/chats/*.json', rows_gemini), 'opencode_db': (None, rows_opencode),
+    'agy_brain': ('*/.system_generated/logs/transcript.jsonl', rows_agy), 'gemini_chats': ('*/chats/*.json', rows_gemini), 'opencode_db': (None, rows_opencode), 'pi_sessions': ('*/*.jsonl', rows_pi),
 }
 
 

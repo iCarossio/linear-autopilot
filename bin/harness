@@ -28,7 +28,7 @@
   harness new <name> --binary B --vendor V --argv '<json list of strings with {prompt} [{model}] [{out}]>' [--output stdout|file]
               [--account-env VAR --account-default PATH --account-detect GLOB] [--coordinator-env VAR[,VAR]] [--list-cmd 'args' --list-regex RX]
               [--usage-cmd 'args' --usage-regex RX --usage-groups window,used|remaining,reset_text|reset_iso] [--env K=V ...] [--doc TEXT]
-              [--tokens-kind codex_sessions|claude_projects|opencode_db|grok_sessions|agy_brain|gemini_chats --tokens-path PATH]
+              [--tokens-kind codex_sessions|claude_projects|opencode_db|pi_sessions|grok_sessions|agy_brain|gemini_chats --tokens-path PATH]
                                                        # write a new adapter to $AUTOPILOT_CONFIG_DIR/harnesses/<name>.json; --tokens-* tells
                                                        # `bin/tokens` which local log format the CLI writes and where ($VAR of account_env allowed)
   harness pools                                        # role -> candidates (same as the first part of `check`)
@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import autopilot_lib as lib
 
 COSTS = ('high', 'mid', 'cheap', 'free')
-KNOWN_CLIS = ['codex', 'claude', 'opencode', 'grok', 'agy', 'vibe', 'gemini', 'aider', 'goose', 'amp', 'cursor', 'copilot', 'kiro', 'qwen', 'droid', 'crush']
+KNOWN_CLIS = ['codex', 'claude', 'opencode', 'pi', 'grok', 'agy', 'vibe', 'gemini', 'aider', 'goose', 'amp', 'copilot', 'kiro', 'qwen', 'droid', 'crush']
 today = lambda: str(dt.date.today())
 
 
@@ -312,7 +312,7 @@ def cmd_new(args):
          'quota_patterns': ['quota', 'rate limit', 'usage limit'],
          'tokens': {'kind': 'none', 'note': 'no local token log known for this CLI (harness new --tokens-kind ... --tokens-path ... if it writes one)'}}
     if opt(args, '--tokens-kind'):
-        kinds = ('codex_sessions', 'claude_projects', 'opencode_db', 'grok_sessions', 'agy_brain', 'gemini_chats')
+        kinds = ('codex_sessions', 'claude_projects', 'opencode_db', 'pi_sessions', 'grok_sessions', 'agy_brain', 'gemini_chats')
         if opt(args, '--tokens-kind') not in kinds or not opt(args, '--tokens-path'): sys.exit('harness new: --tokens-kind must be one of %s and come with --tokens-path' % ', '.join(kinds))
         a['tokens'] = {'kind': opt(args, '--tokens-kind'), 'path': opt(args, '--tokens-path')}
     if opt(args, '--coordinator-env'):
@@ -375,6 +375,9 @@ def summary(r, ad):
                       and m.get('subscription') in (None, 'paid?')})
     if unknown:
         probs.append('subscription unknown for %s -> ask the owner once: `harness subscription <cli> <account> paid|free|reserved --plan NAME`' % ', '.join(unknown))
+    oc_go = sorted(k for k, m in r['models'].items() if m['cli'] == 'opencode' and m['model'].startswith('opencode-go/') and not lib.excluded_reason(r, k, m, ad.get('opencode')) and 'pi' in ad)
+    if oc_go:
+        probs.append('OpenCode Go models run through pi, not opencode (pi spends far fewer tokens on the same subscription; opencode stays for opencode/*-free and OpenRouter :free): `harness set <key> cli pi` for %s' % ', '.join(oc_go))
     return lines, probs
 
 
@@ -434,7 +437,8 @@ def cmd_whoami(args):
 
 def cmd_set(args):
     key, field, value = args[0], args[1], args[2] if len(args) > 2 else ''
-    if field not in ('level', 'subscription', 'plan', 'excluded', 'vendor'): sys.exit('harness set: level|subscription|plan|excluded|vendor')
+    if field not in ('level', 'subscription', 'plan', 'excluded', 'vendor', 'cli'): sys.exit('harness set: level|subscription|plan|excluded|vendor|cli')
+    if field == 'cli' and value not in lib.adapters(): sys.exit(f'harness set: no adapter for {value}')
     ad = lib.adapters()
 
     def fn(r):

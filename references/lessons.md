@@ -134,3 +134,7 @@ Symptom: the app the owner uses (`next start` on a fixed port) serves HTML whose
 ## The reaper removed another project's container
 
 Symptom: `docker-reap --apply` at a heartbeat removed `caddy-PRD-2546-m862e`, a dev proxy of an unrelated project on the same machine (Escape Purple run, 2026-11-11). Cause: the reaper considered every container on the daemon. Fix: the reaper is scoped to the project (`--only` or state.json `docker_reap_only`) and only reports without a scope; running compose services and containers with a restart policy are never removed.
+
+## wait-approval also returns on triage (2026-11-14, escape.tech qa-cms)
+
+Symptom: the coordinator read "wait-approval completed" as an approval and ran `pipeline merge` on a ticket in `triage` (5 rounds of failed checks, never reviewed). Cause: `wait-approval` wakes on an approval OR an attention line; the merge does not refuse a triage ticket. Rule: read the returned line; merge only `<ISSUE> r<n>` lines from approved.txt, never an `ATTENTION:`/triage line. Second cause in the same run: a CHECKS line ending in `| wc -l | grep -qx 0` always fails on macOS (BSD `wc` pads with spaces); use `| grep -c . | grep -qx 0`.

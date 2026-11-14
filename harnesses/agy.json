@@ -27,9 +27,10 @@
       "-p",
       "/usage"
     ],
-    "regex": "^(.+?)\\t[^\\t]*Remaining\\t(\\d+)%\\t(\\S+)",
+    "regex": "^(.+?)\\t([^\\t]*?)\\s*Remaining\\t(\\d+)%\\t(\\S+)",
     "groups": [
       "window",
+      "period",
       "remaining",
       "reset_iso"
     ],

@@ -17,7 +17,7 @@ You are the **milestone planner**. A project exists: `PLAN.md` at the repo root,
 |---|---|
 | `bin/milestone` | `add <spec>`: validation, pre-mortem of the delta, plan review, approval stop, decision, Linear, `PLAN.md`, state, bars. Resumable. `list`, `recompute`, `sync` (dates, bars, and tidy), `tidy [--dry-run]`. |
 | `bin/decision` | The sourced Decision log in `PLAN.md`. |
-| `bin/eta` | One bar + ETA per milestone, then overall. |
+| `bin/eta` | One bar + ETA per milestone, then overall. `--from-mcp FILE` schedules from a Linear MCP `list_issues` snapshot (no `LINEAR_API_KEY`); a proposed milestone stays on the bars. |
 | `bin/idea` | `list`, `promote ENG-1,... --id --name`: turns parked ideas into this skill's spec skeleton. |
 | `bin/bgrun` | Runs the 10-40 min review under a stall and timeout watchdog. |
 

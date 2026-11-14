@@ -41,7 +41,7 @@ chmod +x "$SCR/fake/fakecli"; export PATH="$SCR/fake:$PATH"; export SCR
 # rule means a fake model runs through its vendor's CLI name: the adapters of the real CLIs are overridden in the test
 # config dir to call the fake binary (stubs shadow the real binaries anyway).
 unset LINEAR_API_KEY LINEAR_API_URL CLAUDECODE CLAUDE_CONFIG_DIR CODEX_HOME AUTOPILOT_COORDINATOR AUTOPILOT_SEED AUTOPILOT_REPO GROK_SESSION_ID; export AUTOPILOT_NO_DISCOVER=1
-for c in codex claude agy opencode grok cursor-agent gemini vibe; do printf '#!/bin/sh\nexit 1\n' > "$SCR/fake/$c"; chmod +x "$SCR/fake/$c"; done
+for c in codex claude agy opencode grok gemini vibe; do printf '#!/bin/sh\nexit 1\n' > "$SCR/fake/$c"; chmod +x "$SCR/fake/$c"; done
 cat > "$SCR/fake/fake-reset" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$SCR/resets.log"
@@ -56,7 +56,7 @@ cat > "$SCR/fakeads.py" <<'EOF'
 # fakeads.py <cfg dir> [cli ...]: fake adapters named after the real CLIs (vendor and account fields kept from the repo's).
 import json, os, sys
 cfg = sys.argv[1]; os.makedirs(os.path.join(cfg, 'harnesses'), exist_ok=True)
-for cli in sys.argv[2:] or ['claude', 'codex', 'grok', 'agy', 'opencode', 'cursor', 'vibe']:
+for cli in sys.argv[2:] or ['claude', 'codex', 'grok', 'agy', 'opencode', 'vibe']:
     src = json.load(open(os.path.join(os.environ['H'], 'harnesses', cli + '.json')))
     a = {'name': cli, 'binary': 'fakecli', 'vendor': src.get('vendor', 'by_model'), 'run': {'argv': ['-p', '{prompt}', '--model', '{model}'], 'env': {}, 'output': 'stdout'},
          'list_models': {'kind': 'command', 'argv': ['models'], 'regex': r'^(\S+)$'}, 'usage': {'kind': 'none'}, 'quota_patterns': ['usage limit'],
@@ -80,7 +80,7 @@ $H/bin/harness add-model fk-a --cli claude --model claude-x-5 --level 1 --no-imp
 $H/bin/harness add-model fk-b --cli codex --model gpt-x --level 1 --no-implement --subscription paid >/dev/null
 $H/bin/harness add-model fk-c --cli grok --model grok-x --level 3 --subscription paid >/dev/null
 $H/bin/harness add-model fk-c2 --cli grok --model grok-x --level 3 --env FAKE_ACCOUNT=2 --subscription paid >/dev/null
-$H/bin/harness add-model fk-c3 --cli cursor --model grok-x --level 3 --subscription free >/dev/null
+$H/bin/harness add-model fk-c3 --cli grok --model grok-z --level 3 --env GROK_HOME=$SCR/grok-c3 --subscription free >/dev/null
 $H/bin/harness add-model fk-d --cli agy --model gemini-x --level 2 --subscription free >/dev/null
 $H/bin/harness add-model fk-f --cli codex --model gpt-y-terra --level 2 --subscription paid >/dev/null
 $H/bin/harness add-model fk-e --cli opencode --model beam-free --vendor opencode --level 2 >/dev/null
@@ -108,7 +108,6 @@ check "implementer identity recorded" "$($H/bin/state get implementer_ids.T-1)" 
 git checkout -q -- tracked.txt
 RB=$($H/bin/mkbrief review T-1 1 .autopilot/tickets/T-1.md)
 $H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-c2 >/dev/null 2>&1; check "same model, other account refused" "$?" "4"
-$H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model fk-c3 >/dev/null 2>&1; check "same model via another harness (cursor grok-x) refused" "$?" "4"
 $H/bin/run-model run review "$SCR/custom-review.md" .autopilot/out/x.md --cwd "$PWD" --model fk-d >/dev/null 2>&1; check "custom-named review brief without --issue refused" "$?" "4"
 echo "custom" > "$SCR/custom-review.md"
 FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$SCR/custom-review.md" .autopilot/out/x.md --cwd "$PWD" --standalone --exclude-vendor google --model fk-d >/dev/null 2>&1; check "standalone with --exclude-vendor google refuses fk-d" "$?" "4"
@@ -208,10 +207,10 @@ RB5=$($H/bin/mkbrief review T-5 4 .autopilot/tickets/T-1.md)
 $H/bin/run-model run review "$RB5" .autopilot/out/x.md --cwd "$PWD" --model fk-f >/dev/null 2>&1; check "the escalated Tier 2 implementer never reviews that ticket" "$?" "4"
 check "the review draw finds another Tier 2 model (fk-d, another vendor)" "$(FAKE_BEHAVIOUR=approve $H/bin/review T-5 4 "$RB5" | grep -cE '^fk-d: approve') $(ls .autopilot/out/ | grep -c 'T-5-rev-fk-f')" "1 0"
 $H/bin/harness add-model bad1 --cli opencode --model anthropic/claude-x-6 --level 2 >/dev/null 2>&1; check "vendor -> CLI: Claude through opencode refused at add-model" "$?" "1"
-$H/bin/harness add-model bad2 --cli cursor --model claude-x-6 --level 2 >/dev/null 2>&1; check "vendor -> CLI: Claude through cursor refused" "$?" "1"
+$H/bin/harness add-model bad2 --cli grok --model claude-x-6 --level 2 >/dev/null 2>&1; check "vendor -> CLI: Claude through grok refused" "$?" "1"
 $H/bin/harness add-model bad3 --cli agy --model gpt-x-7 --level 2 >/dev/null 2>&1; check "vendor -> CLI: GPT through agy refused" "$?" "1"
 $H/bin/harness add-model bad4 --cli opencode --model kimi-x --vendor anthropic --level 3 >/dev/null 2>&1; check "vendor -> CLI: an anthropic vendor through opencode refused" "$?" "1"
-$H/bin/harness add-model ok5 --cli cursor --model grok-y --level 3 >/dev/null 2>&1; check "vendor -> CLI: xAI through cursor accepted" "$?" "0"; $H/bin/harness remove ok5 >/dev/null
+$H/bin/harness add-model bad6 --cli opencode --model xai/grok-y --level 3 >/dev/null 2>&1; check "vendor -> CLI: xAI through opencode refused" "$?" "1"
 python3 -c "
 import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['models']['bad5']={'cli':'agy','model':'claude-x-9','level':2,'vendor':'anthropic'};json.dump(r,open(p,'w'))"
 check "a hand-edited entry breaking vendor -> CLI is refused at load, in pools and by --model" "$(POOL review | grep -c bad5) $($H/bin/run-model pool review 2>&1 >/dev/null | grep -c 'roster: refused bad5: anthropic models run only through claude') $($H/bin/run-model run review "$RB" .autopilot/out/x.md --cwd "$PWD" --model bad5 >/dev/null 2>&1; echo $?)" "0 1 4"
@@ -229,7 +228,7 @@ $H/bin/harness add-model fast3 --cli grok --model grok-4.7-build-fast --level 2 
 $H/bin/harness remove fast3 >/dev/null
 $H/bin/harness add-model fl1 --cli opencode --model opencode-go/deepseek-v4.1-flash --subscription paid >/dev/null 2>&1; F1=$?
 $H/bin/harness add-model fl2 --cli agy --model gemini-3.5-flash-lite --subscription paid >/dev/null 2>&1; F2=$?
-check "Flash / Flash-Lite are families, not speed variants: accepted at Tier 3" "$F1 $F2 $(python3 -c "import json,os;m=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['models'];print(m['fl1']['level'], m['fl2']['level'])")" "0 0 3 3"
+check "Flash / Flash-Lite are families, not speed variants: accepted (OpenCode Go DeepSeek Flash is Tier 2 by owner rule, Flash-Lite Tier 3)" "$F1 $F2 $(python3 -c "import json,os;m=json.load(open(os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json'))['models'];print(m['fl1']['level'], m['fl2']['level'])")" "0 0 2 3"
 $H/bin/harness remove fl1 >/dev/null; $H/bin/harness remove fl2 >/dev/null
 python3 -c "
 import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p))
@@ -402,7 +401,7 @@ echo "--- usage aggregation (fake probe via adapter override)"
 python3 - <<'PY'
 import json, os
 cfg = os.environ['AUTOPILOT_CONFIG_DIR']
-for cli in ('claude', 'codex', 'grok', 'agy', 'opencode', 'cursor', 'vibe'):
+for cli in ('claude', 'codex', 'grok', 'agy', 'opencode', 'vibe'):
     p = os.path.join(cfg, 'harnesses', cli + '.json'); a = json.load(open(p))
     a['usage'] = {'kind': 'command', 'argv': ['usage'], 'regex': r'^(\w+) (\d+)%(?: resets (\S+))?$', 'groups': ['window', 'used', 'reset_iso']}
     json.dump(a, open(p, 'w'))
@@ -532,6 +531,31 @@ cat > $ER/.autopilot/state.json <<EOF
 EOF
 rm -f $ER/.autopilot/eta-history.jsonl
 check "eta: parallel plan, no REPLAN" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta | grep -c REPLAN)" "0"
+# Linear MCP snapshot: same fields list_issues returns, plus blockedBy / inverseRelations. No API key.
+cat > $ER/.autopilot/mcp.json <<'EOF'
+{"hasNextPage": false, "milestones": [
+  {"id": "lm2", "name": "Core", "sortOrder": 1},
+  {"id": "lm1", "name": "Foundation", "sortOrder": 2}
+ ], "issues": [
+  {"id": "ENG-1", "status": "Done", "statusType": "completed", "projectMilestone": {"id": "lm1", "name": "Foundation"}, "estimate": {"value": 1, "name": "1"}, "blockedBy": []},
+  {"id": "ENG-2", "status": "In Progress", "statusType": "started", "projectMilestone": {"id": "lm1", "name": "Foundation"}, "estimate": 2, "blockedBy": ["ENG-1"]},
+  {"id": "ENG-3", "status": "Backlog", "statusType": "backlog", "projectMilestone": {"id": "lm2", "name": "Core"}, "estimate": {"value": 1}, "blockedBy": ["ENG-2"]},
+  {"id": "ENG-9", "status": "Canceled", "statusType": "canceled", "projectMilestone": {"id": "lm2", "name": "Core"}, "blockedBy": []},
+  {"identifier": "ENG-4", "state": {"name": "Todo", "type": "unstarted"}, "projectMilestone": {"id": "lm2", "name": "Core"}, "estimate": 1,
+   "inverseRelations": {"nodes": [{"type": "blocks", "issue": {"identifier": "ENG-3"}}]}}
+ ]}
+EOF
+echo '{"hasNextPage": true, "issues": []}' > $ER/.autopilot/mcp-partial.json
+check "eta --from-mcp: refuses a partial page" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta --from-mcp $ER/.autopilot/mcp-partial.json >/dev/null 2>&1; echo $?)" "1"
+rm -f $ER/.autopilot/eta-history.jsonl
+check "eta --from-mcp: milestone order, done/inflight, canceled dropped, blocker depth" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta --from-mcp $ER/.autopilot/mcp.json --json | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print([(m['name'], m['done'], m['total'], m['inflight'], m['minutes']) for m in d['milestones']], d['done'], d['inflight'], d['todo'], d['mcp'])
+")" "[('Core', 0, 2, 0, 180), ('Foundation', 1, 2, 1, 60)] 1 1 2 None"
+check "eta --from-mcp: no history write" "$([ -f $ER/.autopilot/eta-history.jsonl ] && echo yes || echo no)" "no"
+echo '{"issues": [{"id": "ENG-1", "statusType": "backlog", "projectMilestone": {"id": "lm1", "name": "Foundation"}}]}' > $ER/.autopilot/mcp-noblock.json
+check "eta --from-mcp: missing blockedBy is one shared stage" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta --from-mcp $ER/.autopilot/mcp-noblock.json --json | python3 -c "import json,sys; print(json.load(sys.stdin)['mcp'])")" "mcp snapshot has no blockedBy; open Linear tickets share one stage"
 # bgrun: a silent command is killed with its detached descendants; a busy one hits --timeout; a normal one passes through.
 BG=$SCR/bg; mkdir -p $BG
 check "bgrun: ok passes the exit code through" "$($H/bin/bgrun --name ok --log $BG/ok.log -- 'echo hi; exit 0' | tail -1 | sed 's/ in .*//')" "bgrun ok: ok rc=0"

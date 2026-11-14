@@ -31,7 +31,18 @@ and `done` count as queued. Ideas (state.json `ideas`, see `bin/idea`) never cou
 Unacknowledged CRITICAL alerts (`bin/alert`, e.g. a vendor out of quota on every account) print first, one
 `CRITICAL:` line each, so no message that starts with the ETA can leave them out.
 
-  eta [-v] [--json]      --json: one JSON object (overall + per milestone + replan + alerts) instead of the text lines
+  eta [-v] [--json] [--from-mcp FILE]
+                       --json: one JSON object (overall + per milestone + replan + alerts) instead of the text lines
+                       --from-mcp: schedule from a Linear MCP snapshot instead of the stale queue in state.json.
+                       FILE is a list_issues result ({"issues": [...], "hasNextPage": false}) or a bare list.
+                       Optional "milestones" (list_milestones: id, name, sortOrder) sets the bar order.
+                       Each issue uses the MCP shape (id ANT-1, statusType, projectMilestone, estimate)
+                       or the GraphQL shape (identifier, state.type, inverseRelations).
+                       blockedBy, when present, is the blocker list; inverseRelations of type blocks is the same.
+                       Completed counts as done, started as in flight, canceled is left out.
+                       A partial page (hasNextPage true) is refused. A proposed milestone in state stays.
+                       No blockedBy field means open Linear tickets share one stage (a note on stderr).
+                       This reading writes no ETA history.
 Proposed milestones (state.json `proposed_milestones`, set by `bin/milestone add` before approval) are added on a
 what-if schedule and printed with "(proposed) ... (awaiting approval)"; such a reading writes no history and no slip.
 ETA_STATE=<file> reads that state instead (a what-if schedule: `bin/milestone add --dry-run`); no history is written.
@@ -40,6 +51,214 @@ import datetime as dt, json, os, re, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import autopilot_lib as lib
+
+IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+[a-z]?\d?$')
+
+
+def argv_value(flag):
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 >= len(sys.argv) or sys.argv[i + 1].startswith('-'):
+            sys.exit('eta: %s needs a file' % flag)
+        return sys.argv[i + 1]
+    prefix = flag + '='
+    for a in sys.argv:
+        if a.startswith(prefix):
+            v = a[len(prefix):]
+            if not v:
+                sys.exit('eta: %s needs a file' % flag)
+            return v
+    return None
+
+
+def load_mcp(path):
+    """A Linear MCP list_issues payload, or a bare list of those issues."""
+    try:
+        doc = json.load(open(path))
+    except (OSError, ValueError) as ex:
+        sys.exit('eta: cannot read mcp snapshot %s: %s' % (path, ex))
+    if isinstance(doc, list):
+        doc = {'issues': doc}
+    if not isinstance(doc, dict) or not isinstance(doc.get('issues'), list):
+        sys.exit('eta: mcp snapshot must be {"issues": [...]} or a list of issues')
+    if doc.get('hasNextPage'):
+        sys.exit('eta: mcp snapshot is a partial page (hasNextPage true); concatenate every page first')
+    return doc
+
+
+def issue_kind(raw):
+    kind = raw.get('statusType')
+    if not kind and isinstance(raw.get('state'), dict):
+        kind = raw['state'].get('type')
+    if not kind:
+        if raw.get('canceledAt'):
+            return 'canceled'
+        if raw.get('completedAt'):
+            return 'completed'
+        if raw.get('startedAt'):
+            return 'started'
+        return 'unstarted'
+    kind = str(kind).lower()
+    if kind in ('canceled', 'cancelled', 'duplicate'):
+        return 'canceled'
+    if kind == 'completed':
+        return 'completed'
+    if kind == 'started':
+        return 'started'
+    return 'unstarted'
+
+
+def blockers_of(raw):
+    """Blocker identifiers, or None when the snapshot did not carry relations."""
+    if 'blockedBy' in raw and raw['blockedBy'] is not None:
+        out = []
+        for x in raw['blockedBy']:
+            if isinstance(x, str):
+                out.append(x)
+            elif isinstance(x, dict):
+                out.append(x.get('identifier') or x.get('id') or '')
+        return [x for x in out if x]
+    inv = raw.get('inverseRelations')
+    nodes = inv.get('nodes') if isinstance(inv, dict) else inv if isinstance(inv, list) else None
+    if nodes is None:
+        return None
+    out = []
+    for r in nodes:
+        if not isinstance(r, dict) or r.get('type') != 'blocks':
+            continue
+        issue = r.get('issue') or {}
+        ident = issue.get('identifier') or issue.get('id')
+        if ident:
+            out.append(ident)
+    return out
+
+
+def estimate_of(raw):
+    e = raw.get('estimate')
+    if isinstance(e, dict):
+        return e.get('value')
+    if isinstance(e, (int, float)) and not isinstance(e, bool):
+        return e
+    return None
+
+
+def stages_of(open_ids, blockers):
+    """One stage per dependency depth. Tickets with no open blocker share stage 0."""
+    level = {}
+
+    def lvl(t, stack):
+        if t in level:
+            return level[t]
+        if t in stack:
+            sys.exit('eta: dependency cycle: ' + ' -> '.join(list(stack[stack.index(t):]) + [t]))
+        ups = [lvl(b, stack + (t,)) for b in blockers.get(t, []) if b in open_set]
+        level[t] = 1 + max(ups) if ups else 0
+        return level[t]
+
+    open_set = set(open_ids)
+    for t in open_ids:
+        lvl(t, ())
+    if not level:
+        return []
+    return [[t for t in open_ids if level[t] == i] for i in range(max(level.values()) + 1)]
+
+
+def apply_mcp(S, doc):
+    """Replace the schedule with the MCP snapshot. Proposed milestones in S stay. Returns a note or None."""
+    ideas = S.get('ideas') or {}
+    idea_names = {ideas.get('name') or 'Ideas (unscheduled)', 'Ideas (unscheduled)'}
+    idea_lid = ideas.get('linear_milestone_id')
+    seen, rows = set(), []
+    any_blocked = False
+    for raw in doc['issues']:
+        if not isinstance(raw, dict):
+            sys.exit('eta: mcp issue is not an object')
+        ident = str(raw.get('identifier') or raw.get('id') or '')
+        if not IDENT.match(ident):
+            sys.exit('eta: mcp issue has no identifier: %r' % (raw.get('title') or raw.get('id')))
+        if ident in seen:
+            sys.exit('eta: duplicate mcp issue %s' % ident)
+        seen.add(ident)
+        ms = raw.get('projectMilestone') or {}
+        if isinstance(ms, str):
+            ms = {'name': ms}
+        elif not isinstance(ms, dict):
+            ms = {}
+        blocked = blockers_of(raw)
+        if blocked is not None:
+            any_blocked = True
+        rows.append((ident, issue_kind(raw), ms.get('id'), ms.get('name'), blocked, estimate_of(raw)))
+
+    meta = [m for m in (doc.get('milestones') or []) if isinstance(m, dict) and m.get('id')]
+
+    def sort_key(pair):
+        i, m = pair
+        so = m.get('sortOrder')
+        return (so is None, so if so is not None else 0, i)
+
+    meta_sorted = [m for _, m in sorted(enumerate(meta), key=sort_key)]
+    rank = {m['id']: i for i, m in enumerate(meta_sorted)}
+    names = {m['id']: m.get('name') for m in meta_sorted}
+    by_ms, ms_name, loose = {}, {}, []
+    done, inflight = [], {}
+    blockers = {}
+    sizes = dict(S.get('sizes') or {})
+    prev_inf = S.get('inflight') or {}
+    for ident, kind, lid, name, blocked, estv in rows:
+        if lid == idea_lid or name in idea_names:
+            continue
+        if kind == 'canceled':
+            continue
+        if lid:
+            by_ms.setdefault(lid, [])
+            if ident not in by_ms[lid]:
+                by_ms[lid].append(ident)
+            if name:
+                ms_name[lid] = name
+        else:
+            loose.append(ident)
+        if kind == 'completed':
+            done.append(ident)
+        elif kind == 'started':
+            rem = float(prev_inf[ident]['remaining']) if ident in prev_inf and 'remaining' in prev_inf[ident] else 0.5
+            inflight[ident] = dict(prev_inf.get(ident) or {})
+            inflight[ident]['remaining'] = rem
+        if any_blocked:
+            blockers[ident] = list(blocked or [])
+        if estv is not None:
+            sizes[ident] = estv
+    old_by_linear = {m.get('linear_id'): m for m in (S.get('milestones') or []) if m.get('linear_id')}
+    known = [lid for lid in rank if lid in by_ms]
+    unknown = [lid for lid in by_ms if lid not in rank]
+    built = []
+    for lid in known + unknown:
+        old = old_by_linear.get(lid) or {}
+        built.append({'id': old.get('id') or lid, 'name': names.get(lid) or ms_name.get(lid) or old.get('name') or lid,
+                      'linear_id': lid, 'issues': by_ms[lid]})
+    proposed = [m for m in (S.get('milestones') or []) if m.get('proposed')]
+    prop_ids = [t for m in proposed for t in m.get('issues', [])]
+    old_blockers = S.get('blockers') or {}
+    for t in prop_ids:
+        if t in old_blockers:
+            blockers[t] = list(old_blockers[t])
+    S['milestones'] = built + proposed
+    S['done'] = done
+    S['inflight'] = inflight
+    S['sizes'] = sizes
+    S['blockers'] = blockers
+    open_ids = []
+    for m in S['milestones']:
+        for t in m.get('issues', []):
+            if t not in done and t not in open_ids:
+                open_ids.append(t)
+    for t in loose + list(inflight):
+        if t not in done and t not in open_ids:
+            open_ids.append(t)
+    S['stages'] = stages_of(open_ids, blockers)
+    S['queue'] = [t for st in S['stages'] for t in st if t not in inflight]
+    if not any_blocked:
+        return 'mcp snapshot has no blockedBy; open Linear tickets share one stage'
+    return None
 
 
 def find_repo():
@@ -69,6 +288,13 @@ if S.get('proposed_milestones') and not os.environ.get('ETA_STATE'):
         S = json.load(open(_wi))
         WITH_PROPOSALS = True
     os.unlink(_wi)
+WITH_MCP = False
+MCP_NOTE = None
+_mcp = argv_value('--from-mcp')
+if _mcp:
+    MCP_NOTE = apply_mcp(S, load_mcp(_mcp))
+    WITH_MCP = True
+SKIP_HISTORY = WITH_PROPOSALS or WITH_MCP or bool(os.environ.get('ETA_STATE'))
 sizes, est = S.get('sizes', {}), S.get('est', {})
 SML = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
 
@@ -174,13 +400,13 @@ except (OSError, ValueError):
     pass
 # Slip: compare with the oldest reading taken 60-180 min ago.
 past = [h for h in hist if 60 <= (now - dt.datetime.fromisoformat(h['at'])).total_seconds() / 60 <= 180]
-if past and not WITH_PROPOSALS:
+if past and not SKIP_HISTORY:
     ref = past[0]
     slip = (end - dt.datetime.fromisoformat(ref['end'])).total_seconds() / 60
     if slip > 30:
         replan.append(f"ETA slipped {slip:+.0f} min since {dt.datetime.fromisoformat(ref['at']).astimezone():%H:%M}: "
                       "find what added time, then look for work to start in parallel")
-if not os.environ.get('ETA_STATE') and not WITH_PROPOSALS and (not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300):
+if not SKIP_HISTORY and (not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300):
     try:
         with open(hist_path, 'a') as f:
             f.write(json.dumps({'at': now.isoformat(), 'end': end.astimezone(dt.timezone.utc).isoformat(),
@@ -254,11 +480,16 @@ if milestones:
 pct = progress(list(dict.fromkeys(list(done) + list(inflight) + queue)))[0]
 alerts = [] if os.environ.get('ETA_STATE') else lib.alerts(M)
 if '--json' in sys.argv:
-    print(json.dumps({'alerts': [lib.alert_line(a) for a in alerts], 'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
-                      'spread_min': spread(total_end), 'pct': round(pct, 4), 'done': len(done), 'inflight': len(inflight),
-                      'todo': len(queue), 'milestones': [dict(r, end=r['end'] and r['end'].isoformat()) for r in rows],
-                      'replan': replan}, indent=1))
+    out = {'alerts': [lib.alert_line(a) for a in alerts], 'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
+           'spread_min': spread(total_end), 'pct': round(pct, 4), 'done': len(done), 'inflight': len(inflight),
+           'todo': len(queue), 'milestones': [dict(r, end=r['end'] and r['end'].isoformat()) for r in rows],
+           'replan': replan}
+    if WITH_MCP:
+        out['mcp'] = MCP_NOTE
+    print(json.dumps(out, indent=1))
     sys.exit(0)
+if MCP_NOTE:
+    print('eta: ' + MCP_NOTE, file=sys.stderr)
 for a in alerts:
     print(lib.alert_line(a))
 if rows:
