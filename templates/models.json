@@ -58,7 +58,8 @@
       "tier": "codex-sol",
       "cost": "high",
       "vendor": "openai",
-      "level": 1
+      "level": 1,
+      "capacity": 1
     },
     "codex-terra": {
       "cli": "codex",
@@ -67,7 +68,8 @@
       "tier": "codex-terra",
       "cost": "mid",
       "vendor": "openai",
-      "level": 2
+      "level": 2,
+      "capacity": 1
     },
     "codex-luna": {
       "cli": "codex",
@@ -76,7 +78,8 @@
       "tier": "codex-luna",
       "cost": "cheap",
       "vendor": "openai",
-      "level": 3
+      "level": 3,
+      "capacity": 1
     },
     "claude-opus": {
       "cli": "claude",
@@ -122,7 +125,8 @@
       "tier": "grok-subscription",
       "cost": "mid",
       "vendor": "xai",
-      "level": 2
+      "level": 2,
+      "capacity": 8
     },
     "oc-deepseek-pro": {
       "cli": "opencode",
@@ -131,7 +135,8 @@
       "tier": "go",
       "cost": "cheap",
       "vendor": "deepseek",
-      "level": 1
+      "level": 1,
+      "capacity": 4
     },
     "oc-glm": {
       "cli": "opencode",
@@ -140,7 +145,8 @@
       "tier": "go",
       "cost": "cheap",
       "vendor": "zhipu",
-      "level": 1
+      "level": 1,
+      "capacity": 4
     },
     "oc-go-deepseek-flash": {
       "cli": "opencode",
@@ -150,7 +156,8 @@
       "cost": "cheap",
       "vendor": "deepseek",
       "owner_note": "owner 2026-11-13: Tier 2 (implement and review)",
-      "level": 2
+      "level": 2,
+      "capacity": 4
     },
     "oc-go-glm-flash": {
       "cli": "opencode",
@@ -159,7 +166,8 @@
       "tier": "opencode-go-flash",
       "cost": "cheap",
       "vendor": "zhipu",
-      "level": 3
+      "level": 3,
+      "capacity": 4
     },
     "vibe-mistral": {
       "cli": "vibe",
@@ -178,7 +186,8 @@
       "tier": "free",
       "cost": "free",
       "vendor": "deepseek",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     },
     "oc-glm-flash-free": {
       "cli": "opencode",
@@ -187,7 +196,8 @@
       "tier": "free",
       "cost": "free",
       "vendor": "zhipu",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     },
     "oc-mimo-flash-free": {
       "cli": "opencode",
@@ -196,7 +206,8 @@
       "tier": "free",
       "cost": "free",
       "vendor": "xiaomi",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     },
     "oc-nemotron-super-free": {
       "cli": "opencode",
@@ -205,7 +216,8 @@
       "tier": "free",
       "cost": "free",
       "vendor": "nvidia",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     },
     "oc-go-beam-free": {
       "cli": "opencode",
@@ -214,7 +226,8 @@
       "tier": "opencode-go-free",
       "cost": "free",
       "vendor": "opencode",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     },
     "oc-or-laguna-free": {
       "cli": "opencode",
@@ -223,7 +236,8 @@
       "tier": "free",
       "cost": "free",
       "vendor": "opencode",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     },
     "oc-or-nemotron-ultra-free": {
       "cli": "opencode",
@@ -232,7 +246,8 @@
       "tier": "free",
       "cost": "free",
       "vendor": "nvidia",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     },
     "oc-or-free": {
       "cli": "opencode",
@@ -241,7 +256,8 @@
       "tier": "free",
       "cost": "free",
       "vendor": "opencode",
-      "level": 4
+      "level": 4,
+      "capacity": 4
     }
   },
   "health": {},
