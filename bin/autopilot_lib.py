@@ -756,6 +756,13 @@ def on_coordinator_account(r, m, a=None, ca=None):
     return bool(a) and account_of(m, a) == ca[1]
 
 
+def project_capacities(repo=None):
+    """state.json `capacity` of the current project: {"<key>": n}. Overrides the roster `capacity` of that key in
+    this project's draws only (owner, 2026-11-14)."""
+    repo = repo or find_repo(required=False)
+    return (load_state(repo) if repo else {}).get('capacity') or {}
+
+
 def project_excludes(repo=None):
     """state.json `exclude` of the current project: {"<key>" | "<cli>/<account>" | "<cli>": "<reason>"}."""
     repo = repo or find_repo(required=False)
@@ -804,15 +811,16 @@ def credit_left(r, acct):
     return max(0.0, min(1.0, (100 - float(u['used'])) / 100))
 
 
-def weight(r, m, acct):
+def weight(r, m, acct, capacity=None):
     """Draw weight of a candidate: its subscription (paid > paid? > free) times the remaining total usage of its
     subscription: the fraction of credit left on its account (unknown = neutral 0.5, near exhaustion = almost never)
     times the plan's relative size (models.json `capacity`, default 1; e.g. 12 for a plan with 12x the usage of the
-    smallest one). A big plan at half credit is drawn more often than a small plan at half credit, so every paid
+    smallest one; a project's state.json `capacity` {"<key>": n} overrides it for that project). A big plan at half credit is drawn more often than a small plan at half credit, so every paid
     subscription is spent in proportion to what it has left before its reset (owner, 2026-11-11)."""
     left = credit_left(r, acct)
     w = 0.5 if left is None else (0.02 if left < 0.1 else left)
-    return SUB_WEIGHT.get(m.get('subscription'), 0.7) * w * max(0.0, float(m.get('capacity') or 1))
+    cap = m.get('capacity') if capacity is None else capacity
+    return SUB_WEIGHT.get(m.get('subscription'), 0.7) * w * max(0.0, float(cap or 1))
 
 
 def rng(r=None):
@@ -850,6 +858,7 @@ def pool(r, name, ad=None, rand=None):
     rand = rand or rng(r)
     t = now()
     live, cooling, coord = [], [], []
+    pcap = project_capacities()
     for k in candidates(r, name, ad):
         m = r['models'][k]; a = ad[m['cli']]
         if on_coordinator_account(r, m, a):
@@ -858,7 +867,7 @@ def pool(r, name, ad=None, rand=None):
         if h and parse_time(h['until']) > t:
             cooling.append((h['until'], k))
         else:
-            live.append((weight(r, m, account_key(m, a)), k))
+            live.append((weight(r, m, account_key(m, a), pcap.get(k)), k))
     order = []
     while live:
         tot = sum(w for w, _ in live)
