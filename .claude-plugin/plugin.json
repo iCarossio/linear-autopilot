@@ -1,7 +1,7 @@
 {
   "name": "linear-autopilot",
   "version": "0.2.0",
-  "description": "Plan a project adversarially (pre-mortem by a flagship model of another vendor), create the Linear project, then implement it ticket by ticket: fast cheap models implement, balanced models review each round, flagships only plan; models drawn by the credit left on each subscription, on any AI coding CLI (Codex, Claude, opencode, Grok, Antigravity, ...), several accounts per CLI, never paying for extra credits.",
+  "description": "Plan a project adversarially (pre-mortem by a flagship model of another vendor), create the Linear project, then implement it ticket by ticket: balanced models implement and review each round (never the same model), flagships only plan; models drawn by the credit left on each subscription, on any AI coding CLI (Codex, Claude, opencode, Grok, Antigravity, ...), several accounts per CLI, never paying for extra credits.",
   "author": {"name": "Antoine Carossio"},
   "keywords": ["linear", "autopilot", "multi-model", "codex", "claude", "pre-mortem"]
 }

@@ -479,6 +479,7 @@ check "tokens: cached second run agrees" "$(TJ --period 7d | sed 's/.*grand=//')
 echo "{\"type\":\"assistant\",\"timestamp\":\"$NOW\",\"requestId\":\"r3\",\"message\":{\"id\":\"m3\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":1000,\"output_tokens\":0}}}" >> $TOK/claude/projects/p1/a.jsonl
 check "tokens: a grown log file is re-indexed" "$(TJ --period 7d | sed 's/.*grand=//')" "2968"
 $H/bin/tokens --cli fk-claude,fk-codex,fk-grok --html $SCR/tokens.html >/dev/null; check "tokens --html writes the page" "$(grep -c 'fk-codex' $SCR/tokens.html | awk '{print ($1>0)}')" "1"
+check "tokens --summary: today / 7 days / 30 days total" "$($H/bin/tokens --cli fk-claude,fk-codex,fk-grok --summary --json | python3 -c 'import json,sys; t=json.load(sys.stdin)["total"]; print(t["today"], t["7 days"], t["30 days"])')" "2968 2968 2968"
 $H/bin/tokens --cli nope >/dev/null 2>&1; check "tokens refuses an unknown --cli" "$?" "1"
 $H/bin/tokens --cli fk-claude --no-color --period 7d | grep -q 'total on the period: 1.17k tokens' && echo "ok   tokens terminal report" || { echo "FAIL tokens terminal report"; FAIL=$((FAIL+1)); }
 # docker-up with fake docker/orb binaries: a flag file stands for a daemon that answers.

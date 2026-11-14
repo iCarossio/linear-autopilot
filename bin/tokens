@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """tokens: total token consumption of every connected harness and account, from the logs the CLIs keep locally.
 
+  tokens --summary [--by harness|account] [--cli ...] [--json]
   tokens [--period 7d|12w|12m|5y|all] [--by account|harness] [--metric total|input|output|cached]
          [--cli codex,claude,...] [--models] [--json] [--html PATH] [--no-cache] [--no-color] [--width N]
+
+`--summary`: one table, total tokens per harness (or account) and in all, for today, the last 7 days and the
+last 30 days (today included).
 
 Periods: 7d = the last 7 days, one bar per day; 12w = per week (Monday start); 12m = per month; 5y = per year.
 `--period all` (and the HTML page by default) shows 7d, 12m and 5y. Buckets are in local time.
@@ -597,6 +601,32 @@ details { margin-top: 10px } summary { cursor: pointer; color: var(--ink2); font
 </script></body></html>''' % (css_vars(st_l), css_vars(st_d), css_vars(st_d), html.escape(generated), '\n'.join(secs), srcs)
 
 
+# ---------- summary: today / 7 days / 30 days ----------
+
+SUMMARY_WINDOWS = (('today', 1), ('7 days', 7), ('30 days', 30))
+
+
+def summary(recs, by, today):
+    days = {lbl: (today - dt.timedelta(days=n - 1)).strftime('%Y-%m-%d') for lbl, n in SUMMARY_WINDOWS}
+    rows = {}
+    for r in recs:
+        s = r[0] if by == 'harness' else r[1]
+        for lbl, _ in SUMMARY_WINDOWS:
+            if r[2] >= days[lbl]:
+                rows.setdefault(s, {l: 0 for l, _ in SUMMARY_WINDOWS})[lbl] += r[4] + r[6]
+    total = {l: sum(v[l] for v in rows.values()) for l, _ in SUMMARY_WINDOWS}
+    return {'by': by, 'since': days, 'rows': dict(sorted(rows.items(), key=lambda kv: -kv[1]['30 days'])), 'total': total}
+
+
+def print_summary(sm):
+    cols = [l for l, _ in SUMMARY_WINDOWS]
+    w = max([len(k) for k in sm['rows']] + [len(sm['by']), 5])
+    print('%-*s  %s' % (w, sm['by'], '  '.join('%10s' % c for c in cols)))
+    for k, v in sm['rows'].items():
+        print('%-*s  %s' % (w, k, '  '.join('%10s' % fmt(v[c]) for c in cols)))
+    print('%-*s  %s' % (w, 'TOTAL', '  '.join('%10s' % fmt(sm['total'][c]) for c in cols)))
+
+
 # ---------- main ----------
 
 def opt(args, name, default=None):
@@ -607,6 +637,20 @@ def main(argv):
     args = argv[1:]
     if '-h' in args or '--help' in args:
         print(__doc__); return 0
+    if '--summary' in args:
+        by = opt(args, '--by', 'harness')
+        if by not in ('account', 'harness'):
+            sys.exit('tokens: --by account|harness')
+        ad = lib.adapters(); reg = lib.load_reg() if os.path.exists(lib.REG) else {'models': {}}
+        today = dt.date.today()
+        clis = set((opt(args, '--cli') or '').split(',')) - {''}
+        recs, _ = collect(ad, reg, clis, (today - dt.timedelta(days=29)).strftime('%Y-%m-%d'), use_cache='--no-cache' not in args)
+        sm = summary(recs, by, today)
+        if '--json' in args:
+            print(json.dumps(sm, indent=1))
+        else:
+            print_summary(sm)
+        return 0
     period = opt(args, '--period', '7d')
     periods = ['7d', '12m', '5y'] if period == 'all' else [p.strip() for p in period.split(',')]
     for p in periods:

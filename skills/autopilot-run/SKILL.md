@@ -1,6 +1,6 @@
 ---
 name: autopilot-run
-description: Execute a planned Linear project autonomously over a long unattended session, ticket by ticket, about one commit per ticket. The coordinator (this session) only orchestrates. Every ticket is planned by the coordinator (Tier 1), plan-reviewed by a Tier 1 model of another vendor, implemented by a Tier 3 model and reviewed by one Tier 2 model, round after round until approved; inside a tier the model is drawn by the credit left on each paid subscription. Reuses every model the minute its quota resets, protects the coordinator's own account, and never pays for extra credits. Use when the user says "run the autopilot on <project>", "implement the Linear project", "/autopilot-run". To resume a run already set up, use /autopilot-continue. Requires a roster from /autopilot-init; a project planned with /autopilot-plan runs best but any Linear project works.
+description: Execute a planned Linear project autonomously over a long unattended session, ticket by ticket, about one commit per ticket. The coordinator (this session) only orchestrates. Every ticket is planned by the coordinator (Tier 1), plan-reviewed by a Tier 1 model of another vendor, implemented by a Tier 2 model and reviewed by another Tier 2 model, round after round until approved; inside a tier the model is drawn by the credit left on each paid subscription. Reuses every model the minute its quota resets, protects the coordinator's own account, and never pays for extra credits. Use when the user says "run the autopilot on <project>", "implement the Linear project", "/autopilot-run". To resume a run already set up, use /autopilot-continue. Requires a roster from /autopilot-init; a project planned with /autopilot-plan runs best but any Linear project works.
 ---
 
 # Autopilot: run
@@ -224,7 +224,7 @@ The owner's policy (README, "Tiers"); `run-model` and `bin/review` enforce it, y
 - **No speed variants.** A `-fast` / `build-fast` / "Fast" variant of a model family (e.g. `grok-4.7-build-fast`) is never drawn, whatever its tier: more expensive, no quality gain. The roster refuses it in every pool and by `--model`, and `discover` never switches to one. Never pass `--allow-fast` yourself: only the owner does. "Flash" / "Flash-Lite" are model families, not speed variants.
 - **Never pay more.** Subscriptions and free tiers only, never top-ups or paid per-token ids. A model that misbehaves (empty runs, ignores the output format, edits during review, loops) is cooled down automatically; if it repeats, exclude it with a reason (`bin/harness set <key> excluded "..."`) and log it in `changelog`.
 
-Watch quotas with `bin/run-model usage` (the `/autopilot-usage` skill explains the output). Expect whole accounts to go down together; `bin/harness check` says which roles are thin.
+Watch quotas with `bin/run-model usage` (the `/autopilot-status` skill explains the output). Expect whole accounts to go down together; `bin/harness check` says which roles are thin.
 
 ## Waiting (never stop because of credits)
 

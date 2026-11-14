@@ -1,79 +1,85 @@
 # linear-autopilot
 
-Plan a software project adversarially, create it in Linear, then let cheap models implement it ticket by ticket, reviewed by stronger models, unattended, on the AI coding CLIs you already pay for. Every role has its tier (see Tiers): flagships plan, balanced models review, fast and cheap models write the code.
+Plan a software project adversarially, create it in Linear, then let a fleet of models implement it ticket by ticket, reviewed by other models, unattended, on the AI coding subscriptions you already pay for.
 
-Eight skills for Claude Code (or any harness that reads `~/.claude/skills`):
+## Skills
+
+Skills for Claude Code (or any harness that reads `~/.claude/skills`):
 
 | Skill | When | What it does |
 |---|---|---|
-| `/autopilot-init` | once per machine | finds your CLIs (Codex, Claude Code, opencode, Grok, ...) and their accounts, asks once which subscriptions you pay for, assigns every model its tier and vendor, smoke-tests them, reads the quotas, and prints which models can take each role and what is missing |
-| `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by one Tier 1 model of another vendor, guardrails, then the Linear project with all tickets |
-| `/autopilot-milestone` | when the project grows | `/autopilot-plan` for an existing project: a new major milestone from new scope or from parked ideas (`/autopilot-milestone ENG-40,ENG-41`), its KPIs, a pre-mortem and plan review of the delta, your approval, then the Linear milestone, tickets and ETA bar |
-| `/autopilot-run` | per project, for hours | one ticket at a time: Tier 1 plan review, a Tier 3 implementer, one Tier 2 reviewer, again until approved, one commit, Linear updated; one progress bar and ETA per major milestone, mirrored on the Linear milestones |
-| `/autopilot-continue` | after a session ends | resumes a run exactly where it stopped: no setup questions, account and quotas refreshed, pipeline restarted, interrupted tickets recovered, then the `/autopilot-run` loop |
-| `/autopilot-idea` | any time | captures the owner's quick ideas, verbatim, in the project's "Ideas (unscheduled)" Linear milestone, out of the queue and every ETA; later promotes one or several into a real milestone (pre-mortem, plan review, approval) |
-| `/autopilot-status` | any time | every configured model with its subscription, the share of its short-term (5 h), weekly and monthly quota used and when each window resets, for every harness |
-| `/autopilot-usage` | any time | what quota is left on every CLI and account, which pools can run now, and how many tokens went through every harness and account (per day, month, year; terminal chart or HTML page) |
+| `/autopilot-init` | once per machine | finds your CLIs and their accounts, asks which subscriptions you pay for, gives every model its tier, smoke-tests them, prints what each role can use and what is missing |
+| `/autopilot-plan` | once per project | your plan and KPIs, a pre-mortem by a flagship of another vendor, guardrails, then the Linear project with milestones, tickets and dependencies |
+| `/autopilot-milestone` | when the project grows | the same treatment for a new milestone of an existing project, from new scope or from parked ideas |
+| `/autopilot-run` | per project, for hours | runs the tickets: plan, review the plan, implement, review the code, repeat until approved, one commit per ticket, Linear kept up to date |
+| `/autopilot-continue` | after a session ends | resumes a run where it stopped, without setup questions |
+| `/autopilot-idea` | any time | parks your quick ideas, verbatim, in an "Ideas (unscheduled)" milestone, out of every ETA, until you promote them |
+| `/autopilot-status` | any time | every configured model, its subscription, the share of its 5-hour, weekly and monthly quota used, and when each resets |
+| `/autopilot-usage` | any time | tokens consumed, in total and per harness, today, over the last 7 days and the last 30 days |
+
+## Methodology
+
+The autopilot exists because cheap models write good code when the work is planned well, cut small and checked by someone else, and because most subscriptions expire unused. Each rule below answers a way long agent runs fail.
+
+- **Planning with the brain.** Thinking is done by the strongest models; typing by cheaper ones. A Tier 1 flagship (the coordinator) plans the project and writes every ticket's brief; Tier 2 models implement and review it. The brain never writes code, the hands never decide scope.
+- **KPIs.** No plan starts without measurable expectations: each KPI has a target and a way to measure it (a command, a query, a count, a date). "Works well" is refused.
+- **Definition of done.** Every ticket carries its acceptance criteria and its checks (`CHECKS:` line). Done means the checks pass, a reviewer approved with no blocking finding, and the work is one commit on the project branch.
+- **Deadlines.** Every plan and milestone has a date. The ETA is a schedule of the remaining tickets (stages that run in parallel, one after the other), shown as one progress bar per milestone and mirrored on Linear.
+- **Pre-mortem.** Before any ticket exists, a flagship of another vendor is told "we are at the deadline and the project failed: why?". Each reason becomes a guardrail: a KPI, a check, a ticket or a rule.
+- **Adversarial review.** No model reviews its own work: the implementer of a ticket never reviews it, and the planner's vendor never reviews the plan. Enforced in code.
+- **Measurable and atomic tickets.** One ticket is one concern, about 400 changed lines at most, one commit, with the files it touches declared so parallel tickets never collide. Bigger is split, tiny is grouped.
+- **Model convergence.** A ticket loops implement → review → fix until the reviewer approves. After round 3 the implementer is escalated (a fresh Tier 2 model, or one tier up for a project pinned to Tier 3) instead of looping on the same mistakes. A review counts only if it parses, did not touch the code, and an "approve" carries no blocking finding.
+- **Long autonomous sessions.** A run lasts hours with you away. State lives on disk and in Linear, not in the conversation, so a new or compacted session resumes exactly (`/autopilot-continue`). Every change of plan is logged with its source (`bin/decision`). You are interrupted only for a CRITICAL alert.
+- **Spend what you pay for, never more.** Inside a tier, models are drawn by the credit left on each subscription, so every plan is used before its reset. Quota resets are reused the minute they happen; credits are never bought.
 
 ## Tiers
 
-The owner's tier table (November 2026) decides who does what. `bin/autopilot_lib.py` (`DEFAULT_TIER_TABLE`) carries it; `models.json` `tier_table` overrides it; `bin/harness add-model` and `run-model discover` use it to set an entry's `level`.
+The owner's tier table (`DEFAULT_TIER_TABLE` in `bin/autopilot_lib.py`, overridable in `models.json`) gives every model a level:
 
-| Tier | Examples | Role in the autopilot |
+| Tier | Examples | Role |
 |---|---|---|
-| 0 frontier ceiling | Claude Mythos / Fable, GPT-6 Astra, Gemini 4 Carbon | never selected automatically; `run-model --model KEY --allow-tier0` when the owner asks |
-| 1 flagship | Claude Opus, GPT-6.1 Sol, Gemini 4 Argon, GLM-5.3, Kimi K3, Qwen3.8-Max, DeepSeek V4 Pro | plan reviews, pre-mortems, milestone adversarial reviews, coordination; never implements; reviews ticket code only as the logged backup when no Tier 2 reviewer is eligible |
-| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 3.8 Flash, Grok 4.7, Grok 4.3, Qwen3.7-Plus, DeepSeek V4.1 Flash on OpenCode Go (owner, 2026-11-13) | the implementer and the reviewer of each round (two different models; owner, 2026-11-11) |
-| 3 fast and cheap | Claude Haiku, GPT-6 Luna, Gemini 3.5 Flash-Lite, GLM-5.3 Flash, Qwen3.7-Flash | implementation (round 1) and fix rounds 2-3 |
-| 4 small | every Mistral model, every free model, old Gemini, whatever the table says | trivial tasks only, never a reviewer |
+| 0 frontier | Claude Fable, GPT-6 Astra, Gemini 4 Carbon | never automatic; only with `--allow-tier0` |
+| 1 flagship | Claude Opus, GPT-6.1 Sol, Gemini 4 Argon, GLM-5.3, Kimi K3 | coordination, plan reviews, pre-mortems, milestone reviews; backup code reviewer |
+| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 3.8 Flash, Grok 4.7, DeepSeek V4.1 Flash | implement and review tickets (never the same model on one ticket) |
+| 3 fast | Claude Haiku, GPT-6 Luna, Gemini 3.5 Flash-Lite | implementation, only in a project pinned to it |
+| 4 small | Mistral, free models | trivial tasks only |
 
-**No speed variants.** A `-fast` / `build-fast` / "Fast" variant of a model family (e.g. `grok-4.7-build-fast`) is never used, whatever its tier: it costs more for the same quality (owner's rule, 2026-11-09). `bin/harness add-model` refuses it, `bin/harness init` drops it from the roster it writes, `run-model discover` skips it, and an entry already in the roster is refused at load, in every pool and by `--model`. Only the owner overrides it, explicitly, with `--allow-fast` (stored as `allow_fast: true` on the entry). "Flash" and "Flash-Lite" (Gemini, DeepSeek, GLM, Qwen) are model families, not speed variants: they keep their tier.
+Rules enforced in code:
 
-**Roles.** `models.json` `roles` maps each role to its levels (`implement`/`fix` 3, `review` 2, `plan_review`/`premortem`/`milestone_review`/`coordinate` 1, `trivial` 4); the code refuses a mapping that moves a role to another tier. One backup is built in (owner's rule, 2026-11-09): when no Tier 2 reviewer is eligible and healthy for a ticket (after escalation every Tier 2 model may have implemented it) or every one failed, `bin/review` draws the code reviewer from Tier 1, credit-weighted, never on the coordinator's own account and never a model that implemented the ticket, and logs it (`review fallback: Tier 2 exhausted -> Tier 1` on stderr, state.json `review_fallbacks`). The old pool names (`implement_critical`, `fix_mid`, `review_mid`, `review_high`, `implement_escalation`) are aliases of the roles. There are no hand-ordered pools.
+- **Roles keep their tier.** A tier out of quota waits for its reset; it never silently falls to another. One exception: when no Tier 2 reviewer is eligible, the code review falls back to Tier 1 (logged).
+- **Weighted draw.** A role's model is drawn at random among its tier, weighted by credit left, subscription (paid, unconfirmed, free) and an optional per-model `capacity` (overridable per project in `state.json`).
+- **Vendor's own CLI.** Anthropic through Claude Code, OpenAI through Codex, Google through Antigravity, Mistral through Vibe, xAI through Grok; other vendors through pi (OpenCode Go) or opencode (free models).
+- **No speed variants.** `-fast` variants cost more for the same quality and are refused (Flash and Flash-Lite are families, not speed variants).
+- **The coordinator's account is protected.** Detected at run time; models on it run last, for cheap roles only, while it keeps a reserve (30% of the 5-hour window, 20% of the weekly one).
+- **Latest versions.** `run-model discover --apply` (daily) finds newer model ids, smoke-tests them and switches the roster.
 
-**Selection.** A role's candidates are the valid roster entries of its tier whose CLI is installed and that are not excluded. `run-model` draws one at random, weighted by the credit left on its account (the latest `usage` reading; unknown is neutral, an account near exhaustion is almost never drawn) and by its subscription (paid 1, unconfirmed 0.7, free plan 0.25). The draw order is the fallback chain. `AUTOPILOT_SEED` makes it reproducible.
-
-**Vendor -> CLI.** A model is reached only through its vendor's own CLI: Anthropic through `claude`, OpenAI through `codex`, Google through `agy`, Mistral through `vibe`, xAI through `grok`, every other vendor through `pi` (OpenCode Go subscription: pi spends far fewer tokens than opencode on it) or `opencode` (reserved for opencode free models and OpenRouter `:free`). An entry that breaks it is refused at load, in every pool and by `--model`; `bin/harness add-model` will not create one.
-
-**Coordinator account.** Detected per session, never configured: an adapter's `coordinator_env` (Claude Code sets `CLAUDECODE`) names the CLI the coordinator runs in, its `account_env` in the coordinator's process names the account (unset = the CLI's default home); `AUTOPILOT_COORDINATOR=<cli>[/<account>]` overrides. `bin/run-model whoami --record` stores it in `state.json`. Entries on that exact account (another login of the same CLI is a normal account) run last, for cheap roles only, and only while the account keeps `coordinator_reserve` (default 30% of the 5-hour window and 20% of the weekly window left); below it the run is refused and a CRITICAL alert raised.
-
-**Subscriptions and exclusions.** `/autopilot-init` asks once, per account, what the owner pays for (`bin/harness subscription <cli> <account> paid|free|reserved --plan NAME`). `reserved` or `excluded: <reason>` removes an account or entry everywhere; a project's `state.json` `exclude` (`{"<key>|<cli>/<account>|<cli>": "<reason>"}`) removes it for that project only.
-
-**Latest version.** `run-model discover --apply` (and once a day from `usage --apply`) looks for a newer id of every versioned `family` per CLI (listing command, or generated next-version ids for a CLI without a listing, such as Claude), smoke-tests it through the entry's own account, switches every entry of that id, keeps the level unless the tier table names the new id, and logs it in `changelog`.
-
-`bin/harness check` prints, per role, the candidates with their tier, account, subscription, health and credit left, then every missing piece (a role without a candidate, a CLI not installed, a refused entry, an unknown subscription) with what to do.
+`bin/harness check` shows, per role, the candidates and what is missing.
 
 ## Supported harnesses
 
-One JSON adapter per CLI in `harnesses/`. "Accounts" means several logins of the same CLI, each its own quota, selected by an environment variable; "usage" is the quota probe; "tokens" is the local log `bin/tokens` reads to count consumption.
+One JSON adapter per CLI in `harnesses/`. Several logins of one CLI are several accounts, each with its own quota.
 
-| Harness | CLI | Accounts | Usage probe | Token log |
+| Harness | CLI | Accounts | Quota probe | Token log |
 |---|---|---|---|---|
-| OpenAI Codex | `codex` | `CODEX_HOME`: `~/.codex`, `~/.codex-b`, ... | rate limits in the session logs | session rollouts |
-| Claude Code | `claude` | `CLAUDE_CONFIG_DIR`: `~/.claude`, `~/.claude-b`, ... | `/usage` | project transcripts |
-| pi | `pi` | `PI_CODING_AGENT_DIR`: `~/.pi/agent`, `~/.pi/agent-b`, ... | OpenCode Go limits (shared with opencode) | session JSONL |
-| opencode | `opencode` | `XDG_DATA_HOME`: `~/.local/share`, `~/.local/share-b`, ... | none (quota errors) | SQLite store |
-| xAI Grok | `grok` | one login | interactive `/usage` only | session usage files |
-| Google Antigravity | `agy` | one login | `/usage` | brain transcripts |
-| Google Gemini CLI | `gemini` | one login | `/stats` only | chat recordings (untested); not used for models: Google models run only through `agy` |
-| Mistral Vibe | `vibe` | one login | interactive `/usage` only | none |
+| Claude Code | `claude` | `CLAUDE_CONFIG_DIR` | `/usage` | yes |
+| OpenAI Codex | `codex` | `CODEX_HOME` | session logs | yes |
+| Google Antigravity | `agy` | one | `/usage` | yes |
+| xAI Grok | `grok` | `GROK_HOME` | `/usage` | yes |
+| pi (OpenCode Go) | `pi` | `PI_CODING_AGENT_DIR` | OpenCode Go limits | yes |
+| opencode | `opencode` | `XDG_DATA_HOME` | none | yes |
+| Mistral Vibe | `vibe` | one | billing | no |
 
-Any other CLI with a non-interactive mode is added with `bin/harness new` (see `/autopilot-init`); accounts, usage and token logs are optional fields of the adapter. Under the vendor -> CLI rule a new CLI can serve only vendors that have no CLI of their own above, and only if it replaces `opencode` for them in `VENDOR_CLIS`.
+Add any other CLI with a non-interactive mode with `bin/harness new` (see `/autopilot-init`).
 
-## Principles
+## Under the hood
 
-1. **No plan without measurable KPIs.** The planning skill refuses to continue until every expectation has a number or a binary check.
-2. **Assume failure first.** Before any ticket exists, a Tier 1 model of another vendor answers one question: "we are at the deadline and we failed, why?". Every reason gets a guardrail with a home: a KPI, a check, a ticket or a rule.
-3. **A model never reviews its own work.** The implementer of a ticket, on any account or through any harness, is excluded from its review; the planner's vendor is excluded from the review of its plan. Enforced in code, not by prompt.
-4. **One implementer, one reviewer, and again.** Each round is one implementer then one Tier 2 reviewer that is not any implementer of the ticket (another vendor when a healthy one is available; a reviewer that fails is replaced by the next eligible one in the same call; Tier 1 is the logged backup when Tier 2 has none). A cheap model gets one implementation and two fixes: rounds 1-3 are Tier 3, and from round 4 `run-model` draws the implementer from Tier 2 by itself (`escalate_after_round` in `models.json`, default 3; never Tier 1), which then cannot review that ticket. A review counts only when it parses, the reviewer did not touch the tree, and an "approve" carries no blocking finding.
-5. **Every role has its tier, never another.** Tier 1 plans, pre-mortems, reviews milestones and coordinates; Tier 2 writes and reviews ticket code (never the same model for both); Tier 3 writes it only in a project pinned to it; Tier 4 only does trivial tasks. When a tier is out of quota the run waits for its reset or raises a CRITICAL alert: it never falls to another tier silently. The one exception is the ticket code review, which falls back to Tier 1 (logged) before waiting; the CRITICAL alert then fires only when neither Tier 2 nor Tier 1 has an eligible reviewer.
-6. **Max out what you pay for, never pay more.** Inside a tier, the model is drawn at random weighted by the credit left on its account, paid subscriptions before free plans, so every subscription is used up before its reset. Several logins of one CLI are several quotas. The runtime waits for a reset, claims the free Codex weekly resets by itself (`codex_auto_reset`), and never buys credits. A vendor out of quota on every account with no reset left is a CRITICAL alert (`bin/alert`, the top of `bin/eta`, a Linear project update) that the coordinator reports to you at once.
-7. **One account standard.** Homes are `<default>`, `<default>-b`, `<default>-c` (`~/.codex`, `~/.codex-b`, `~/.codex-c`); roster keys are `<key>`, `<key>-b`, `<key>-c`. Same for every harness.
-8. **The coordinator only orchestrates, and its account is protected.** It never implements or reviews. The account it runs on is detected at run time; models on that account run only as a last resort, for cheap roles, while its quota keeps a reserve, so the coordinator never runs out of credits. State lives on disk and in Linear; a new session resumes from there.
-9. **Milestones grow with the project.** A project has one or more major milestones, each with its KPIs, its Linear milestone and its own ETA bar. Adding one later is normal and goes through the same pre-mortem and plan review, scoped to the delta, before anything is created (`/autopilot-milestone`, on top of `bin/milestone add`). Ideas are not milestones: `/autopilot-idea` parks them unscheduled until the owner promotes them.
-10. **About one ticket per commit.** Small tickets, parallel worktrees, cherry-picked onto one project branch, nothing merged into the default branch without you.
-11. **The coordinator is not the clock.** `bin/pipeline run` moves every in-flight ticket on by itself (implement, rebase, checks, one review, the next fix round) and lists approvals for the coordinator to merge (`bin/pipeline merge`: rebase, squash, finish); `bin/pipeline status` shows each ticket's round, stage, model and the ETA bars.
-12. **Nothing personal in the repo.** Accounts, cooldowns and overrides live in `~/.config/linear-autopilot/`; project state in `<repo>/.autopilot/`.
+- **Pipeline.** `bin/pipeline` moves every in-flight ticket on by itself (implement, rebase, checks, review, next round) in parallel git worktrees; the coordinator only merges approvals (`bin/pipeline merge`).
+- **Milestones and ETA.** `bin/milestone` and `bin/eta`: one progress bar and ETA per major milestone, synced to Linear.
+- **Decision log.** `bin/decision`: every change of plan, with its source, in `PLAN.md`.
+- **Alerts.** `bin/alert`: CRITICAL alerts (a vendor out of quota everywhere, a role with no model), also posted on the Linear project.
+- **Quota recovery.** `run-model usage --apply` cools down exhausted models until their exact reset; free Codex weekly resets are claimed automatically (`codex_auto_reset`).
+- **Housekeeping.** `bin/docker-up` / `bin/docker-reap` keep the Docker daemon up and remove dead containers; `bin/bgrun` runs long commands under a stall watchdog.
+- **Nothing personal in the repo.** Roster, accounts and cooldowns live in `~/.config/linear-autopilot/`; project state in `<repo>/.autopilot/`.
 
 ## Install
 
@@ -81,17 +87,18 @@ Any other CLI with a non-interactive mode is added with `bin/harness new` (see `
 git clone https://github.com/iCarossio/linear-autopilot
 cd linear-autopilot && ./install.sh
 ```
-Then run `/autopilot-init` in your harness. Requirements: Python 3.9+, git, and the model CLIs you want to use, logged in.
+
+Then run `/autopilot-init`. Requires Python 3.9+, git, and the model CLIs you want to use, logged in.
 
 ## Layout
 
 ```
-skills/      the six SKILL.md files
-bin/         shared runtime (run-model, review, pipeline, premortem, decision, milestone, idea, eta, harness, linear, state, tokens, ...)
-harnesses/   one JSON adapter per CLI: how to call it, where its accounts live, how to read its usage
+skills/      one SKILL.md per skill
+bin/         shared runtime (run-model, pipeline, review, premortem, milestone, eta, tokens, harness, ...)
+harnesses/   one JSON adapter per CLI
 prompts/     briefs for implementers, reviewers and the pre-mortem
 templates/   example roster, state, plan and ticket
-references/  lessons from real runs, by symptom (lessons.md; lessons-codex-resets.md: Codex quota outage, automatic resets, stale usage)
+references/  lessons from real runs
 tests/       behavioural suite against a fake harness (no quota spent)
 ```
 
