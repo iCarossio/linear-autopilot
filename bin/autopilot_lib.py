@@ -609,7 +609,13 @@ def table_level(r, model_id):
 
 
 def forced_four(m, a=None):
-    """Why the owner's rule puts this entry at Tier 4 whatever its level says, or None."""
+    """Why the owner's rule puts this entry at Tier 4 whatever its level says, or None.
+
+    `owner_tier` on a roster entry is the owner's explicit, sourced exception (e.g. a free model the owner allows as a
+    Tier 2 reviewer): the entry then keeps its `level`. Set it only with the owner's words as its value.
+    """
+    if m.get('owner_tier'):
+        return None
     if vendor_of(m, a) == 'mistral':
         return 'Mistral model'
     if is_free_model(m):
