@@ -563,6 +563,7 @@ DEFAULT_TIER_TABLE = [
     {'match': r'qwen[\d.]+-max', 'level': 1}, {'match': r'deepseek-v[\d.]+-pro', 'level': 1},
     {'match': r'claude-sonnet', 'level': 2}, {'match': r'gpt-[\d.]+-terra', 'level': 2}, {'match': r'gemini-3\.8-flash(?!-lite)', 'level': 2},
     {'match': r'grok-4\.7', 'level': 2}, {'match': r'grok-4\.3', 'level': 2}, {'match': r'qwen[\d.]+-plus', 'level': 2},
+    {'match': r'opencode-go/deepseek-v[\d.]+-flash', 'level': 2, 'why': 'owner 2026-11-13: OpenCode Go DeepSeek Flash is Tier 2; the free id stays Tier 4'},
     {'match': r'claude-haiku', 'level': 3}, {'match': r'gpt-[\d.]+-luna', 'level': 3}, {'match': r'gemini-[\d.]+-flash-lite', 'level': 3},
     {'match': r'deepseek-v[\d.]+-flash', 'level': 3}, {'match': r'glm-[\d.]+-flash', 'level': 3}, {'match': r'qwen[\d.]+-flash', 'level': 3},
     {'match': r'glm-[\d.]+', 'level': 1},

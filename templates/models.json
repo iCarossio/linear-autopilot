@@ -149,7 +149,8 @@
       "tier": "opencode-go-flash",
       "cost": "cheap",
       "vendor": "deepseek",
-      "level": 3
+      "owner_note": "owner 2026-11-13: Tier 2 (implement and review)",
+      "level": 2
     },
     "oc-go-glm-flash": {
       "cli": "opencode",

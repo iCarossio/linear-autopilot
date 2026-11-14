@@ -21,8 +21,8 @@ The owner's tier table (November 2026) decides who does what. `bin/autopilot_lib
 |---|---|---|
 | 0 frontier ceiling | Claude Mythos / Fable, GPT-6 Astra, Gemini 4 Carbon | never selected automatically; `run-model --model KEY --allow-tier0` when the owner asks |
 | 1 flagship | Claude Opus, GPT-6.1 Sol, Gemini 4 Argon, GLM-5.3, Kimi K3, Qwen3.8-Max, DeepSeek V4 Pro | plan reviews, pre-mortems, milestone adversarial reviews, coordination; never implements; reviews ticket code only as the logged backup when no Tier 2 reviewer is eligible |
-| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 3.8 Flash, Grok 4.7, Grok 4.3, Qwen3.7-Plus | the implementer and the reviewer of each round (two different models; owner, 2026-11-11) |
-| 3 fast and cheap | Claude Haiku, GPT-6 Luna, Gemini 3.5 Flash-Lite, DeepSeek V4.1 Flash, GLM-5.3 Flash, Qwen3.7-Flash | implementation (round 1) and fix rounds 2-3 |
+| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 3.8 Flash, Grok 4.7, Grok 4.3, Qwen3.7-Plus, DeepSeek V4.1 Flash on OpenCode Go (owner, 2026-11-13) | the implementer and the reviewer of each round (two different models; owner, 2026-11-11) |
+| 3 fast and cheap | Claude Haiku, GPT-6 Luna, Gemini 3.5 Flash-Lite, GLM-5.3 Flash, Qwen3.7-Flash | implementation (round 1) and fix rounds 2-3 |
 | 4 small | every Mistral model, every free model, old Gemini, whatever the table says | trivial tasks only, never a reviewer |
 
 **No speed variants.** A `-fast` / `build-fast` / "Fast" variant of a model family (e.g. `grok-4.7-build-fast`) is never used, whatever its tier: it costs more for the same quality (owner's rule, 2026-11-09). `bin/harness add-model` refuses it, `bin/harness init` drops it from the roster it writes, `run-model discover` skips it, and an entry already in the roster is refused at load, in every pool and by `--model`. Only the owner overrides it, explicitly, with `--allow-fast` (stored as `allow_fast: true` on the entry). "Flash" and "Flash-Lite" (Gemini, DeepSeek, GLM, Qwen) are model families, not speed variants: they keep their tier.
